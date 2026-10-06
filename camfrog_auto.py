@@ -857,11 +857,23 @@ def commit_web(win, ctrl, text: str, require_fg: bool = True, restore: bool = Fa
 
 def press_button(btn):
     """Camfrog's CButtonTS buttons are owner-drawn and expose no UIA Invoke pattern: try Invoke,
-    then a real click (the window is already verified foreground by commit())."""
+    then background messages, then a real click."""
     try:
         btn.invoke()
+        return
     except Exception:
-        btn.click_input()
+        pass
+    handle = getattr(btn, "handle", 0)
+    if not handle and hasattr(btn, "element_info"):
+        handle = getattr(btn.element_info, "handle", 0)
+    if handle:
+        import ctypes
+        u = ctypes.windll.user32
+        u.PostMessageW(handle, 0x0201, 1, 0)
+        u.PostMessageW(handle, 0x0202, 0, 0)
+        time.sleep(0.05)
+        return
+    btn.click_input()
 
 
 def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None, restore: bool = False) -> bool:
@@ -876,9 +888,12 @@ def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=N
         return False
     user32 = ctypes.windll.user32
     prev = user32.GetForegroundWindow() if restore else 0
-    if require_fg and not foreground_ok(win):
+    
+    needs_foreground = require_fg and apply_btn is None
+    if needs_foreground and not foreground_ok(win):
         log.error(t("not_fg"))
         return False
+
     if apply_btn is not None:
         press_button(apply_btn)
     else:
