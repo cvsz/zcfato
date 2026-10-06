@@ -897,11 +897,21 @@ def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=N
     if apply_btn is not None:
         press_button(apply_btn)
     else:
-        ctrl.set_focus()
-        if require_fg and user32.GetForegroundWindow() != win.handle:  # focus stolen: do not type
-            log.error(t("not_fg"))
-            return False
-        ctrl.type_keys("{ENTER}")
+        if require_fg:
+            ctrl.set_focus()
+            if user32.GetForegroundWindow() != win.handle:  # focus stolen: do not type
+                log.error(t("not_fg"))
+                return False
+            ctrl.type_keys("{ENTER}")
+        else:
+            handle = getattr(ctrl, "handle", 0)
+            if not handle and hasattr(ctrl, "element_info"):
+                handle = getattr(ctrl.element_info, "handle", 0)
+            if handle:
+                ctypes.windll.user32.PostMessageW(handle, 0x0100, 0x0D, 0)
+                ctypes.windll.user32.PostMessageW(handle, 0x0101, 0x0D, 0)
+            else:
+                ctrl.send_keystrokes("{ENTER}")
     if prev and prev != win.handle and user32.IsWindow(prev):
         time.sleep(0.15)
         user32.SetForegroundWindow(prev)  # best effort: give focus back to what you were doing
@@ -1379,6 +1389,26 @@ class Runner:
                       s["restore_previous_window"])
 
     def resolve(self):
+        try:
+            self._do_resolve()
+        except LookupError as e:
+            if not self.cfg_path:
+                raise
+            log.warning(f"UI element missing ({e}). Auto-detecting and updating config...")
+            if cmd_detect(self.cfg, self.cfg_path, apply=True, as_json=False) == 0:
+                log.info("Auto-detect successfully updated config. Reloading...")
+                try:
+                    new_cfg = load_cfg(self.cfg_path)
+                    self.cfg = new_cfg
+                    self.apply_cfg(new_cfg)
+                except Exception as ex:
+                    log.error(f"Failed to reload after auto-detect: {ex}")
+                self._do_resolve()
+            else:
+                log.error("Auto-detect failed to find missing elements.")
+                raise
+
+    def _do_resolve(self):
         cfg = self.cfg
         st, ar = cfg["status"], cfg["autoreply"]
         self.win = get_window(cfg)

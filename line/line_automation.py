@@ -196,23 +196,36 @@ def _focused_profile_editor(hwnd, pid, field_match, field_label, activate=True,
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         win32gui.SetForegroundWindow(hwnd)
         time.sleep(activation_delay)
-    if win32gui.GetForegroundWindow() != hwnd:
-        raise AutomationError("The verified LINE window is not foreground; no profile field was changed.")
-    raw = IUIA().get_focused_element()
-    if raw is None:
-        raise AutomationError("LINE did not expose the focused control to Windows UI Automation.")
-    editor = UIAWrapper(UIAElementInfo(raw))
+        if win32gui.GetForegroundWindow() != hwnd:
+            raise AutomationError("The verified LINE window is not foreground; no profile field was changed.")
+        raw = IUIA().get_focused_element()
+        if raw is None:
+            raise AutomationError("LINE did not expose the focused control to Windows UI Automation.")
+        editor = UIAWrapper(UIAElementInfo(raw))
+    else:
+        from pywinauto import Desktop
+        target = Desktop(backend="uia").window(handle=hwnd)
+        matches = []
+        for ctrl in target.descendants(control_type="Edit"):
+            try:
+                if any(field_match(name) for name in accessible_context_names(ctrl.element_info)):
+                    matches.append(ctrl)
+            except Exception:
+                continue
+        if len(matches) != 1:
+            raise AutomationError(f"Could not identify exactly one {field_label} editor. found {len(matches)}")
+        editor = matches[0]
     info = editor.element_info
     if info.control_type != "Edit":
-        raise AutomationError(f"The focused control is not LINE's {field_label} editor.")
+        raise AutomationError(f"The control is not LINE's {field_label} editor.")
     try:
         focus_pid = info.process_id
         top_level = editor.top_level_parent().element_info.handle
     except Exception as exc:
         raise AutomationError("Could not verify which LINE control has focus.") from exc
     if focus_pid != pid or top_level != hwnd:
-        raise AutomationError("The focused field is not in the selected LINE window.")
-    if not any(field_match(name) for name in accessible_context_names(info)):
+        raise AutomationError("The field is not in the selected LINE window.")
+    if activate and not any(field_match(name) for name in accessible_context_names(info)):
         raise AutomationError(
             f"Windows could not confirm this is LINE's {field_label} field. No text was changed."
         )
@@ -243,7 +256,7 @@ def _verify_profile_value(hwnd, pid, expected, timeout=5.0):
     return False, "LINE did not expose the saved status text for verification."
 
 
-def set_profile_status(hwnd, pid, text, activation_delay=0.3, activate=True):
+def set_profile_status(hwnd, pid, text, activation_delay=0.3, activate=False):
     """Set and save only when UIA proves focus is LINE's Status message editor."""
     validate_status_text(text)
     from pywinauto import Desktop
@@ -289,7 +302,7 @@ def set_profile_status(hwnd, pid, text, activation_delay=0.3, activate=True):
                               verified=verified)
 
 
-def set_profile_display_name(hwnd, pid, text, activation_delay=0.3):
+def set_profile_display_name(hwnd, pid, text, activation_delay=0.3, activate=False):
     """Change LINE's profile name only when its specifically labeled editor is focused."""
     if not isinstance(text, str) or not text.strip() or len(text) > 100:
         raise AutomationError("Display name must contain 1–100 characters.")
@@ -302,7 +315,7 @@ def set_profile_display_name(hwnd, pid, text, activation_delay=0.3):
     from pywinauto import Desktop
 
     editor = _focused_profile_editor(
-        hwnd, pid, is_profile_name_context, "profile name", True, activation_delay
+        hwnd, pid, is_profile_name_context, "profile name", activate, activation_delay
     )
     target = Desktop(backend="uia").window(handle=hwnd)
     save_button = _find_save_button(target)
