@@ -124,7 +124,8 @@ def build_app():
             return th if ca.LANG == "th" else en
 
         def _translate_clipboard(self, text):
-            en, _, th = text.partition("|")
+            en, _, th = text.partition("||")
+            th, en = th.strip(), en.strip()
             return th if ca.LANG == "th" and th else en
 
         def _clipboard_error(self, exc):
@@ -403,7 +404,6 @@ def build_app():
                     )
                     if started:
                         return
-                    return
                 if self.worker_marker_path.exists() and not worker_pid:
                     self.worker_marker_path.unlink(missing_ok=True)
             except Exception as exc:
@@ -441,6 +441,10 @@ def build_app():
                         self.root.after_cancel(job)
                     except tk.TclError:
                         pass
+            try:
+                self.root.quit()
+            except tk.TclError:
+                pass
             try:
                 self.root.destroy()
             except tk.TclError:

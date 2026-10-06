@@ -795,6 +795,7 @@ def _clip_set(text):
     k.GlobalAlloc.restype, k.GlobalAlloc.argtypes = ctypes.c_void_p, [ctypes.c_uint, ctypes.c_size_t]
     k.GlobalLock.restype, k.GlobalLock.argtypes = ctypes.c_void_p, [ctypes.c_void_p]
     k.GlobalUnlock.argtypes = [ctypes.c_void_p]
+    k.GlobalFree.argtypes = [ctypes.c_void_p]
     u.SetClipboardData.argtypes = [ctypes.c_uint, ctypes.c_void_p]
     data = (text + "\0").encode("utf-16-le")
     if not u.OpenClipboard(None):
@@ -802,7 +803,12 @@ def _clip_set(text):
     try:
         u.EmptyClipboard()
         h = k.GlobalAlloc(0x0002, len(data))  # GMEM_MOVEABLE
+        if not h:
+            return False
         p = k.GlobalLock(h)
+        if not p:
+            k.GlobalFree(h)
+            return False
         ctypes.memmove(p, data, len(data))
         k.GlobalUnlock(h)
         return bool(u.SetClipboardData(13, h))
