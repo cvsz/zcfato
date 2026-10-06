@@ -358,53 +358,85 @@ def _element_value(element):
 
 
 def read_profile_status(hwnd, pid):
-    """Read one unambiguous status value beside its UIA label in the LINE window."""
+    """Read the current status value from the LINE profile window.
+
+    Strategy (in priority order):
+    1. Find the "Status message" label, then read sibling or child Edit/Text/Document controls.
+    2. Fall back to scanning all Edit descendants whose context names match STATUS_LABELS.
+    When multiple distinct values survive dedup, the first Edit-priority value wins.
+    """
     process = process_for_window(hwnd)
     if not process or process[0] != pid:
         raise AutomationError("The selected LINE window changed or closed.")
     from pywinauto import Desktop
 
     target = Desktop(backend="uia").window(handle=hwnd)
-    groups = []
     try:
         controls = target.descendants()
     except Exception as exc:
         raise AutomationError("Could not inspect LINE profile controls.") from exc
+
+    # Collect (priority, value) pairs.  priority 0 = Edit, 1 = Text/Document.
+    candidates = []
+
+    def _harvest(container, skip_control=None):
+        """Collect value candidates from children of *container*."""
+        try:
+            children = container.children() if hasattr(container, "children") else []
+        except Exception:
+            children = []
+        for child in children:
+            try:
+                if skip_control is not None and child == skip_control:
+                    continue
+                kind = child.control_type()
+                if kind not in ("Edit", "Text", "Document"):
+                    continue
+                vals = _element_value(child)
+                if vals:
+                    candidates.append((0 if kind == "Edit" else 1, vals[0]))
+            except Exception:
+                continue
+
+    # --- Strategy 1: label-sibling / label-child scan ---
     for control in controls:
         try:
             label = control.element_info.name
             if not is_status_name(label):
                 continue
+            # Search siblings of the status label.
             parent = control.element_info.parent
-            if parent is None:
-                continue
-            siblings = parent.children()
-            candidates = []
-            for sibling in siblings:
-                try:
-                    if sibling == control:
-                        continue
-                    kind = sibling.control_type()
-                    if kind not in ("Edit", "Text", "Document"):
-                        continue
-                    vals = _element_value(sibling)
-                    if vals:
-                        # Value controls are preferred over a duplicate accessible name.
-                        candidates.append((0 if kind == "Edit" else 1, vals[0]))
-                except Exception:
-                    continue
-            if candidates:
-                candidates.sort(key=lambda item: item[0])
-                best_kind = candidates[0][0]
-                best = list(dict.fromkeys(value for kind, value in candidates if kind == best_kind))
-                groups.extend(best)
+            if parent is not None:
+                _harvest(parent, skip_control=control)
+            # Also search children of the label itself (some LINE layouts nest the
+            # value inside the label group rather than beside it).
+            _harvest(control)
         except Exception:
             continue
-    values = list(dict.fromkeys(value for value in groups if value))
-    if len(values) != 1:
+
+    # --- Strategy 2: context-name fallback (Edit controls near status context) ---
+    if not candidates:
+        for control in controls:
+            try:
+                kind = control.element_info.control_type
+                if kind != "Edit":
+                    continue
+                if has_status_context(accessible_context_names(control.element_info)):
+                    vals = _element_value(control)
+                    if vals:
+                        candidates.append((0, vals[0]))
+            except Exception:
+                continue
+
+    if not candidates:
         raise AutomationError(
             "Could not read one unambiguous Status message value from this LINE profile view."
         )
+
+    # Deduplicate: prefer Edit-sourced values, then pick the first.
+    candidates.sort(key=lambda item: item[0])
+    best_kind = candidates[0][0]
+    values = list(dict.fromkeys(value for kind, value in candidates if kind == best_kind))
     return values[0]
 
 
