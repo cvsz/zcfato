@@ -259,10 +259,27 @@ def build_app():
                 raise SystemExit(2)
             ca.LANG = ca.resolve_lang(self.draft["language"])
             self.build()
-            self.root.protocol("WM_DELETE_WINDOW", self.root.destroy)
+            self._closing = False
+            self.root.protocol("WM_DELETE_WINDOW", self.close_app)
             self.root.bind("<Control-s>", lambda _e: self.save())
             self.root.after(150, self.pump)
             self.root.after(500, self.tick)
+
+        # ---- close
+        def close_app(self):
+            """Cleanly tear down all scheduled callbacks so the process exits."""
+            if self._closing:
+                return
+            self._closing = True
+            self.cancel_autosave()
+            try:
+                self.root.quit()
+            except Exception:
+                pass
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
 
         # ---- layout
         def build(self):
@@ -908,13 +925,15 @@ def build_app():
             threading.Thread(target=work, daemon=True).start()
 
         def pump(self):
+            if self._closing:
+                return
             try:
                 while True:
                     kind, rc, out = self.q.get_nowait()
                     self.busy = False
                     self.say(out.splitlines()[-1] if out else ca.t("ok"), rc not in (0, None))
                     if kind == "start" and rc == 0 and getattr(self, "_close_after", False):
-                        self.root.destroy()  # bot keeps running hidden; reopen the GUI any time
+                        self.close_app()  # bot keeps running hidden; reopen the GUI any time
                         return
                     if kind in ("helper", "detect") and out:
                         if kind == "detect" and rc == 0:
@@ -924,7 +943,8 @@ def build_app():
                     self.refresh_state()
             except queue.Empty:
                 pass
-            self.root.after(150, self.pump)
+            if not self._closing:
+                self.root.after(150, self.pump)
 
         @staticmethod
         def set_text(widget, text):
@@ -935,6 +955,8 @@ def build_app():
 
         # ---- live state
         def tick(self):
+            if self._closing:
+                return
             self.refresh_state()
             cfg = self.model.cfg
             txt = tail_text(ca.BASE / cfg["log"]["file"]) if cfg["log"]["file"] else ""
@@ -942,7 +964,8 @@ def build_app():
                 self.last_log = txt
                 self.set_text(self.log, txt)
                 self.log.see("end")
-            self.root.after(1500, self.tick)
+            if not self._closing:
+                self.root.after(1500, self.tick)
 
         def refresh_state(self):
             cfg = self.model.cfg
