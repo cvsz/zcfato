@@ -1,49 +1,17 @@
-# Environment and secrets
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-
-# Dependencies
-node_modules/
 .venv/
-venv/
-__pycache__/
-*.py[cod]
-
-# Build output
-dist/
 build/
-coverage/
-.next/
-.nuxt/
-.out/
-
-# Tool caches
-.cache/
+dist/
+__pycache__/
 .pytest_cache/
-.mypy_cache/
-.ruff_cache/
-.eslintcache
-
-# IDE / OS
-.DS_Store
-Thumbs.db
-.idea/
-.vscode/*
-!.vscode/extensions.json
-!.vscode/settings.json
-
-# Logs
 *.log
-logs/
+controls.txt
+STOP
+*.pid
+stats.json
+*.zip
+*.spec
+status_history.json
+*.tmp
 
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.*
-
-# Local runtime data
-.tmp/
-tmp/
+camfrog-status-runtime.json
+camfrog_status_changer_stats.json

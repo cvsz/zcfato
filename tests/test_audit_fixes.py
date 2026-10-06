@@ -1,0 +1,177 @@
+"""Regression tests for the audit fixes (offline, no Windows)."""
+import copy
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import camfrog_auto as c  # noqa: E402
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def cfg():
+    x = c.load_cfg(ROOT / "config.json")
+    x["dry_run"] = True  # tests must not depend on the user's live settings in the shipped config
+    x["autoreply"]["own_nickname"] = ""
+    return x
+
+
+@pytest.fixture(autouse=True)
+def _iso(tmp_path, monkeypatch):
+    monkeypatch.setattr(c, "BASE", tmp_path)
+    monkeypatch.setattr(c.time, "sleep", lambda *_a: None)   # no real reply delays in tests
+    c.LANG = "en"
+
+
+def test_history_keeps_newcomer_when_full(tmp_path):
+    h = c.StatusHistory(tmp_path / "h.json", 5)
+    for i in range(5):
+        h.record(f"s{i}")
+    h.record("brand new")
+    assert h.find("brand new")["count"] == 1
+    assert len(h.items) == 5
+
+
+def test_shipped_skip_pattern_catches_embedded_thai(cfg):
+    sk = c.compile_skips(cfg["autoreply"])
+    assert c.is_skipped("สมัครเว็บพนันฟรี", sk, True) == "pattern"
+    assert c.is_skipped("get FREE MONEY now", sk, True) == "pattern"
+    assert c.is_skipped("freemoneyless", sk, True) is None
+
+
+def test_selector_clash_warns_in_dry_and_errors_live(cfg):
+    cfg["status"]["edit"] = dict(cfg["autoreply"]["history"])  # force a clash (new defaults are distinct)
+    assert c.selector_clashes(cfg) == [("status.edit", "autoreply.history")]
+    errs, warns = c.validate(cfg)
+    assert not errs and any("identical" in w for w in warns)
+    live = copy.deepcopy(cfg)
+    live["dry_run"] = False
+    errs, _ = c.validate(live)
+    assert any("identical" in e for e in errs)
+    live["autoreply"]["history"] = {"control_type": "Edit", "auto_id": "9", "index": 0}
+    live["autoreply"]["input"] = {"control_type": "Edit", "auto_id": "8", "index": 0}
+    assert c.selector_clashes(live) == []
+
+
+@pytest.mark.parametrize("path,val", [
+    (("poll_seconds",), 0), (("poll_seconds",), -1), (("poll_seconds",), "x"),
+    (("safety", "max_consecutive_failures"), 0), (("status", "max_length"), 0),
+    (("autoreply", "max_reply_length"), 0), (("poll_seconds",), True),
+])
+def test_numeric_ranges(cfg, path, val):
+    cfg = copy.deepcopy(cfg)
+    d = cfg
+    for k in path[:-1]:
+        d = d[k]
+    d[path[-1]] = val
+    errs, _ = c.validate(cfg)
+    assert errs
+
+
+def test_clip_never_splits_thai_cluster():
+    assert c.clip("เก", 1) == ""            # lead vowel + consonant stay together
+    assert c.clip("กี่กี่", 3) == "กี่"      # consonant + vowel + tone (3 code points) stay together
+    assert c.clip("กี่กี่", 2) == ""
+    assert c.clip("abc", 2) == "ab" and c.clip("abc", 9) == "abc"
+    assert c.safe_reply("เก" * 5, "x", 3) == "เก"
+
+
+class _Ctrl:
+    def __init__(self, text=""):
+        self.t, self.keys = text, []
+
+    def set_edit_text(self, v):
+        self.t = v
+
+    def window_text(self):
+        return self.t
+
+    def set_focus(self):
+        pass
+
+    def type_keys(self, k):
+        self.keys.append(k)
+
+
+class _Win:
+    handle = 111
+
+    def set_focus(self):
+        pass
+
+
+class _User32:
+    def __init__(self, seq):
+        self.seq = list(seq)
+
+    def GetForegroundWindow(self):
+        return self.seq.pop(0) if len(self.seq) > 1 else self.seq[0]
+
+
+class _Dll:
+    def __init__(self, seq):
+        self.user32 = _User32(seq)
+
+
+def test_commit_aborts_if_focus_stolen_before_enter(monkeypatch):
+    # fg ok during foreground_ok(), stolen right before the keystroke
+    monkeypatch.setattr(c.ctypes, "windll", _Dll([111, 999]), raising=False)
+    ctrl = _Ctrl()
+    assert c.commit(_Win(), ctrl, "hi", False, True) is False
+    assert ctrl.keys == []
+
+
+def test_commit_sends_when_focus_stable(monkeypatch):
+    monkeypatch.setattr(c.ctypes, "windll", _Dll([111]), raising=False)
+    ctrl = _Ctrl()
+    assert c.commit(_Win(), ctrl, "hi", False, True) is True
+    assert ctrl.keys == ["{ENTER}"]
+
+
+def test_pid_reuse_guard(monkeypatch):
+    monkeypatch.setattr(c.os, "name", "nt")
+    assert c.pid_is_ours(1, r"C:\Windows\explorer.exe") is False
+    assert c.pid_is_ours(1, r"C:\x\camfrog-auto.exe") is True
+    assert c.pid_is_ours(1, r"C:\Python313\pythonw.exe") is True
+    assert c.pid_is_ours(1, "") is True        # unknown -> old behaviour
+
+
+def test_stop_ignores_stranger_pid(cfg, monkeypatch, tmp_path):
+    (tmp_path / cfg["safety"]["pid_file"]).write_text("4242")
+    monkeypatch.setattr(c, "pid_alive", lambda p: True)
+    monkeypatch.setattr(c, "pid_is_ours", lambda p, image=None: False)
+    called = []
+    monkeypatch.setattr(c.subprocess, "run", lambda *a, **k: called.append(a))
+    assert c.cmd_stop(cfg) == 0
+    assert called == []                          # nothing killed
+    assert not (tmp_path / cfg["safety"]["pid_file"]).exists()
+
+
+def _runner(cfg, monkeypatch=None):
+    r = c.Runner(cfg)
+    r.history = _Ctrl()
+    r.input = _Ctrl()
+    r.win = _Win()
+    r.dry = True
+    return r
+
+
+def test_backlog_burst_is_not_answered(cfg):
+    r = _runner(cfg)
+    r.own = "me"
+    r.history.t = "\n".join(f"u{i}: hello" for i in range(c.RESET_BURST + 5))
+    r.do_chat(True)
+    assert r.sent == []
+    r.history.t += "\nzed: hello"
+    r.do_chat(True)
+    assert len(r.sent) == 1
+
+
+def test_hot_reload_keeps_rule_cooldown(cfg):
+    r = _runner(cfg)
+    r.rules[0]["last"] = 123.0
+    r.apply_cfg(copy.deepcopy(cfg))
+    assert r.rules[0]["last"] == 123.0
