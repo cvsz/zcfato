@@ -1,6 +1,10 @@
 """Tk-free behavior tests for the compact Camfrog status changer."""
+import ctypes
+import os
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import camfrog_status_gui as gui  # noqa: E402
@@ -50,3 +54,52 @@ def test_text_to_message_and_message_to_text():
 
     assert gui.message_to_text({"th": "th", "en": "en"}) == "th || en"
     assert gui.message_to_text("plain") == "plain"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows mutex test")
+def test_single_instance_guard_first_acquire_succeeds(monkeypatch):
+    """First acquire() succeeds when mutex doesn't exist."""
+    mock_kernel32 = type("K32", (), {
+        "CreateMutexW": lambda *a, **k: 1,
+        "CloseHandle": lambda *a: None,
+    })()
+    mock_kernel32.CreateMutexW.argtypes = ()
+    mock_kernel32.CreateMutexW.restype = ctypes.c_void_p
+    mock_kernel32.CloseHandle.argtypes = ()
+    mock_kernel32.CloseHandle.restype = ctypes.c_int
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: mock_kernel32)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 0)
+
+    guard = gui.SingleInstanceGuard("TestMutexFirst")
+    assert guard.acquire() is True
+    guard.release()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows mutex test")
+def test_single_instance_guard_blocks_second_instance(monkeypatch):
+    """Second acquire() returns False when ERROR_ALREADY_EXISTS."""
+    mock_kernel32 = type("K32", (), {
+        "CreateMutexW": lambda *a, **k: 1,
+        "CloseHandle": lambda *a: None,
+    })()
+    mock_kernel32.CreateMutexW.argtypes = ()
+    mock_kernel32.CreateMutexW.restype = ctypes.c_void_p
+    mock_kernel32.CloseHandle.argtypes = ()
+    mock_kernel32.CloseHandle.restype = ctypes.c_int
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: mock_kernel32)
+    errors = [0, 183]
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: errors.pop(0))
+
+    guard = gui.SingleInstanceGuard("TestMutexSecond")
+    assert guard.acquire() is True
+    assert guard.acquire() is False
+    guard.release()
+
+
+def test_single_instance_guard_non_windows_always_succeeds(monkeypatch):
+    """On non-Windows, acquire() always returns True."""
+    monkeypatch.setattr(os, "name", "posix")
+
+    guard = gui.SingleInstanceGuard("TestMutexLinux")
+    assert guard.acquire() is True
+    guard.release()
