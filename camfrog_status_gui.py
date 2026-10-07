@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import camfrog_auto as ca
+from camfrog_tray import TrayIcon
 from clipboard_support import ClipboardController
 
 
@@ -55,6 +56,7 @@ def runtime_config(config):
     runtime.setdefault("autoreply_im", {})["enabled"] = False
     runtime["stats"]["file"] = "camfrog_status_changer_stats.json"
     runtime["log"]["file"] = "camfrog_status_changer.log"
+    runtime.setdefault("safety", {})["require_foreground"] = False
     return runtime
 
 
@@ -73,10 +75,10 @@ def build_app():
             self.worker_marker_path = self.config_path.with_name(WORKER_MARKER.name)
             self.root = tk.Tk()
             self.root.title("Camfrog Status Changer")
-            self.root.geometry("210x470")
+            self.root.geometry("220x505")
             self.root.resizable(False, False)
-            self.root.minsize(210, 470)
-            self.root.maxsize(210, 470)
+            self.root.minsize(220, 505)
+            self.root.maxsize(220, 505)
             try:
                 self.root.iconbitmap(str(ca.BASE / "app.ico"))
             except (tk.TclError, OSError):
@@ -88,6 +90,7 @@ def build_app():
             self.state_job = None
             self.save_job = None
             self.mode = "random"
+            self.entry_widgets = []
             try:
                 self.config = ca.load_cfg(self.config_path)
             except Exception as exc:
@@ -107,9 +110,18 @@ def build_app():
             self.clipboard_controller = ClipboardController(
                 self.root, translate=self._translate_clipboard, on_error=self._clipboard_error)
             self.clipboard_controller.install(self.root)
-            self.root.protocol("WM_DELETE_WINDOW", self.close_app)
+            self.tray = TrayIcon(
+                self.root,
+                "Camfrog Status Changer",
+                on_show=self.show_from_tray,
+                on_exit=self.exit_app,
+                icon_path=str(ca.BASE / "app.ico"),
+            )
+            self.root.protocol("WM_DELETE_WINDOW", self.on_close)
             self.task_poll_job = self.root.after(100, self.poll_task_results)
             self.state_job = self.root.after(500, self.refresh_state)
+            if self.config.get("status", {}).get("enabled", True):
+                self.root.after(400, self._auto_start_if_idle)
 
         def _load_fields(self):
             for var, message in zip(self.fields, self.config["status"]["messages"][:STATUS_SLOTS]):
@@ -164,7 +176,7 @@ def build_app():
             self.tabs.bind("<<NotebookTabChanged>>", self._tab_changed)
 
             self.note = ttk.Label(outer, text="", font=("Segoe UI", 7), anchor="center",
-                                  foreground="#53636d", wraplength=164)
+                                  foreground="#53636d", wraplength=190)
             self.note.pack(fill="x", pady=(4, 2))
             ttk.Label(outer, text="CAMFROG AUTO", style="Brand.TLabel",
                       anchor="center").pack(fill="x")
@@ -195,16 +207,22 @@ def build_app():
                     row=index, column=0, sticky="w", pady=3)
                 entry = ttk.Entry(entries, textvariable=var, width=13)
                 entry.grid(row=index, column=1, sticky="ew", pady=3)
+                self.entry_widgets.append((entry, var))
             entries.columnconfigure(1, weight=1)
 
             buttons = ttk.Frame(page)
-            buttons.pack(fill="x", pady=(5, 0))
-            ttk.Button(buttons, text=self._tr("Enable", "เปิด"),
+            buttons.pack(fill="x", pady=(4, 0))
+            ttk.Button(buttons, text=self._tr("Apply Now", "ใช้ทันที"),
+                       command=self.apply_now).pack(
+                           fill="x", pady=(0, 3))
+            row2 = ttk.Frame(buttons)
+            row2.pack(fill="x")
+            ttk.Button(row2, text=self._tr("Enable", "เปิด"),
                        command=lambda m=mode: self.set_enabled(m, True)).pack(
-                           side="left", fill="x", expand=True, padx=(0, 3))
-            ttk.Button(buttons, text=self._tr("Disable", "ปิด"),
+                           side="left", fill="x", expand=True, padx=(0, 2))
+            ttk.Button(row2, text=self._tr("Disable", "ปิด"),
                        command=lambda: self.set_enabled(mode, False)).pack(
-                           side="left", fill="x", expand=True, padx=(3, 0))
+                           side="left", fill="x", expand=True, padx=(2, 0))
 
         def _tab_changed(self, _event=None):
             try:
@@ -259,6 +277,69 @@ def build_app():
             except (OSError, ValueError, KeyError) as exc:
                 self.note.configure(text=str(exc), foreground="#a52834")
                 return None
+
+        def apply_now(self):
+            """Immediately apply the selected or first configured status to Camfrog."""
+            config = self.save_settings()
+            if config is None:
+                return
+
+            chosen = None
+            try:
+                focused = self.root.focus_get()
+                for entry, var in self.entry_widgets:
+                    if entry == focused:
+                        val = var.get().strip()
+                        if val:
+                            chosen = val
+                            break
+            except Exception:
+                pass
+
+            if not chosen:
+                msgs = messages_from_slots(var.get() for var in self.fields)
+                if msgs:
+                    chosen = msgs[0]
+
+            if not chosen:
+                self.note.configure(text=self._tr("Enter a status text to apply.",
+                                                  "กรอกข้อความสถานะที่จะใช้"),
+                                    foreground="#a52834")
+                return
+
+            if isinstance(chosen, dict):
+                status_str = chosen.get(ca.LANG, "") or chosen.get("th") or chosen.get("en") or ""
+            else:
+                status_str = str(chosen)
+
+            def do_apply():
+                cfg = ca.load_cfg(self.config_path)
+                cfg_copy = copy.deepcopy(cfg)
+                cfg_copy.setdefault("safety", {})["require_foreground"] = False
+                try:
+                    return ca.cmd_status(cfg_copy, status_str)
+                except LookupError:
+                    if ca.cmd_detect(cfg, self.config_path, apply=True) == 0:
+                        cfg = ca.load_cfg(self.config_path)
+                        cfg_copy = copy.deepcopy(cfg)
+                        cfg_copy.setdefault("safety", {})["require_foreground"] = False
+                        return ca.cmd_status(cfg_copy, status_str)
+                    raise
+
+            display_preview = status_str[:22] + "…" if len(status_str) > 22 else status_str
+            self.run_task(do_apply, self._tr(f"Applied: {display_preview}",
+                                             f"เปลี่ยนสถานะแล้ว: {display_preview}"))
+
+        def _auto_start_if_idle(self):
+            try:
+                config = ca.load_cfg(self.config_path)
+                if not config.get("status", {}).get("enabled", False):
+                    return
+                main_pid = ca.running_pid(config)
+                if not main_pid:
+                    self._start_worker(config)
+            except Exception as exc:
+                logging.debug("Auto-start check failed: %s", exc)
 
         def set_enabled(self, mode, enabled):
             config = self.save_settings(enabled=enabled, mode=mode)
@@ -380,6 +461,36 @@ def build_app():
                 except tk.TclError:
                     pass
 
+        def on_close(self):
+            if getattr(self, "tray", None) and self.tray.active:
+                self.hide_to_tray()
+            else:
+                self.exit_app()
+
+        def hide_to_tray(self):
+            try:
+                self.root.withdraw()
+                self.note.configure(
+                    text=self._tr("Hidden in system tray. Click icon to restore.",
+                                  "ซ่อนใน system tray แล้ว คลิกไอคอนเพื่อเปิด"),
+                    foreground="#53636d",
+                )
+            except tk.TclError:
+                pass
+
+        def show_from_tray(self):
+            try:
+                self.root.deiconify()
+                self.root.lift()
+                self.root.focus_force()
+            except tk.TclError:
+                pass
+
+        def exit_app(self):
+            if getattr(self, "tray", None):
+                self.tray.shutdown()
+            self.close_app()
+
         def close_app(self):
             """Exit fully, stopping only the status-only worker this window owns."""
             if self.busy:
@@ -428,6 +539,8 @@ def build_app():
                     foreground="#a52834")
 
         def _finalize_close(self):
+            if getattr(self, "tray", None):
+                self.tray.shutdown()
             if self.save_job is not None:
                 try:
                     self.root.after_cancel(self.save_job)

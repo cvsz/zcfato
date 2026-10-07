@@ -20,3 +20,33 @@ def test_status_changer_has_ten_slots_and_saves_only_visible_slots():
 
 def test_status_changer_parses_one_language_without_losing_it():
     assert gui.messages_from_slots([" ไทย || ", " || English "]) == ["ไทย", "English"]
+
+
+def test_runtime_config_disables_autoreply_and_sets_background_mode():
+    base_cfg = {
+        "autoreply": {"enabled": True},
+        "autoreply_im": {"enabled": True},
+        "stats": {"file": "stats.json"},
+        "log": {"file": "log.txt"},
+        "safety": {"require_foreground": True},
+    }
+    rt = gui.runtime_config(base_cfg)
+    assert rt["autoreply"]["enabled"] is False
+    assert rt["autoreply_im"]["enabled"] is False
+    assert rt["safety"]["require_foreground"] is False
+    assert rt["stats"]["file"] == "camfrog_status_changer_stats.json"
+    assert rt["log"]["file"] == "camfrog_status_changer.log"
+    # Ensure original config is not mutated
+    assert base_cfg["autoreply"]["enabled"] is True
+    assert base_cfg["safety"]["require_foreground"] is True
+
+
+def test_text_to_message_and_message_to_text():
+    assert gui.text_to_message("hello") == "hello"
+    assert gui.text_to_message("  ") is None
+    assert gui.text_to_message("th || en") == {"th": "th", "en": "en"}
+    assert gui.text_to_message("th || ") == "th"
+    assert gui.text_to_message(" || en") == "en"
+
+    assert gui.message_to_text({"th": "th", "en": "en"}) == "th || en"
+    assert gui.message_to_text("plain") == "plain"

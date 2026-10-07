@@ -24,7 +24,7 @@
   "safety": {
     "stop_file": "STOP",
     "pid_file": "camfrog_auto.pid",
-    "require_foreground": true,
+    "require_foreground": false,
     "restore_previous_window": true,
     "max_consecutive_failures": 5
   },
