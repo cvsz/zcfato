@@ -60,9 +60,9 @@ def test_text_to_message_and_message_to_text():
 def test_single_instance_guard_first_acquire_succeeds(monkeypatch):
     """First acquire() succeeds when mutex doesn't exist."""
     mock_kernel32 = type("K32", (), {
-        "CreateMutexW": lambda *a, **k: 1,
-        "CloseHandle": lambda *a: None,
-    })()
+        "CreateMutexW": staticmethod(lambda *a, **k: 1),
+        "CloseHandle": staticmethod(lambda *a: None),
+    })
     mock_kernel32.CreateMutexW.argtypes = ()
     mock_kernel32.CreateMutexW.restype = ctypes.c_void_p
     mock_kernel32.CloseHandle.argtypes = ()
@@ -79,9 +79,9 @@ def test_single_instance_guard_first_acquire_succeeds(monkeypatch):
 def test_single_instance_guard_blocks_second_instance(monkeypatch):
     """Second acquire() returns False when ERROR_ALREADY_EXISTS."""
     mock_kernel32 = type("K32", (), {
-        "CreateMutexW": lambda *a, **k: 1,
-        "CloseHandle": lambda *a: None,
-    })()
+        "CreateMutexW": staticmethod(lambda *a, **k: 1),
+        "CloseHandle": staticmethod(lambda *a: None),
+    })
     mock_kernel32.CreateMutexW.argtypes = ()
     mock_kernel32.CreateMutexW.restype = ctypes.c_void_p
     mock_kernel32.CloseHandle.argtypes = ()
