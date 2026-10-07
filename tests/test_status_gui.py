@@ -3,6 +3,7 @@ import ctypes
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -161,3 +162,68 @@ def test_infinite_loop_validation_mirrors_core():
     cfg["status"]["marquee"]["infinite_loop"] = False
     errs, _ = gui.validate(cfg)
     assert any("marquee" in e for e in errs)
+
+
+@pytest.mark.parametrize("module_name", ["camfrog_auto", "camfrog_status_gui"])
+def test_experimental_combo_enter_targets_only_verified_parent(module_name, monkeypatch):
+    module = __import__(module_name)
+    sent = []
+    user32 = SimpleNamespace(PostMessageW=lambda *args: sent.append(args) or 1)
+    monkeypatch.setattr(module.ctypes, "windll", SimpleNamespace(user32=user32), raising=False)
+    combo = SimpleNamespace(class_name="CComboBoxTS", handle=77)
+    edit = SimpleNamespace(handle=88, element_info=SimpleNamespace(parent=combo))
+
+    module._background_enter(edit, "combo")
+    assert sent == [(77, 0x0100, 0x0D, 0), (77, 0x0101, 0x0D, 0)]
+    sent.clear()
+    module._background_enter(edit)
+    assert sent == [(88, 0x0100, 0x0D, 0), (88, 0x0101, 0x0D, 0)]
+
+    sent.clear()
+    edit.element_info.parent = SimpleNamespace(class_name="Edit", handle=99)
+    with pytest.raises(LookupError, match="CComboBoxTS"):
+        module._background_enter(edit, "combo")
+    assert not sent
+
+
+@pytest.mark.parametrize("module_name", ["camfrog_auto", "camfrog_status_gui"])
+def test_combo_enter_fails_closed_when_parent_has_no_handle(module_name, monkeypatch):
+    module = __import__(module_name)
+    sent = []
+    user32 = SimpleNamespace(PostMessageW=lambda *args: sent.append(args) or 1)
+    monkeypatch.setattr(module.ctypes, "windll", SimpleNamespace(user32=user32), raising=False)
+    ctrl = SimpleNamespace(element_info=SimpleNamespace(parent=SimpleNamespace(
+        class_name="CComboBoxTS", handle=0)))
+    with pytest.raises(LookupError, match="no HWND"):
+        module._background_enter(ctrl, "combo")
+    assert not sent
+
+
+@pytest.mark.parametrize("module_name", ["camfrog_auto", "camfrog_status_gui"])
+def test_invalid_background_enter_target_is_rejected(module_name):
+    import copy
+    module = __import__(module_name)
+    cfg = copy.deepcopy(module.DEFAULTS)
+    cfg["status"]["messages"] = ["test"]
+    cfg["status"]["background_enter_target"] = "other"
+    errors, _ = module.validate(cfg)
+    assert any("background_enter_target" in e for e in errors)
+
+
+def test_runner_uses_combo_target_for_status_only(tmp_path, monkeypatch):
+    import camfrog_auto as core
+    import copy
+    cfg = copy.deepcopy(core.DEFAULTS)
+    cfg["status"]["messages"] = ["test"]
+    cfg["status"]["history"]["enabled"] = False
+    cfg["status"]["background_enter_target"] = "combo"
+    monkeypatch.setattr(core, "BASE", tmp_path)
+    runner = core.Runner(cfg)
+    runner.win = object()
+    runner.status_edit = object()
+    calls = []
+    monkeypatch.setattr(core, "commit", lambda *args: calls.append(args) or True)
+    runner.send(runner.status_edit, "status")
+    runner.send(object(), "chat", win=object())
+    assert calls[0][-1] == "combo"
+    assert calls[1][-1] == "edit"

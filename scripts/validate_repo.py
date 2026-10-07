@@ -60,7 +60,7 @@ def normalize_link_target(raw: str) -> str:
 def validate_markdown_links() -> list[str]:
     errors: list[str] = []
     for md in sorted(ROOT.rglob("*.md")):
-        if ".git" in md.parts:
+        if ".git" in md.parts or ".venv" in md.parts:
             continue
         text = md.read_text(encoding="utf-8")
         for match in LINK_RE.finditer(text):

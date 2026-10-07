@@ -21,6 +21,7 @@ key ที่ไม่ใส่จะใช้ค่าเริ่มต้น 
 | `safety.max_consecutive_failures` | `5` | Stop after N failed ticks in a row (backoff + re-attach) | หยุดเมื่อล้มเหลวติดกัน N ครั้ง |
 | `status.enabled` | `true` | Rotate status | หมุน status |
 | `status.edit` / `apply_button` | selectors / `null` | UIA selectors from `discover`; `apply_button` is invoked instead of Enter | selector จาก `discover` ถ้าใส่ `apply_button` จะกดปุ่มแทน Enter |
+| `status.background_enter_target` | `edit` | Experimental `combo`: when `safety.require_foreground` is `false`, post Enter to the verified `CComboBoxTS` parent instead of its Edit child. May avoid a Windows error sound, but **not confirmed to save status**. No fallback if the parent is missing. Test with Apply Now, confirm the status in Camfrog, and set back to `edit` if it fails. No effect when an apply button is configured or foreground mode is on. | ตัวเลือกทดลอง `combo`: ส่ง Enter ไป ComboBox แทนช่อง Edit ขณะทำงานเบื้องหลัง ยังไม่ยืนยันว่าบันทึกได้ หากไม่สำเร็จให้กลับเป็น `edit` |
 | `status.interval_seconds` | `600` | Minimum 30 | ขั้นต่ำ 30 |
 | `status.set_on_start` | `true` | Set first status immediately | ตั้ง status แรกทันที |
 | `status.random` | `false` | Random instead of sequential | สุ่มแทนเรียงลำดับ |

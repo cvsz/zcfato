@@ -311,6 +311,7 @@ DEFAULTS = {
         "enabled": True,
         "edit": {"class_name": "Edit", "auto_id": "1001", "index": 0},
         "apply_button": None,
+        "background_enter_target": "edit",  # experimental "combo" targets the parent CComboBoxTS
         "interval_seconds": 600, "set_on_start": True, "random": False,
         "language_mode": "both", "retry_seconds": 30, "max_length": 120, "messages": [],
         "schedules": [],
@@ -446,6 +447,8 @@ def _validate(cfg, errs, warns):
             errs.append(t("e_mode"))
         if not isinstance(st["edit"], dict):
             errs.append(t("e_sel", k="status.edit"))
+        if st.get("background_enter_target", "edit") not in ("edit", "combo"):
+            errs.append("status.background_enter_target must be edit or combo")
         mq, hs = st["marquee"], st["history"]
         try:
             inf = mq.get("infinite_loop", False)
@@ -778,7 +781,35 @@ def press_button(btn):
         return
     btn.click_input()
 
-def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None, restore: bool = False) -> bool:
+def _background_enter(ctrl, target="edit"):
+    """Post one Enter to the status control, optionally its verified combo parent.
+
+    The combo target is experimental: only the parent of a Camfrog status Edit
+    qualifies. Do not silently fall back to another control on mismatch.
+    """
+    if target == "combo":
+        parent = getattr(getattr(ctrl, "element_info", None), "parent", None)
+        if getattr(parent, "class_name", None) != "CComboBoxTS":
+            raise LookupError("Status Edit has no CComboBoxTS parent; cannot try combo Enter")
+        handle = getattr(parent, "handle", 0)
+    else:
+        handle = getattr(ctrl, "handle", 0)
+        if not handle and hasattr(ctrl, "element_info"):
+            handle = getattr(ctrl.element_info, "handle", 0)
+        if not handle:
+            ctrl.send_keystrokes("{ENTER}")
+            return
+    if not handle:
+        raise LookupError("Status combo has no HWND; cannot try combo Enter")
+    u = ctypes.windll.user32
+    if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-down to status control")
+    if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-up to status control")
+
+
+def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,
+           restore: bool = False, background_enter_target: str = "edit") -> bool:
     """Write text, verify read-back, confirm Camfrog is foreground, send, restore focus."""
     if dry:
         log.info(t("dry_send", text=shown(text)))
@@ -806,14 +837,7 @@ def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=N
                 return False
             ctrl.type_keys("{ENTER}")
         else:
-            handle = getattr(ctrl, "handle", 0)
-            if not handle and hasattr(ctrl, "element_info"):
-                handle = getattr(ctrl.element_info, "handle", 0)
-            if handle:
-                ctypes.windll.user32.PostMessageW(handle, 0x0100, 0x0D, 0)
-                ctypes.windll.user32.PostMessageW(handle, 0x0101, 0x0D, 0)
-            else:
-                ctrl.send_keystrokes("{ENTER}")
+            _background_enter(ctrl, background_enter_target)
     if prev and prev != win.handle and user32.IsWindow(prev):
         time.sleep(0.15)
         user32.SetForegroundWindow(prev)  # best effort: give focus back to what you were doing
@@ -1193,7 +1217,7 @@ def cmd_status(cfg, text):
     btn = find(win, st["apply_button"]) if st["apply_button"] else None
     text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
     ok = commit(win, ctrl, text, cfg["dry_run"], sf["require_foreground"], btn,
-                sf["restore_previous_window"])
+                sf["restore_previous_window"], st.get("background_enter_target", "edit"))
     print(t("ok") if ok else t("failed"))
     return 0 if ok else 1
 
@@ -1640,10 +1664,10 @@ def build_app():
             self.worker_marker_path = self.config_path.with_name(WORKER_MARKER.name)
             self.root = tk.Tk()
             self.root.title("Camfrog Status Changer")
-            self.root.geometry("220x505")
+            self.root.geometry("220x530")
             self.root.resizable(False, False)
-            self.root.minsize(220, 505)
-            self.root.maxsize(220, 505)
+            self.root.minsize(220, 530)
+            self.root.maxsize(220, 530)
             try:
                 self.root.iconbitmap(str(BASE / "app.ico"))
             except (tk.TclError, OSError):
@@ -1671,6 +1695,8 @@ def build_app():
                 "stride", MARQUEE_STRIDE_DEFAULT)))
             self.infinite_loop = tk.BooleanVar(value=bool(
                 self.config["status"]["marquee"].get("infinite_loop", False)))
+            self.combo_enter = tk.BooleanVar(value=(
+                self.config["status"].get("background_enter_target", "edit") == "combo"))
             self._load_fields()
             for variable in self.fields:
                 variable.trace_add("write", self.schedule_save)
@@ -1736,6 +1762,8 @@ def build_app():
             ttk.Label(header, text="STATUS", style="Brand.TLabel").pack(side="left")
             self.state_label = ttk.Label(header, text="", style="State.TLabel")
             self.state_label.pack(side="right")
+            ttk.Checkbutton(outer, text=self._tr("Try combo Enter (test)", "ลอง Enter ที่ combo"),
+                            variable=self.combo_enter, command=self.schedule_save).pack(anchor="w")
 
             self.tabs = ttk.Notebook(outer)
             self.tabs.pack(fill="both", expand=True)
@@ -1817,6 +1845,7 @@ def build_app():
             config = load_cfg(self.config_path)
             st = config["status"]
             st["messages"] = messages_from_slots(var.get() for var in self.fields)
+            st["background_enter_target"] = "combo" if self.combo_enter.get() else "edit"
             mq = st["marquee"]
             try:
                 mq["step_seconds"] = max(MARQUEE_STEP_MIN, float(self.step.get()))

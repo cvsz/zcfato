@@ -292,6 +292,7 @@ DEFAULTS = {
         "enabled": True,
         "edit": {"class_name": "Edit", "auto_id": "1001", "index": 0},
         "apply_button": None,
+        "background_enter_target": "edit",  # experimental "combo" targets the parent CComboBoxTS
         "interval_seconds": 600, "set_on_start": True, "random": False,
         "language_mode": "both", "retry_seconds": 30, "max_length": 120, "messages": [],
         "schedules": [],
@@ -435,6 +436,8 @@ def _validate(cfg, errs, warns):
             errs.append(t("e_mode"))
         if not isinstance(st["edit"], dict):
             errs.append(t("e_sel", k="status.edit"))
+        if st.get("background_enter_target", "edit") not in ("edit", "combo"):
+            errs.append("status.background_enter_target must be edit or combo")
         mq, hs = st["marquee"], st["history"]
         try:
             inf = mq.get("infinite_loop", False)
@@ -889,7 +892,35 @@ def press_button(btn):
     btn.click_input()
 
 
-def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None, restore: bool = False) -> bool:
+def _background_enter(ctrl, target="edit"):
+    """Post one Enter to the status control, optionally its verified combo parent.
+
+    The combo target is experimental: only the parent of a Camfrog status Edit
+    qualifies. Do not silently fall back to another control on mismatch.
+    """
+    if target == "combo":
+        parent = getattr(getattr(ctrl, "element_info", None), "parent", None)
+        if getattr(parent, "class_name", None) != "CComboBoxTS":
+            raise LookupError("Status Edit has no CComboBoxTS parent; cannot try combo Enter")
+        handle = getattr(parent, "handle", 0)
+    else:
+        handle = getattr(ctrl, "handle", 0)
+        if not handle and hasattr(ctrl, "element_info"):
+            handle = getattr(ctrl.element_info, "handle", 0)
+        if not handle:
+            ctrl.send_keystrokes("{ENTER}")
+            return
+    if not handle:
+        raise LookupError("Status combo has no HWND; cannot try combo Enter")
+    u = ctypes.windll.user32
+    if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-down to status control")
+    if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-up to status control")
+
+
+def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,
+           restore: bool = False, background_enter_target: str = "edit") -> bool:
     """Write text, verify read-back, confirm Camfrog is foreground, send, restore focus."""
     if dry:
         log.info(t("dry_send", text=shown(text)))
@@ -917,14 +948,7 @@ def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=N
                 return False
             ctrl.type_keys("{ENTER}")
         else:
-            handle = getattr(ctrl, "handle", 0)
-            if not handle and hasattr(ctrl, "element_info"):
-                handle = getattr(ctrl.element_info, "handle", 0)
-            if handle:
-                ctypes.windll.user32.PostMessageW(handle, 0x0100, 0x0D, 0)
-                ctypes.windll.user32.PostMessageW(handle, 0x0101, 0x0D, 0)
-            else:
-                ctrl.send_keystrokes("{ENTER}")
+            _background_enter(ctrl, background_enter_target)
     if prev and prev != win.handle and user32.IsWindow(prev):
         time.sleep(0.15)
         user32.SetForegroundWindow(prev)  # best effort: give focus back to what you were doing
@@ -1402,8 +1426,10 @@ class Runner:
 
     def send(self, ctrl, text, btn=None, win=None):
         s = self.cfg["safety"]
+        target = (self.cfg["status"].get("background_enter_target", "edit")
+                  if ctrl is getattr(self, "status_edit", None) and win is None else "edit")
         return commit(win or self.win, ctrl, text, self.dry, s["require_foreground"], btn,
-                      s["restore_previous_window"])
+                      s["restore_previous_window"], target)
 
     def resolve(self):
         try:
@@ -2224,7 +2250,7 @@ def cmd_status(cfg, text):
     btn = find(win, st["apply_button"]) if st["apply_button"] else None
     text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
     ok = commit(win, ctrl, text, cfg["dry_run"], sf["require_foreground"], btn,
-                sf["restore_previous_window"])
+                sf["restore_previous_window"], st.get("background_enter_target", "edit"))
     print(t("ok") if ok else t("failed"))
     return 0 if ok else 1
 
