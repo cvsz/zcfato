@@ -573,10 +573,21 @@ def _validate_im(cfg, errs, warns):
 def shown(text: str) -> str:
     return repr(text) if LOG_TEXT else f"<{len(text)} chars>"
 
+def is_own_gui_window(win) -> bool:
+    """True for our own Tk GUI windows (they contain 'Camfrog' in the title
+    and would otherwise match window_title_regex). Camfrog itself never
+    uses the TkTopLevel window class."""
+    try:
+        return win.class_name() == "TkTopLevel"
+    except Exception:
+        return False
+
+
 def get_window(cfg: dict):
     from pywinauto import Desktop  # lazy: `check` works without pywinauto
     wins = Desktop(backend="uia").windows(
         title_re=cfg["window_title_regex"], visible_only=True)
+    wins = [w for w in wins if not is_own_gui_window(w)]
     if not wins:
         raise RuntimeError(t("no_window"))
     return wins[0]

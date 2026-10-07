@@ -56,6 +56,17 @@ def test_text_to_message_and_message_to_text():
     assert gui.message_to_text("plain") == "plain"
 
 
+def test_get_window_skips_own_tk_gui():
+    """wins[0] may be our own GUI (topmost when Enable is clicked)."""
+    from types import SimpleNamespace
+
+    own = SimpleNamespace(class_name=lambda: "TkTopLevel")
+    real = SimpleNamespace(class_name=lambda: "#32770")
+    assert gui.is_own_gui_window(own) is True
+    assert gui.is_own_gui_window(real) is False
+    assert gui.is_own_gui_window(SimpleNamespace(class_name=lambda: (_ for _ in ()).throw(OSError()))) is False
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows mutex test")
 def test_single_instance_guard_first_acquire_succeeds(monkeypatch):
     """First acquire() succeeds when mutex doesn't exist."""

@@ -465,3 +465,25 @@ def test_marquee_and_history_cli(tmp_path, capsys):
     assert c.main(["history", "--config", cfgp]) == 0
     out = capsys.readouterr().out
     assert "[th]" in out and "[en]" in out
+
+
+# ---------- window selection ----------
+def test_get_window_skips_own_tk_gui(monkeypatch):
+    """wins[0] may be our own GUI when Enable is clicked (it is topmost)."""
+    import sys as _sys
+    from types import SimpleNamespace
+
+    own = SimpleNamespace(class_name=lambda: "TkTopLevel", handle=1)
+    real = SimpleNamespace(class_name=lambda: "#32770", handle=2)
+    fake_desktop = SimpleNamespace(windows=lambda **kw: [own, real])
+    fake_pywinauto = SimpleNamespace(Desktop=lambda backend=None: fake_desktop)
+    monkeypatch.setitem(_sys.modules, "pywinauto", fake_pywinauto)
+    assert c.is_own_gui_window(own) is True
+    assert c.is_own_gui_window(real) is False
+    assert c.get_window({"window_title_regex": ".*Camfrog.*"}) is real
+
+    fake_empty = SimpleNamespace(windows=lambda **kw: [own])
+    monkeypatch.setitem(_sys.modules, "pywinauto",
+                        SimpleNamespace(Desktop=lambda backend=None: fake_empty))
+    with pytest.raises(RuntimeError):
+        c.get_window({"window_title_regex": ".*Camfrog.*"})
