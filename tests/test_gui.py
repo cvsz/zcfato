@@ -152,7 +152,7 @@ def test_gui_smoke(tmp_path, monkeypatch):
     cfg, errs = app.collect()
     assert not errs and cfg["status"]["messages"] == app.draft["status"]["messages"]
     assert cfg["autoreply"]["rules"] == app.draft["autoreply"]["rules"]
-    assert cfg["autoreply"]["own_nickname"] == "CamfrogNoom"
+    assert cfg["autoreply"]["own_nickname"] == app.draft["autoreply"]["own_nickname"]
     assert cfg["autoreply_im"]["only_nicknames"] == ["zdevz"]
     assert hasattr(app, "im_tree") and hasattr(app, "t_im_skips") and hasattr(app, "tiout")
     assert app.t_msgs.bind("<Control-c>") and app.t_msgs.bind("<Control-v>")
