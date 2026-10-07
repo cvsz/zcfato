@@ -22,14 +22,17 @@ class SingleInstanceGuard:
     """Prevent multiple GUI instances using a Windows named mutex.
 
     On non-Windows platforms, always allows the instance to run.
+    If another instance exists, restores it instead of showing an error.
     """
 
     ERROR_ALREADY_EXISTS = 183
+    WM_SHOWME = 0x8000 + 42  # Custom message to restore window
 
     def __init__(self, name: str = "CamfrogStatusChanger"):
         self.name = name
         self.handle = None
         self.kernel32 = None
+        self.user32 = None
 
     def acquire(self) -> bool:
         if os.name != "nt":
@@ -45,9 +48,46 @@ class SingleInstanceGuard:
         if not self.handle:
             raise OSError(ctypes.get_last_error(), f"Could not create mutex {mutex_name}")
         if ctypes.get_last_error() == self.ERROR_ALREADY_EXISTS:
-            self.release()
+            # Another instance exists - try to restore it
+            self._restore_existing_instance()
             return False
         return True
+
+    def _restore_existing_instance(self):
+        """Find the existing window and send a restore message."""
+        if os.name != "nt":
+            return
+        try:
+            self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+            # Find window by class name (TkTopLevel) and title containing our app name
+            # The first instance registers a window class we can find
+            self.user32.EnumWindows.argtypes = (ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p), ctypes.c_void_p)
+            self.user32.EnumWindows.restype = ctypes.c_int
+            self.user32.GetWindowTextW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int)
+            self.user32.GetWindowTextW.restype = ctypes.c_int
+            self.user32.GetClassNameW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int)
+            self.user32.GetClassNameW.restype = ctypes.c_int
+            self.user32.PostMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)
+            self.user32.PostMessageW.restype = ctypes.c_int
+
+            def enum_callback(hwnd, lparam):
+                try:
+                    length = self.user32.GetWindowTextW(hwnd, ctypes.create_unicode_buffer(256), 256)
+                    if length > 0:
+                        title = ctypes.create_unicode_buffer(256)
+                        self.user32.GetWindowTextW(hwnd, title, 256)
+                        if "Camfrog Status Changer" in title.value:
+                            # Found it - send restore message
+                            self.user32.PostMessageW(hwnd, self.WM_SHOWME, 0, 0)
+                            return False  # Stop enumeration
+                except Exception:
+                    pass
+                return True  # Continue enumeration
+
+            callback = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(enum_callback)
+            self.user32.EnumWindows(callback, 0)
+        except Exception:
+            pass  # Best effort
 
     def release(self):
         if self.handle and self.kernel32:
@@ -1586,6 +1626,10 @@ def build_app():
             if self.config.get("status", {}).get("enabled", True):
                 self.root.after(400, self._auto_start_if_idle)
 
+            # Register single-instance restore message handler
+            if os.name == "nt":
+                self._register_single_instance_handler()
+
         def _load_fields(self):
             for var, message in zip(self.fields, self.config["status"]["messages"][:STATUS_SLOTS]):
                 var.set(message_to_text(message))
@@ -2024,6 +2068,34 @@ def build_app():
             try:
                 self.root.destroy()
             except tk.TclError:
+                pass
+
+        def _register_single_instance_handler(self):
+            """Subclass the Tk root window proc to handle WM_SHOWME from second instance."""
+            if os.name != "nt":
+                return
+            try:
+                import ctypes
+                self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+                self.user32.SetWindowLongPtrW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p)
+                self.user32.SetWindowLongPtrW.restype = ctypes.c_void_p
+                self.user32.CallWindowProcW.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)
+                self.user32.CallWindowProcW.restype = ctypes.c_void_p
+
+                self.root.update_idletasks()
+                hwnd = self.root.winfo_id()
+
+                def new_wndproc(hwnd, msg, wparam, lparam):
+                    if msg == SingleInstanceGuard.WM_SHOWME:
+                        self.root.after(0, self.show_from_tray)
+                        return 0
+                    return self.user32.CallWindowProcW(self.old_wndproc, hwnd, msg, wparam, lparam)
+
+                self.new_wndproc = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)(new_wndproc)
+
+                GWLP_WNDPROC = -4
+                self.old_wndproc = self.user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, self.new_wndproc)
+            except Exception:
                 pass
 
         def refresh_state(self):
