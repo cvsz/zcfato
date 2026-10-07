@@ -5,11 +5,13 @@ __pycache__/
 .pytest_cache/
 *.log
 controls.txt
+detect_report.txt
 STOP
 *.pid
 stats.json
 *.zip
 *.spec
+*.mp4
 status_history.json
 *.tmp
 

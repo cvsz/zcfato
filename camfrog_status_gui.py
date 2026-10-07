@@ -316,7 +316,7 @@ DEFAULTS = {
         "schedules": [],
         "language_cycle": [],
         "marquee": {"enabled": False, "width": 28, "stride": 2, "step_seconds": 0.5,
-                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80},
+                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80, "infinite_loop": False},
         "history": {"enabled": True, "file": "status_history.json", "max_items": 50,
                     "record": True, "use_as_source": False, "seed_from_messages": True,
                     "mode": "rotate"},
@@ -448,9 +448,11 @@ def _validate(cfg, errs, warns):
             errs.append(t("e_sel", k="status.edit"))
         mq, hs = st["marquee"], st["history"]
         try:
+            inf = mq.get("infinite_loop", False)
             if mq["enabled"] and not (8 <= mq["width"] <= 80 and mq["width"] <= st["max_length"]
                                       and 1 <= mq["stride"] <= mq["width"]
-                                      and mq["step_seconds"] >= 0.5 and 1 <= mq["cycles"] <= 5
+                                      and mq["step_seconds"] >= 0.5
+                                      and (inf or (1 <= mq["cycles"] <= 5))
                                       and 5 <= mq["max_frames"] <= 300):
                 errs.append(t("e_marquee"))
         except TypeError:
@@ -949,6 +951,56 @@ def cmd_start(cfg, args):
     logf = BASE / cfg["log"]["file"]
     flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
     p = subprocess.Popen(child_cmd(args) + ["run"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=flags, close_fds=True, cwd=str(BASE),
+                         env=child_env())
+    time.sleep(2.5)
+    if p.poll() is not None:
+        print(t("bg_failed", code=p.returncode, log=logf))
+        return 1
+    print(t("bg_started", pid=p.pid, log=logf))
+    return 0
+
+def worker_cmd(args):
+    """Command that runs the status-only background worker.
+
+    The worker is camfrog-auto's run loop (Runner), not this GUI: this
+    module has no run loop, so relaunching itself would just open another
+    window (or exit on the single-instance mutex).
+    Frozen : dist/camfrog-auto.exe next to this exe.
+    Source : python camfrog_auto.py next to this file.
+    """
+    cfg_arg = []
+    if getattr(args, "config", None):
+        cfg_arg += ["--config", str(Path(args.config).resolve())]
+    if getattr(args, "lang", None):
+        cfg_arg += ["--lang", args.lang]
+    if getattr(sys, "frozen", False):
+        exe = BASE / "camfrog-auto.exe"
+        if not exe.is_file():
+            raise FileNotFoundError(
+                f"Worker executable not found: {exe} (re-run build.bat)")
+        return [str(exe)] + cfg_arg
+    script = BASE / "camfrog_auto.py"
+    if not script.is_file():
+        raise FileNotFoundError(f"Worker script not found: {script}")
+    return [str(Path(sys.executable)), str(script)] + cfg_arg
+
+def cmd_start_worker(cfg, args):
+    """Start the status-only worker (camfrog-auto run loop) in background."""
+    pid = running_pid(cfg)
+    if pid:
+        print(t("already_running", pid=pid))
+        return 1
+    if os.name != "nt":
+        print(t("win_only"))
+        return 2
+    if not cfg["log"]["file"]:
+        print(t("bg_needs_log"))
+        return 2
+    logf = BASE / cfg["log"]["file"]
+    flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    p = subprocess.Popen(worker_cmd(args) + ["run"], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=flags, close_fds=True, cwd=str(BASE),
                          env=child_env())
@@ -1606,6 +1658,8 @@ def build_app():
                 MARQUEE_STEP_MIN, self.config["status"]["marquee"]["step_seconds"])))
             self.stride = tk.StringVar(value=str(self.config["status"]["marquee"].get(
                 "stride", MARQUEE_STRIDE_DEFAULT)))
+            self.infinite_loop = tk.BooleanVar(value=bool(
+                self.config["status"]["marquee"].get("infinite_loop", False)))
             self._load_fields()
             for variable in self.fields:
                 variable.trace_add("write", self.schedule_save)
@@ -1706,6 +1760,8 @@ def build_app():
                 ttk.Label(speed, text=self._tr("Stride", "ก้าว")).pack(side="left", padx=(5, 2))
                 ttk.Spinbox(speed, textvariable=self.stride, from_=1, to=10,
                             increment=1, width=2).pack(side="left")
+                ttk.Checkbutton(speed, text=self._tr("Loop", "วนลูป"),
+                                variable=self.infinite_loop).pack(side="left", padx=(5, 0))
 
             entries = ttk.Frame(page)
             entries.pack(fill="both", expand=True)
@@ -1754,6 +1810,7 @@ def build_app():
             try:
                 mq["step_seconds"] = max(MARQUEE_STEP_MIN, float(self.step.get()))
                 mq["stride"] = max(1, int(float(self.stride.get())))
+                mq["infinite_loop"] = bool(self.infinite_loop.get())
             except ValueError as exc:
                 raise ValueError(self._tr("Enter valid marquee speed values.",
                                           "กรอกค่าความเร็วข้อความเลื่อนให้ถูกต้อง")) from exc
@@ -1883,7 +1940,7 @@ def build_app():
             args = SimpleNamespace(config=str(self.runtime_config_path), lang=None)
 
             def start():
-                rc = cmd_start(runtime, args)
+                rc = cmd_start_worker(runtime, args)
                 if rc == 0:
                     pid = running_pid(runtime)
                     if not pid:
@@ -2132,14 +2189,10 @@ def main(argv=None):
         except Exception:
             pass
 
-    # Single-instance guard
+    # Single-instance guard: a second launch restores the existing window
+    # (posted as WM_SHOWME in acquire()) and exits silently.
     instance = SingleInstanceGuard()
     if not instance.acquire():
-        from tkinter import messagebox
-        messagebox.showinfo(
-            "Camfrog Status Changer is already running",
-            "The app is already open. Check the Windows system tray.",
-        )
         return 0
 
     try:

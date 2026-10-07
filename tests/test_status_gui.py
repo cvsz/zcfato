@@ -103,3 +103,50 @@ def test_single_instance_guard_non_windows_always_succeeds(monkeypatch):
     guard = gui.SingleInstanceGuard("TestMutexLinux")
     assert guard.acquire() is True
     guard.release()
+
+
+def test_worker_cmd_uses_camfrog_auto_not_itself(tmp_path, monkeypatch):
+    """The background worker must be camfrog-auto's run loop, not this GUI."""
+    from types import SimpleNamespace
+    monkeypatch.setattr(gui.sys, "frozen", False, raising=False)
+    monkeypatch.setattr(gui, "BASE", tmp_path)
+    (tmp_path / "camfrog_auto.py").write_text("# stub", encoding="utf-8")
+    args = SimpleNamespace(config=str(tmp_path / "rt.json"), lang=None)
+    cmd = gui.worker_cmd(args)
+    assert any(str(c).endswith("camfrog_auto.py") for c in cmd)
+    assert "camfrog_status_gui" not in " ".join(str(c) for c in cmd)
+
+
+def test_worker_cmd_frozen_uses_camfrog_auto_exe(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(gui.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(gui, "BASE", tmp_path)
+    (tmp_path / "camfrog-auto.exe").write_bytes(b"MZ")
+    args = SimpleNamespace(config=str(tmp_path / "rt.json"), lang=None)
+    cmd = gui.worker_cmd(args)
+    assert cmd[0].endswith("camfrog-auto.exe")
+
+
+def test_worker_cmd_frozen_missing_exe_raises(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(gui.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(gui, "BASE", tmp_path)
+    args = SimpleNamespace(config=str(tmp_path / "rt.json"), lang=None)
+    with pytest.raises(FileNotFoundError):
+        gui.worker_cmd(args)
+
+
+def test_infinite_loop_validation_mirrors_core():
+    import copy
+    cfg = copy.deepcopy(gui.DEFAULTS)
+    cfg["status"]["enabled"] = True
+    cfg["status"]["messages"] = ["hello world, this is long enough"]
+    cfg["status"]["marquee"]["enabled"] = True
+    cfg["status"]["marquee"]["width"] = 10
+    cfg["status"]["marquee"]["infinite_loop"] = True
+    cfg["status"]["marquee"]["cycles"] = 0  # ignored when infinite
+    errs, _ = gui.validate(cfg)
+    assert not [e for e in errs if "marquee" in e]
+    cfg["status"]["marquee"]["infinite_loop"] = False
+    errs, _ = gui.validate(cfg)
+    assert any("marquee" in e for e in errs)
