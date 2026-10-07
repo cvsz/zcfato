@@ -30,6 +30,14 @@ SAVE_LABELS = {
     "save", "บันทึก", "保存", "儲存", "저장", "enregistrer",
     "guardar", "speichern", "salvar", "lưu", "simpan",
 }
+# Broad fallback labels: used only as a second pass when the strict
+# STATUS_LABELS find zero editors (e.g. LINE shows a bare "สถานะ"/"Status"
+# without the full "Status message" wording). Still requires exactly one
+# match, so a wrong write is impossible; at worst we report ambiguity.
+STATUS_LABELS_BROAD = (
+    "สถานะ",
+    "status",
+)
 OPEN_LABELS = {
     "open", "เปิด", "ouvrir", "öffnen", "abrir", "apri", "열기", "打开", "開啟",
 }
@@ -66,8 +74,20 @@ def is_status_name(value):
     return any(_compact_name(label) in compact for label in STATUS_LABELS)
 
 
+def is_status_name_broad(value):
+    """Second-pass matcher for bare labels like "สถานะ"/"Status"."""
+    compact = _compact_name(value)
+    if not compact:
+        return False
+    return any(_compact_name(label) in compact for label in STATUS_LABELS_BROAD)
+
+
 def has_status_context(names):
     return any(is_status_name(name) for name in names)
+
+
+def has_status_context_broad(names):
+    return any(is_status_name_broad(name) for name in names)
 
 
 def is_save_name(value):
@@ -163,6 +183,44 @@ def process_for_window(hwnd):
     return pid, executable
 
 
+def line_window_title(hwnd):
+    """Best-effort top-level window title (for diagnostics only, never chat text)."""
+    try:
+        import win32gui
+        return str(win32gui.GetWindowText(hwnd) or "")
+    except Exception:
+        return ""
+
+
+def check_line_window(hwnd, pid):
+    """Validate the cached LINE window; raise a specific actionable error."""
+    if not hwnd:
+        raise AutomationError(
+            "No LINE window is selected yet. Open LINE > Settings > Profile first, "
+            "then wait for the green 'found LINE window' indicator."
+        )
+    import win32gui
+    if not win32gui.IsWindow(hwnd):
+        raise AutomationError(
+            "The selected LINE window was closed. Reopen LINE > Settings > Profile "
+            "and wait for the green 'found LINE window' indicator."
+        )
+    process = process_for_window(hwnd)
+    if not process:
+        title = line_window_title(hwnd)
+        hint = f" (window title: {title!r})" if title else ""
+        raise AutomationError(
+            f"The selected window is no longer a LINE.exe window{hint}. "
+            "Click the LINE Settings > Profile window again."
+        )
+    if process[0] != pid:
+        raise AutomationError(
+            "The selected LINE window changed (LINE restarted or a different "
+            "LINE window was focused). Click the LINE Settings > Profile "
+            "window again, then retry."
+        )
+
+
 def _find_save_button(target):
     matches = []
     for button in target.descendants(control_type="Button"):
@@ -189,9 +247,7 @@ def _focused_profile_editor(hwnd, pid, field_match, field_label, activate=True,
     from pywinauto.uia_defines import IUIA
     from pywinauto.uia_element_info import UIAElementInfo
 
-    process = process_for_window(hwnd)
-    if not process or process[0] != pid:
-        raise AutomationError("The selected LINE window changed or closed.")
+    check_line_window(hwnd, pid)
     if activate:
         win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
         win32gui.SetForegroundWindow(hwnd)
@@ -205,15 +261,38 @@ def _focused_profile_editor(hwnd, pid, field_match, field_label, activate=True,
     else:
         from pywinauto import Desktop
         target = Desktop(backend="uia").window(handle=hwnd)
+        try:
+            edits = target.descendants(control_type="Edit")
+        except Exception as exc:
+            raise AutomationError(
+                "Could not inspect the LINE window controls. Make sure LINE "
+                "Settings > Profile is open and visible, then retry."
+            ) from exc
+        total_edits = len(edits)
+        # Pass 1 (strict): full "Status message" wording.
         matches = []
-        for ctrl in target.descendants(control_type="Edit"):
+        for ctrl in edits:
             try:
                 if any(field_match(name) for name in accessible_context_names(ctrl.element_info)):
                     matches.append(ctrl)
             except Exception:
                 continue
+        # Pass 2 (broad): bare "สถานะ"/"Status" with a deeper context scan.
+        # Only when pass 1 found nothing, and still requires exactly one match.
+        if not matches and field_label == "Status message":
+            for ctrl in edits:
+                try:
+                    if any(is_status_name_broad(name)
+                           for name in accessible_context_names(ctrl.element_info, max_depth=5)):
+                        matches.append(ctrl)
+                except Exception:
+                    continue
         if len(matches) != 1:
-            raise AutomationError(f"Could not identify exactly one {field_label} editor. found {len(matches)}")
+            raise AutomationError(
+                f"Could not identify exactly one {field_label} editor (found {len(matches)} "
+                f"of {total_edits} text fields). Open LINE > Settings > Profile so the "
+                f"Status message field is visible, then retry. No text was changed."
+            )
         editor = matches[0]
     info = editor.element_info
     if info.control_type != "Edit":
@@ -363,11 +442,10 @@ def read_profile_status(hwnd, pid):
     Strategy (in priority order):
     1. Find the "Status message" label, then read sibling or child Edit/Text/Document controls.
     2. Fall back to scanning all Edit descendants whose context names match STATUS_LABELS.
+    3. Broad fallback: bare "สถานะ"/"Status" labels with a deeper context scan.
     When multiple distinct values survive dedup, the first Edit-priority value wins.
     """
-    process = process_for_window(hwnd)
-    if not process or process[0] != pid:
-        raise AutomationError("The selected LINE window changed or closed.")
+    check_line_window(hwnd, pid)
     from pywinauto import Desktop
 
     target = Desktop(backend="uia").window(handle=hwnd)
@@ -428,9 +506,24 @@ def read_profile_status(hwnd, pid):
             except Exception:
                 continue
 
+    # --- Strategy 3: broad fallback (bare "สถานะ"/"Status", deeper scan) ---
+    if not candidates:
+        for control in controls:
+            try:
+                kind = control.element_info.control_type
+                if kind != "Edit":
+                    continue
+                if has_status_context_broad(accessible_context_names(control.element_info, max_depth=5)):
+                    vals = _element_value(control)
+                    if vals:
+                        candidates.append((0, vals[0]))
+            except Exception:
+                continue
+
     if not candidates:
         raise AutomationError(
-            "Could not read one unambiguous Status message value from this LINE profile view."
+            "Could not read one unambiguous Status message value from this LINE profile view. "
+            "Open LINE > Settings > Profile so the Status message field is visible, then retry."
         )
 
     # Deduplicate: prefer Edit-sourced values, then pick the first.
@@ -442,9 +535,7 @@ def read_profile_status(hwnd, pid):
 
 def select_image_in_open_dialog(hwnd, pid, image_path):
     """Choose a file only in one native Open dialog owned by the verified LINE process."""
-    process = process_for_window(hwnd)
-    if not process or process[0] != pid:
-        raise AutomationError("The selected LINE window changed or closed.")
+    check_line_window(hwnd, pid)
     path = Path(image_path).resolve(strict=True)
     if not path.is_file():
         raise AutomationError("The selected image file no longer exists.")

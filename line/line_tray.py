@@ -1,6 +1,7 @@
 """Native Windows notification-area icon for the standalone LINE status GUI."""
 import logging
 import os
+import time
 from pathlib import Path
 import sys
 
@@ -51,13 +52,30 @@ class LineTrayIcon:
                 0, 0, 0, 0, 0, 0, self.hinstance, None,
             )
             self.icon = self._load_icon()
-            self._add_icon()
+            self._add_icon_with_retry()
             self.active = True
             self.root.after(100, self._pump)
         except Exception as exc:
             self.error = str(exc)
             logging.exception("Could not create LINE Status Changer tray icon")
             self.shutdown()
+
+    def _add_icon_with_retry(self, attempts=3, delay=0.5):
+        """Retry icon creation: Explorer may not be ready right after login."""
+        last_exc = None
+        for attempt in range(attempts):
+            try:
+                self._add_icon()
+                if attempt > 0:
+                    logging.info("System tray icon created on attempt %d", attempt + 1)
+                return
+            except Exception as exc:
+                last_exc = exc
+                logging.warning("System tray icon attempt %d/%d failed: %s",
+                                attempt + 1, attempts, exc)
+                if attempt + 1 < attempts:
+                    time.sleep(delay)
+        raise RuntimeError("Windows rejected the system tray icon") from last_exc
 
     def _add_icon(self):
         gui = self.win32gui
@@ -178,7 +196,13 @@ class LineTrayIcon:
             self.win32gui.PumpWaitingMessages()
             if self._restart_requested:
                 self._restart_requested = False
-                self._add_icon()
+                try:
+                    self._add_icon()
+                except Exception as exc:
+                    # Explorer may still be restarting: retry on the next tick
+                    # instead of giving up the tray host immediately.
+                    logging.warning("System tray re-registration failed, retrying: %s", exc)
+                    self._restart_requested = True
             if self._menu_requested:
                 self._menu_requested = False
                 self._show_menu()

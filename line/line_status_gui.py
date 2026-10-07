@@ -34,6 +34,37 @@ else:
 CONFIG_PATH = APP_DIR / "line_config.json"
 ICON_PATH = RESOURCE_DIR / "app.ico"
 
+
+def friendly_task_error(task, error):
+    """Map technical AutomationError text to actionable Thai guidance."""
+    err = str(error or "")
+    if "No LINE window is selected" in err or "Reopen LINE" in err:
+        return ("ไม่พบหน้าต่าง LINE: เปิด LINE > Settings > Profile "
+                "แล้วรอแถบสีเขียว 'พบหน้าต่าง LINE' ก่อนกดอีกครั้ง")
+    if "was closed" in err:
+        return ("หน้าต่าง LINE ถูกปิดไปแล้ว: เปิด LINE > Settings > Profile "
+                "ใหม่ แล้วลองอีกครั้ง")
+    if "no longer a LINE" in err or "changed (LINE restarted" in err:
+        return ("หน้าต่าง LINE เปลี่ยนไป (อาจรีสตาร์ทหรือสลับหน้าต่าง): "
+                "คลิกที่หน้าต่าง LINE Settings > Profile อีกครั้ง แล้วลองใหม่")
+    if "exactly one" in err and "editor" in err:
+        return ("หาช่อง Status message ไม่เจอ (หรือเจอหลายช่อง): เปิด LINE > "
+                "Settings > Profile ให้เห็นช่องข้อความสถานะ แล้วลองใหม่ "
+                f"({err})")
+    if "unambiguous Status message" in err:
+        return ("อ่านค่าข้อความสถานะจากหน้า Profile ไม่ได้: ตรวจว่า LINE "
+                "อยู่หน้า Settings > Profile และเห็นช่องข้อความ แล้วลองใหม่")
+    if "not foreground" in err:
+        return ("หน้าต่าง LINE ไม่ได้อยู่ด้านหน้า: อย่าสลับหน้าต่างระหว่างทำงาน "
+                "แล้วลองใหม่")
+    if "Save button" in err:
+        return ("หาปุ่ม Save ใน LINE ไม่เจอ (หรือมีหลายปุ่ม): เปิดหน้า Profile "
+                "ให้เห็นปุ่มบันทึก แล้วลองใหม่ หรือใช้ Copy แล้วบันทึกเอง")
+    if "file picker" in err:
+        return ("หา file picker ของ LINE ไม่เจอ: เปิด file picker เลือกรูปใน LINE "
+                "ก่อน แล้วค่อยกดปุ่มในโปรแกรมนี้")
+    return f"งาน {task} ไม่สำเร็จ: {err}"
+
 def configure_logging():
     """Keep diagnostics outside the one-file extraction directory."""
     base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
@@ -647,18 +678,23 @@ def build_app(config_path=CONFIG_PATH):
                 self.note.configure(text=f"ตั้งคีย์ลัดไม่สำเร็จ: {exc}")
 
         def read_status(self):
-            if not self.line_hwnd or not self.line_pid:
-                self.note.configure(text="เปิด LINE > Settings > Profile ก่อน")
+            if not self._line_window_ready():
+                self.note.configure(
+                    text="เปิด LINE > Settings > Profile ก่อน แล้วรอแถบสีเขียว "
+                         "'พบหน้าต่าง LINE' แล้วค่อยกดอ่าน")
+                self.read_status_value.configure(text="ยังไม่พร้อมอ่าน: ไม่พบหน้าต่าง LINE")
                 return
             hwnd, pid = self.line_hwnd, self.line_pid
-            self.read_status_value.configure(text="กำลังอ่านจาก LINE…")
+            self.read_status_value.configure(text="กำลังอ่านจาก LINE… (อาจใช้เวลาหลายวินาที)")
             self._start_worker("read-status", lambda: read_profile_status(hwnd, pid),
                                lambda value: self.read_status_value.configure(text=value))
 
         def set_name(self):
             text = self.name_text.get()
-            if not self.line_hwnd or not self.line_pid:
-                self.note.configure(text="เปิด LINE และหน้าแก้ชื่อโปรไฟล์ก่อน")
+            if not self._line_window_ready():
+                self.note.configure(
+                    text="เปิด LINE และหน้าแก้ชื่อโปรไฟล์ก่อน แล้วรอแถบสีเขียว "
+                         "'พบหน้าต่าง LINE'")
                 return
             if not messagebox.askyesno(
                 "Confirm profile name", f"เปลี่ยนชื่อโปรไฟล์ LINE เป็นข้อความนี้หรือไม่?\n\n{text}",
@@ -671,7 +707,7 @@ def build_app(config_path=CONFIG_PATH):
 
         def choose_profile_image(self, kind):
             from tkinter import filedialog
-            if not self.line_hwnd or not self.line_pid:
+            if not self._line_window_ready():
                 self.note.configure(text="เปิด LINE และ file picker ของรูปก่อน")
                 return
             path = filedialog.askopenfilename(
@@ -679,6 +715,10 @@ def build_app(config_path=CONFIG_PATH):
                 filetypes=(("Image files", "*.png *.jpg *.jpeg *.bmp *.gif"), ("All files", "*.*")),
             )
             if not path:
+                return
+            if not self._line_window_ready():
+                self.note.configure(
+                    text="หน้าต่าง LINE เปลี่ยนไป: คลิกหน้าต่าง LINE อีกครั้งก่อนเลือกรูป")
                 return
             try:
                 image_path = validate_profile_image(path)
@@ -826,7 +866,7 @@ def build_app(config_path=CONFIG_PATH):
             except ValueError as exc:
                 self.note.configure(text=str(exc))
                 return
-            if not self.line_hwnd or not self.line_pid:
+            if not self._line_window_ready():
                 messagebox.showinfo("LINE not found", "เปิด LINE แล้วไปที่หน้าแก้ Status message ก่อน",
                                     parent=self.root)
                 return
@@ -839,6 +879,7 @@ def build_app(config_path=CONFIG_PATH):
             if not confirm:
                 return
             hwnd, pid = self.line_hwnd, self.line_pid
+            self.note.configure(text="กำลังตรวจช่อง LINE (อาจใช้เวลาหลายวินาที) อย่าสลับหน้าต่าง…")
             self._start_worker("status", lambda: set_profile_status(hwnd, pid, text),
                                lambda result: self.finish_status(result, scheduled=False, text=text))
 
@@ -909,6 +950,27 @@ def build_app(config_path=CONFIG_PATH):
                 color = "#9a6500"
             self.note.configure(text=note, foreground=color)
 
+        def _friendly_task_error(self, task, error):
+            """Map technical AutomationError text to actionable Thai guidance."""
+            return friendly_task_error(task, error)
+
+        def _line_window_ready(self):
+            """Pre-flight check: is there a tracked LINE window right now?"""
+            hwnd, pid = self.line_hwnd, self.line_pid
+            if not hwnd or not pid:
+                return False
+            if os.name != "nt":
+                return False
+            try:
+                import win32gui
+                from line_automation import process_for_window
+                if not win32gui.IsWindow(hwnd):
+                    return False
+                proc = process_for_window(hwnd)
+                return bool(proc and proc[0] == pid)
+            except Exception:
+                return False
+
         def poll_worker_results(self):
             try:
                 while True:
@@ -917,8 +979,10 @@ def build_app(config_path=CONFIG_PATH):
                     self.set_button.configure(state="normal")
                     if error:
                         if task == "read-status":
-                            self.read_status_value.configure(text=f"อ่านไม่ได้: {error}")
-                        self.note.configure(text=f"งาน {task} ไม่สำเร็จ: {error}", foreground="#a52834")
+                            self.read_status_value.configure(
+                                text=f"อ่านไม่ได้: {self._friendly_task_error(task, error)}")
+                        self.note.configure(text=self._friendly_task_error(task, error),
+                                            foreground="#a52834")
                     else:
                         callback(value)
             except queue.Empty:

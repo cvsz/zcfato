@@ -18,10 +18,13 @@ from config_store import (
 )
 from line_automation import (
     accessible_context_names,
+    check_line_window,
     has_status_context,
+    has_status_context_broad,
     is_profile_name_context,
     is_save_name,
     is_status_name,
+    is_status_name_broad,
     process_for_window,
 )
 from line_tray import LineTrayIcon
@@ -190,6 +193,50 @@ class AccessibilityGuardTests(unittest.TestCase):
                       "Statusmeldung", "Mensagem de status", "ข้อความสถานะ"):
             with self.subTest(label=label):
                 self.assertTrue(is_status_name(label))
+
+    def test_broad_labels_catch_bare_status_wording(self):
+        # Bare labels match the broad pass but strict stays scoped.
+        self.assertTrue(is_status_name_broad("สถานะ"))
+        self.assertTrue(is_status_name_broad("Status"))
+        self.assertTrue(is_status_name_broad("ข้อความสถานะ"))
+        self.assertFalse(is_status_name("สถานะ"))
+        self.assertFalse(is_status_name_broad(""))
+        self.assertFalse(is_status_name_broad(None))
+        # Broad context still requires the status word nearby.
+        self.assertTrue(has_status_context_broad(["Profile", "สถานะ"]))
+        self.assertFalse(has_status_context_broad(["Search", "Write a message"]))
+
+    def test_check_line_window_distinguishes_closed_changed_and_foreign(self):
+        from line_automation import AutomationError
+        gui = types.ModuleType("win32gui")
+        gui.IsWindow = mock.Mock(return_value=False)
+        with mock.patch.dict(sys.modules, {"win32gui": gui}):
+            with self.assertRaisesRegex(AutomationError, "was closed"):
+                check_line_window(1234, 9001)
+        # Valid LINE window passes without raising.
+        api = types.ModuleType("win32api")
+        api.OpenProcess = mock.Mock(return_value="h")
+        api.CloseHandle = mock.Mock()
+        con = types.ModuleType("win32con")
+        con.PROCESS_QUERY_INFORMATION = 0x0400
+        con.PROCESS_VM_READ = 0x0010
+        gui2 = types.ModuleType("win32gui")
+        gui2.IsWindow = mock.Mock(return_value=True)
+        process = types.ModuleType("win32process")
+        process.GetWindowThreadProcessId = mock.Mock(return_value=(42, 9001))
+        process.GetModuleFileNameEx = mock.Mock(return_value="C:/Apps/LINE/LINE.exe")
+        with mock.patch.dict(sys.modules, {
+            "win32api": api, "win32con": con, "win32gui": gui2,
+            "win32process": process,
+        }):
+            check_line_window(1234, 9001)  # must not raise
+        # Same hwnd but different pid -> "changed" error.
+        with mock.patch.dict(sys.modules, {
+            "win32api": api, "win32con": con, "win32gui": gui2,
+            "win32process": process,
+        }):
+            with self.assertRaisesRegex(AutomationError, "changed"):
+                check_line_window(1234, 1111)
 
     def test_process_for_window_imports_win32process_and_checks_executable(self):
         api = types.ModuleType("win32api")
@@ -373,6 +420,22 @@ class TrayBehaviorTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "rejected the system tray icon"):
             tray._add_icon()
 
+    def test_tray_retry_succeeds_on_second_attempt(self):
+        tray = object.__new__(LineTrayIcon)
+        tray._add_icon = mock.Mock(side_effect=[RuntimeError("busy"), None])
+        with mock.patch("line_tray.time.sleep") as sleep:
+            tray._add_icon_with_retry(attempts=3, delay=0.5)
+        self.assertEqual(tray._add_icon.call_count, 2)
+        sleep.assert_called_once_with(0.5)
+
+    def test_tray_retry_raises_after_all_attempts_fail(self):
+        tray = object.__new__(LineTrayIcon)
+        tray._add_icon = mock.Mock(side_effect=RuntimeError("busy"))
+        with mock.patch("line_tray.time.sleep"):
+            with self.assertRaisesRegex(RuntimeError, "rejected the system tray icon"):
+                tray._add_icon_with_retry(attempts=3, delay=0.1)
+        self.assertEqual(tray._add_icon.call_count, 3)
+
     def test_window_callback_defers_tk_restore_until_message_pump_returns(self):
         tray = object.__new__(LineTrayIcon)
         tray.root = mock.Mock()
@@ -460,6 +523,32 @@ class ScheduleTests(unittest.TestCase):
         mark_schedule_fired(schedule, "fresh", now.isoformat())
         self.assertIn("fresh", schedule["last_fired"])
         self.assertNotIn("stale", schedule["last_fired"])
+
+
+class FriendlyErrorTests(unittest.TestCase):
+    def test_maps_window_errors_to_thai_guidance(self):
+        from line_status_gui import friendly_task_error
+        self.assertIn("Settings > Profile",
+                      friendly_task_error("status", "The selected LINE window was closed."))
+        self.assertIn("Settings > Profile",
+                      friendly_task_error("read-status", "No LINE window is selected yet."))
+        self.assertIn("Settings > Profile",
+                      friendly_task_error("status", "The selected window is no longer a LINE.exe window."))
+        self.assertIn("Status message",
+                      friendly_task_error("status", "Could not identify exactly one Status message editor (found 0 of 5)."))
+        self.assertIn("Settings > Profile",
+                      friendly_task_error("read-status", "Could not read one unambiguous Status message value."))
+
+    def test_maps_save_and_picker_errors(self):
+        from line_status_gui import friendly_task_error
+        self.assertIn("Save", friendly_task_error("status", "Could not identify exactly one Save button."))
+        self.assertIn("file picker", friendly_task_error("image", "Open LINE's native photo file picker first."))
+        self.assertIn("read-status", friendly_task_error("read-status", "mystery failure xyz"))
+
+    def test_handles_empty_error(self):
+        from line_status_gui import friendly_task_error
+        self.assertIn("status", friendly_task_error("status", ""))
+        self.assertIn("status", friendly_task_error("status", None))
 
 
 class WindowsFeatureTests(unittest.TestCase):
