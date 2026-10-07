@@ -83,8 +83,8 @@
   },
   "autoreply": {
     "enabled": true,
-    "own_nickname": "CamfrogNoom",
-    "window_title_regex": "",
+    "own_nickname": "Seaza",
+    "window_title_regex": ".*ZeaZDev.*",
     "history": {
       "class_name": "AtlAxWinLic140",
       "auto_id": "1002",
