@@ -297,7 +297,7 @@ DEFAULTS = {
         "schedules": [],
         "language_cycle": [],
         "marquee": {"enabled": False, "width": 28, "stride": 2, "step_seconds": 0.5,
-                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80},
+                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80, "infinite_loop": False},
         "history": {"enabled": True, "file": "status_history.json", "max_items": 50,
                     "record": True, "use_as_source": False, "seed_from_messages": True,
                     "mode": "rotate"},
@@ -437,9 +437,11 @@ def _validate(cfg, errs, warns):
             errs.append(t("e_sel", k="status.edit"))
         mq, hs = st["marquee"], st["history"]
         try:
+            inf = mq.get("infinite_loop", False)
             if mq["enabled"] and not (8 <= mq["width"] <= 80 and mq["width"] <= st["max_length"]
                                       and 1 <= mq["stride"] <= mq["width"]
-                                      and mq["step_seconds"] >= 0.5 and 1 <= mq["cycles"] <= 5
+                                      and mq["step_seconds"] >= 0.5
+                                      and (inf or (1 <= mq["cycles"] <= 5))
                                       and 5 <= mq["max_frames"] <= 300):
                 errs.append(t("e_marquee"))
         except TypeError:
@@ -1010,15 +1012,19 @@ def clip(text: str, limit: int) -> str:
 
 
 def marquee_frames(text: str, width: int, stride: int = 2, separator: str = "   \u2022   ",
-                   cycles: int = 1, max_frames: int = 80) -> list[str]:
+                   cycles: int = 1, max_frames: int = 80, infinite_loop: bool = False) -> list[str]:
     """Frames of a cyclic ticker. Never blank, never splits a Thai cluster, bounded length.
-    Returns [text] unchanged when it already fits in `width` clusters."""
+    Returns [text] unchanged when it already fits in `width` clusters.
+    If infinite_loop=True, returns loop frames (no final settle frame) up to max_frames."""
     cl = clusters(text.strip())
     if not cl or len(cl) <= width:
         return [text.strip()] if cl else []
     ticker = cl + clusters(separator)
     n = len(ticker)
-    steps = min(max_frames, max(1, -(-n * cycles // stride)))
+    if infinite_loop:
+        steps = max_frames
+    else:
+        steps = min(max_frames, max(1, -(-n * cycles // stride)))
     frames = []
     for k in range(steps):
         start = (k * stride) % n
@@ -1585,10 +1591,11 @@ class Runner:
         final = clip(text, limit)
         if not mq["enabled"]:
             return [final]
+        inf = mq.get("infinite_loop", False)
         frames = [clip(f, limit) for f in marquee_frames(
-            text, mq["width"], mq["stride"], mq["separator"], mq["cycles"], mq["max_frames"])]
-        if not frames or frames[-1] != final:
-            frames.append(final)  # always settle on the full text
+            text, mq["width"], mq["stride"], mq["separator"], mq["cycles"], mq["max_frames"], inf)]
+        if not inf and (not frames or frames[-1] != final):
+            frames.append(final)  # settle on full text unless infinite loop
         return frames
 
     def do_status(self, now):
@@ -1914,8 +1921,9 @@ def cmd_marquee(cfg, a):
     mq = cfg["status"]["marquee"]
     width = a.width or mq["width"]
     stride = a.stride or mq["stride"]
+    inf = a.infinite_loop or mq.get("infinite_loop", False)
     frames = marquee_frames(a.text, width, stride, mq["separator"],
-                            a.cycles or mq["cycles"], a.max_frames or mq["max_frames"])
+                            a.cycles or mq["cycles"], a.max_frames or mq["max_frames"], inf)
     if len(frames) <= 1:
         print(t("mq_static"))
     for i, f in enumerate(frames, 1):
@@ -2261,6 +2269,7 @@ def build_parser():
     mqp.add_argument("--stride", type=int)
     mqp.add_argument("--cycles", type=int)
     mqp.add_argument("--max-frames", dest="max_frames", type=int)
+    mqp.add_argument("--infinite-loop", action="store_true", help="loop continuously without settling")
     sub.add_parser("history", parents=[common])
     ha = sub.add_parser("history-add", parents=[common])
     ha.add_argument("text")

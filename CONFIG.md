@@ -31,6 +31,7 @@ key ที่ไม่ใส่จะใช้ค่าเริ่มต้น 
 | `status.marquee.width` / `stride` | `28` / `2` | Window size (8–80, ≤ `max_length`) / Thai-safe clusters advanced per frame | ความกว้างหน้าต่าง / จำนวนกลุ่มอักษรที่เลื่อนต่อเฟรม |
 | `status.marquee.step_seconds` | `0.5` | Seconds between frames (**min 0.5**); the runner wakes at the frame deadline to avoid extra poll delay | วินาทีต่อเฟรม (**ขั้นต่ำ 0.5**); ตัวรันจะตื่นตามกำหนดเฟรมเพื่อลดเวลารอเกิน |
 | `status.marquee.cycles` / `max_frames` | `1` / `80` | Loops (1–5) and hard cap on frames per switch (5–300); then settles on the full text | จำนวนรอบ และเพดานเฟรมต่อการสลับ จากนั้นหยุดที่ข้อความเต็ม |
+| `status.marquee.infinite_loop` | `false` | `true` = continuous loop (no settle), frames cycle up to `max_frames` then repeat; `cycles` ignored | `true` = เลื่อนวนลูปไม่หยุด (ไม่หยุดที่ข้อความเต็ม) เฟรมวนซ้ำถึง `max_frames` แล้วเริ่มใหม่ `cycles` จะถูกละเว้น |
 | `status.marquee.separator` | `   •   ` | Gap shown between end and restart of the ticker | ช่องว่างระหว่างท้ายข้อความกับจุดเริ่มใหม่ |
 | `status.history.enabled` / `file` | `true` / `status_history.json` | Save every status you set | เก็บทุก status ที่ตั้ง |
 | `status.history.use_as_source` | `false` | `true` = next status is picked from history (`status.schedules` are then ignored) | `true` = เลือก status ถัดไปจากประวัติ (`schedules` จะไม่ถูกใช้) |

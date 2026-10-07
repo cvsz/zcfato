@@ -282,6 +282,16 @@ def test_marquee_frame_cap_and_cycle_wraps():
     assert len(frames) <= 20
 
 
+def test_marquee_infinite_loop_ignores_cycles():
+    # infinite_loop=True ignores cycles, uses max_frames only
+    frames = c.marquee_frames("abcdefghijklmnopqrstuvwxyz", 10, 1, "  |  ", cycles=100, max_frames=15, infinite_loop=True)
+    assert len(frames) == 15
+    # Without infinite_loop, cycles would be used
+    frames2 = c.marquee_frames("abcdefghijklmnopqrstuvwxyz", 10, 1, "  |  ", cycles=2, max_frames=15, infinite_loop=False)
+    assert len(frames2) <= 15
+    assert len(frames2) != 100  # not 100 * something
+
+
 # ---------- history ----------
 def test_history_modes_language_and_trim(tmp_path):
     h = c.StatusHistory(tmp_path / "h.json", max_items=5)
