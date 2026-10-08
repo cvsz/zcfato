@@ -1,5 +1,6 @@
-"""Standalone Camfrog Status Changer — no camfrog_auto dependency."""
+"""Standalone Status Changer UI with a self-hosted status worker entry point."""
 import copy
+from contextlib import closing
 import ctypes
 import datetime as dt
 import json
@@ -7,6 +8,7 @@ import logging
 import logging.handlers
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import time
@@ -97,6 +99,12 @@ class SingleInstanceGuard:
 # ---------- Inlined Constants and Functions ----------
 BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
     else Path(__file__).resolve().parent
+
+# Where the standalone Status Changer keeps its own files (config, pools, logs,
+# worker PID/STOP). Defaults to <exe>\config; the parent sets ZCFATO_DATA_DIR so
+# the hidden child worker (same exe, --worker) writes to the same folder.
+DATA_DIR = Path(os.environ["ZCFATO_DATA_DIR"]) if os.environ.get("ZCFATO_DATA_DIR") \
+    else BASE / "config"
 
 NICK_RE = re.compile(r"^[\w][\w .\-]{0,31}$", re.UNICODE)
 
@@ -581,9 +589,17 @@ def is_own_gui_window(win) -> bool:
     and would otherwise match window_title_regex). Camfrog itself never
     uses the TkTopLevel window class."""
     try:
-        return win.class_name() == "TkTopLevel"
+        if win.class_name() == "TkTopLevel":
+            return True
     except Exception:
-        return False
+        pass
+    try:
+        title = win.window_text()
+        if title and title.startswith("Camfrog Status Changer"):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def get_window(cfg: dict):
@@ -615,7 +631,12 @@ def find(win, spec: dict):
     items = win.descendants(**kw)
     if spec.get("auto_id") not in (None, ""):
         want = str(spec["auto_id"])
-        items = [c for c in items if str(_ctrl_attr(c, "automation_id")) == want]
+        filtered = [c for c in items if str(_ctrl_attr(c, "automation_id")) == want]
+        if not filtered and items:
+            log.warning("auto_id %r yielded 0 matches; falling back without auto_id filter (spec=%s)",
+                        want, {k: v for k, v in spec.items() if k in kw} or spec)
+            filtered = items
+        items = filtered
     if spec.get("title_re"):
         rx = re.compile(spec["title_re"])
         items = [c for c in items if rx.match(str(_ctrl_attr(c, "name")))]
@@ -623,6 +644,7 @@ def find(win, spec: dict):
     if len(items) <= idx:
         raise LookupError(t("no_ctrl", spec=spec, n=len(items)))
     return items[idx]
+
 
 def read_text(ctrl) -> str:
     try:
@@ -896,7 +918,9 @@ def clip(text: str, limit: int) -> str:
     return "".join(out)
 
 def pid_path(cfg):
-    return BASE / cfg["safety"]["pid_file"]
+    # The standalone worker (zcfato.exe --worker) writes its PID/STOP into DATA_DIR
+    # (its own BASE), so the parent must look there too.
+    return DATA_DIR / cfg["safety"]["pid_file"]
 
 def read_pid(cfg):
     try:
@@ -997,32 +1021,23 @@ def cmd_start(cfg, args):
     return 0
 
 def worker_cmd(args):
-    """Command that runs the status-only background worker.
-
-    The worker is camfrog-auto's run loop (Runner), not this GUI: this
-    module has no run loop, so relaunching itself would just open another
-    window (or exit on the single-instance mutex).
-    Frozen : dist/camfrog-auto.exe next to this exe.
-    Source : python camfrog_auto.py next to this file.
-    """
+    """Relaunch this standalone app in its hidden worker mode."""
+    if getattr(sys, "frozen", False):
+        command = [sys.executable]
+    else:
+        python = Path(sys.executable)
+        pythonw = python.with_name("pythonw.exe")
+        command = [str(pythonw if pythonw.exists() else python), str(Path(__file__).resolve())]
+    command.append("--worker")
     cfg_arg = []
     if getattr(args, "config", None):
         cfg_arg += ["--config", str(Path(args.config).resolve())]
     if getattr(args, "lang", None):
         cfg_arg += ["--lang", args.lang]
-    if getattr(sys, "frozen", False):
-        exe = BASE / "camfrog-auto.exe"
-        if not exe.is_file():
-            raise FileNotFoundError(
-                f"Worker executable not found: {exe} (re-run build.bat)")
-        return [str(exe)] + cfg_arg
-    script = BASE / "camfrog_auto.py"
-    if not script.is_file():
-        raise FileNotFoundError(f"Worker script not found: {script}")
-    return [str(Path(sys.executable)), str(script)] + cfg_arg
+    return command + cfg_arg
 
 def cmd_start_worker(cfg, args):
-    """Start the status-only worker (camfrog-auto run loop) in background."""
+    """Start this app's hidden status worker in the background."""
     pid = running_pid(cfg)
     if pid:
         print(t("already_running", pid=pid))
@@ -1033,12 +1048,14 @@ def cmd_start_worker(cfg, args):
     if not cfg["log"]["file"]:
         print(t("bg_needs_log"))
         return 2
-    logf = BASE / cfg["log"]["file"]
+    logf = DATA_DIR / cfg["log"]["file"]
     flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    env = child_env()
+    env["ZCFATO_DATA_DIR"] = str(DATA_DIR)
     p = subprocess.Popen(worker_cmd(args) + ["run"], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=flags, close_fds=True, cwd=str(BASE),
-                         env=child_env())
+                         env=env)
     time.sleep(2.5)
     if p.poll() is not None:
         print(t("bg_failed", code=p.returncode, log=logf))
@@ -1164,6 +1181,12 @@ def detect_camfrog(rows):
             c = min(combos, key=lambda r: (r["top"], r["left"]))
             out["status.edit"] = (_sel(rows, c),
                                   "top-most ComboBox (no inner Edit exposed)")
+        else:
+            edits_any = [r for r in live if r["class_name"].lower() == "edit"]
+            if edits_any:
+                e2 = min(edits_any, key=lambda r: (r["top"], r["left"]))
+                out["status.edit"] = (_sel(rows, e2),
+                                      "top-most Edit (broad fallback, verify manually)")
     return out
 
 def write_detect_report(rows, path):
@@ -1184,7 +1207,7 @@ def cmd_detect(cfg, cfg_path=None, apply=False, as_json=False):
     for rs in per_window:  # selectors are per window (find() indexes inside one window)
         for k, v in detect_camfrog(rs).items():
             found.setdefault(k, v)
-    rep = BASE / "detect_report.txt"
+    rep = DATA_DIR / "detect_report.txt"
     write_detect_report(rows, rep)
     if as_json:
         print("PROPOSAL " + json.dumps({k: v[0] for k, v in found.items()}))
@@ -1603,11 +1626,48 @@ class ClipboardController:
 # ---------- Original Status GUI ----------
 
 
-RUNTIME_CONFIG = BASE / "camfrog-status-runtime.json"
-WORKER_MARKER = BASE / "camfrog-status-changer-worker.pid"
+RUNTIME_CONFIG = "camfrog-status-runtime.json"
 MARQUEE_STEP_MIN = 0.5
 MARQUEE_STRIDE_DEFAULT = 2
 STATUS_SLOTS = 10
+
+
+def read_status_pool(path, seed_messages=None):
+    """Read one ten-slot pool, seeding a new database from legacy settings once."""
+    path = Path(path)
+    was_missing = not path.exists()
+    with closing(sqlite3.connect(path)) as connection:
+        with connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS status_slots "
+                "(slot INTEGER PRIMARY KEY CHECK(slot BETWEEN 1 AND 10), message TEXT NOT NULL)"
+            )
+            if was_missing and seed_messages is not None:
+                values = [message_to_text(message) for message in seed_messages[:STATUS_SLOTS]]
+                values.extend([""] * (STATUS_SLOTS - len(values)))
+                connection.executemany(
+                    "INSERT INTO status_slots(slot, message) VALUES(?, ?)",
+                    enumerate(values, start=1),
+                )
+            rows = dict(connection.execute("SELECT slot, message FROM status_slots"))
+    return [str(rows.get(slot, "")) for slot in range(1, STATUS_SLOTS + 1)]
+
+
+def write_status_pool(path, values):
+    """Persist all ten slots in a mode-specific SQLite database."""
+    values = [str(value) for value in values[:STATUS_SLOTS]]
+    values.extend([""] * (STATUS_SLOTS - len(values)))
+    with closing(sqlite3.connect(Path(path))) as connection:
+        with connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS status_slots "
+                "(slot INTEGER PRIMARY KEY CHECK(slot BETWEEN 1 AND 10), message TEXT NOT NULL)"
+            )
+            connection.execute("DELETE FROM status_slots")
+            connection.executemany(
+                "INSERT INTO status_slots(slot, message) VALUES(?, ?)",
+                enumerate(values, start=1),
+            )
 
 
 def text_to_message(value):
@@ -1639,13 +1699,16 @@ def messages_from_slots(values):
 
 
 def runtime_config(config):
-    """Clone shared settings for a status-only worker; keep the shared PID lock."""
+    """Build isolated worker settings with PID and stop files owned by this app."""
     runtime = copy.deepcopy(config)
     runtime["autoreply"]["enabled"] = False
     runtime.setdefault("autoreply_im", {})["enabled"] = False
     runtime["stats"]["file"] = "camfrog_status_changer_stats.json"
     runtime["log"]["file"] = "camfrog_status_changer.log"
-    runtime.setdefault("safety", {})["require_foreground"] = False
+    safety = runtime.setdefault("safety", {})
+    safety["pid_file"] = "camfrog_status_changer.pid"
+    safety["stop_file"] = "camfrog_status_changer.STOP"
+    safety["require_foreground"] = False
     return runtime
 
 
@@ -1660,14 +1723,11 @@ def build_app():
     class StatusChanger:
         def __init__(self, config_path):
             self.config_path = Path(config_path).resolve()
-            self.runtime_config_path = self.config_path.with_name(RUNTIME_CONFIG.name)
-            self.worker_marker_path = self.config_path.with_name(WORKER_MARKER.name)
+            self.runtime_config_path = DATA_DIR / RUNTIME_CONFIG.name
             self.root = tk.Tk()
             self.root.title("Camfrog Status Changer")
-            self.root.geometry("220x530")
-            self.root.resizable(False, False)
-            self.root.minsize(220, 530)
-            self.root.maxsize(220, 530)
+            self.root.geometry("460x650")
+            self.root.resizable(True, True)
             try:
                 self.root.iconbitmap(str(BASE / "app.ico"))
             except (tk.TclError, OSError):
@@ -1679,7 +1739,7 @@ def build_app():
             self.state_job = None
             self.save_job = None
             self.mode = "random"
-            self.entry_widgets = []
+            self.entry_widgets = {"random": [], "marquee": []}
             try:
                 self.config = load_cfg(self.config_path)
             except Exception as exc:
@@ -1687,8 +1747,14 @@ def build_app():
                 self.root.destroy()
                 raise SystemExit(2)
             global LANG
-            LANG = resolve_lang(self.config.get("language", "auto"))
-            self.fields = [tk.StringVar(value="") for _ in range(STATUS_SLOTS)]
+            self.language_preference = self.config.get("language", "auto")
+            LANG = resolve_lang(self.language_preference)
+            self.pool_paths = {
+                "random": DATA_DIR / "random.db",
+                "marquee": DATA_DIR / "marquee.db",
+            }
+            self.random_fields = [tk.StringVar(value="") for _ in range(STATUS_SLOTS)]
+            self.marquee_fields = [tk.StringVar(value="") for _ in range(STATUS_SLOTS)]
             self.step = tk.StringVar(value=str(max(
                 MARQUEE_STEP_MIN, self.config["status"]["marquee"]["step_seconds"])))
             self.stride = tk.StringVar(value=str(self.config["status"]["marquee"].get(
@@ -1697,41 +1763,55 @@ def build_app():
                 self.config["status"]["marquee"].get("infinite_loop", False)))
             self.combo_enter = tk.BooleanVar(value=(
                 self.config["status"].get("background_enter_target", "edit") == "combo"))
-            self._load_fields()
-            for variable in self.fields:
+            try:
+                self._load_fields()
+            except (OSError, sqlite3.Error) as exc:
+                messagebox.showerror("Camfrog Status Changer", str(exc), parent=self.root)
+                self.root.destroy()
+                raise SystemExit(2)
+            for variable in (self.random_fields + self.marquee_fields
+                             + [self.step, self.stride]):
                 variable.trace_add("write", self.schedule_save)
             self._build()
             self.clipboard_controller = ClipboardController(
                 self.root, translate=self._translate_clipboard, on_error=self._clipboard_error)
             self.clipboard_controller.install(self.root)
-            self.tray = TrayIcon(
-                self.root,
-                "Camfrog Status Changer",
-                on_show=self.show_from_tray,
-                on_exit=self.exit_app,
-                icon_path=str(BASE / "app.ico"),
-            )
-            self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+            self.root.protocol("WM_DELETE_WINDOW", self.close_app)
             self.task_poll_job = self.root.after(100, self.poll_task_results)
             self.state_job = self.root.after(500, self.refresh_state)
-            if self.config.get("status", {}).get("enabled", True):
-                self.root.after(400, self._auto_start_if_idle)
 
-            # Register single-instance restore message handler
+            # A second launch restores the visible standalone window.
             if os.name == "nt":
                 self._register_single_instance_handler()
 
         def _load_fields(self):
-            for var, message in zip(self.fields, self.config["status"]["messages"][:STATUS_SLOTS]):
-                var.set(message_to_text(message))
             st = self.config["status"]
             if st["marquee"]["enabled"]:
                 self.mode = "marquee"
             elif st["random"]:
                 self.mode = "random"
 
+            active_messages = st.get("messages", [])[:STATUS_SLOTS]
+            saved_pools = (("random", self.random_fields), ("marquee", self.marquee_fields))
+            for mode, fields in saved_pools:
+                seed = active_messages if mode == self.mode else None
+                values = read_status_pool(self.pool_paths[mode], seed_messages=seed)
+                for var, message in zip(fields, values[:STATUS_SLOTS]):
+                    var.set(message)
+
+        def _fields_for_mode(self, mode=None):
+            selected_mode = mode or self.mode
+            return self.marquee_fields if selected_mode == "marquee" else self.random_fields
+
         def _tr(self, en, th):
             return th if LANG == "th" else en
+
+        def _change_language(self, _event=None):
+            global LANG
+            LANG = "th" if self.language_box.get() == "TH" else "en"
+            self.language_preference = LANG
+            self._build()
+            self.schedule_save()
 
         def _translate_clipboard(self, text):
             en, _, th = text.partition("||")
@@ -1747,38 +1827,56 @@ def build_app():
 
         def _build(self):
             root = self.root
+            for child in root.winfo_children():
+                child.destroy()
+            self.entry_widgets = {"random": [], "marquee": []}
             style = ttk.Style(root)
             try:
                 style.theme_use("clam")
             except tk.TclError:
                 pass
-            style.configure("Brand.TLabel", font=("Segoe UI", 9, "bold"), foreground="#126c68")
-            style.configure("State.TLabel", font=("Segoe UI", 8, "bold"))
-            outer = ttk.Frame(root, padding=(7, 6, 7, 4))
+            style.configure("Brand.TLabel", font=("Segoe UI", 10, "bold"), foreground="#126c68")
+            style.configure("State.TLabel", font=("Segoe UI", 9, "bold"))
+            style.configure("Hint.TLabel", font=("Segoe UI", 8), foreground="#53636d")
+            style.configure("Mode.TNotebook", tabmargins=(0, 5, 0, 0))
+            style.configure("Mode.TNotebook.Tab", padding=(12, 7), font=("Segoe UI", 9, "bold"))
+            style.configure("Action.TButton", padding=(10, 7), font=("Segoe UI", 9, "bold"))
+            outer = ttk.Frame(root, padding=(12, 10, 12, 10))
             outer.pack(fill="both", expand=True)
 
             header = ttk.Frame(outer)
-            header.pack(fill="x", pady=(0, 5))
-            ttk.Label(header, text="STATUS", style="Brand.TLabel").pack(side="left")
+            header.pack(fill="x", pady=(0, 2))
+            ttk.Label(header, text="STATUS CHANGER", style="Brand.TLabel").pack(side="left")
             self.state_label = ttk.Label(header, text="", style="State.TLabel")
             self.state_label.pack(side="right")
-            ttk.Checkbutton(outer, text=self._tr("Try combo Enter (test)", "ลอง Enter ที่ combo"),
-                            variable=self.combo_enter, command=self.schedule_save).pack(anchor="w")
+            self.language_box = ttk.Combobox(
+                header, values=("TH", "EN"), width=3, state="readonly")
+            self.language_box.set("TH" if LANG == "th" else "EN")
+            self.language_box.pack(side="right", padx=(0, 9))
+            self.language_box.bind("<<ComboboxSelected>>", self._change_language)
+            ttk.Label(outer, text=self._tr(
+                "Each tab has 10 separate statuses. Start saves both lists and runs the selected mode.",
+                "แต่ละแท็บมี 10 สถานะแยกกัน กด Start เพื่อบันทึกและเริ่มโหมดที่เลือก"),
+                style="Hint.TLabel").pack(anchor="w", pady=(0, 6))
 
-            self.tabs = ttk.Notebook(outer)
+            self.tabs = ttk.Notebook(outer, style="Mode.TNotebook")
             self.tabs.pack(fill="both", expand=True)
             self.pages = {}
-            for name, mode in (("Random", "random"), ("Marquee", "marquee")):
-                page = ttk.Frame(self.tabs, padding=6)
+            for name, mode in (("Random Status", "random"), ("Marquee Status", "marquee")):
+                page = ttk.Frame(self.tabs, padding=10)
                 self.tabs.add(page, text=name)
                 self.pages[mode] = page
                 self._build_page(page, mode)
             self.tabs.bind("<<NotebookTabChanged>>", self._tab_changed)
 
-            self.note = ttk.Label(outer, text="", font=("Segoe UI", 7), anchor="center",
-                                  foreground="#53636d", wraplength=190)
-            self.note.pack(fill="x", pady=(4, 2))
-            ttk.Label(outer, text="CAMFROG AUTO", style="Brand.TLabel",
+            self.note = ttk.Label(outer, text="", font=("Segoe UI", 8), anchor="w",
+                                  foreground="#53636d", wraplength=420)
+            self.note.pack(fill="x", pady=(7, 5))
+            ttk.Checkbutton(outer, text=self._tr("Try combo Enter (test)", "ลอง Enter ที่ combo"),
+                            variable=self.combo_enter, command=self.schedule_save).pack(
+                                anchor="w", pady=(0, 5))
+            self._build_actions(outer)
+            ttk.Label(outer, text="CAMFROG STATUS CHANGER", style="Brand.TLabel",
                       anchor="center").pack(fill="x")
             selected = 1 if self.mode == "marquee" else 0
             self.tabs.select(selected)
@@ -1786,10 +1884,18 @@ def build_app():
         def _build_page(self, page, mode):
             if mode == "random":
                 ttk.Label(page, text=self._tr("Random status pool", "ชุดสถานะสุ่ม"),
-                          font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 3))
+                          font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 3))
+                ttk.Label(page, text=self._tr(
+                    "The active status is picked from these entries.",
+                    "ระบบจะสุ่มสถานะจากรายการนี้"), style="Hint.TLabel").pack(
+                        anchor="w", pady=(0, 8))
             else:
                 ttk.Label(page, text=self._tr("Marquee status pool", "ชุดสถานะเลื่อน"),
-                          font=("Segoe UI", 8, "bold")).pack(anchor="w", pady=(0, 3))
+                          font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 3))
+                ttk.Label(page, text=self._tr(
+                    "Marquee statuses and timing are kept separate from Random Status.",
+                    "รายการและจังหวะข้อความเลื่อนแยกจากโหมดสุ่ม"),
+                    style="Hint.TLabel").pack(anchor="w", pady=(0, 6))
                 speed = ttk.Frame(page)
                 speed.pack(fill="x", pady=(0, 3))
                 ttk.Label(speed, text=self._tr("Step", "จังหวะ")).pack(side="left")
@@ -1800,31 +1906,39 @@ def build_app():
                 ttk.Spinbox(speed, textvariable=self.stride, from_=1, to=10,
                             increment=1, width=2).pack(side="left")
                 ttk.Checkbutton(speed, text=self._tr("Loop", "วนลูป"),
-                                variable=self.infinite_loop).pack(side="left", padx=(5, 0))
+                                variable=self.infinite_loop,
+                                command=self.schedule_save).pack(side="left", padx=(8, 0))
 
             entries = ttk.Frame(page)
             entries.pack(fill="both", expand=True)
-            for index, var in enumerate(self.fields):
-                ttk.Label(entries, text=str(index + 1), width=2).grid(
+            for index, var in enumerate(self._fields_for_mode(mode)):
+                ttk.Label(entries, text=f"{index + 1:02d}", width=3,
+                          foreground="#53636d").grid(
                     row=index, column=0, sticky="w", pady=3)
-                entry = ttk.Entry(entries, textvariable=var, width=13)
+                entry = ttk.Entry(entries, textvariable=var)
                 entry.grid(row=index, column=1, sticky="ew", pady=3)
-                self.entry_widgets.append((entry, var))
+                self.entry_widgets[mode].append((entry, var))
             entries.columnconfigure(1, weight=1)
 
-            buttons = ttk.Frame(page)
-            buttons.pack(fill="x", pady=(4, 0))
-            ttk.Button(buttons, text=self._tr("Apply Now", "ใช้ทันที"),
-                       command=self.apply_now).pack(
-                           fill="x", pady=(0, 3))
-            row2 = ttk.Frame(buttons)
-            row2.pack(fill="x")
-            ttk.Button(row2, text=self._tr("Enable", "เปิด"),
-                       command=lambda m=mode: self.set_enabled(m, True)).pack(
-                           side="left", fill="x", expand=True, padx=(0, 2))
-            ttk.Button(row2, text=self._tr("Disable", "ปิด"),
-                       command=lambda: self.set_enabled(mode, False)).pack(
-                           side="left", fill="x", expand=True, padx=(2, 0))
+        def _build_actions(self, parent):
+            ttk.Button(parent, text=self._tr("Apply Now", "ใช้ทันที"),
+                       command=self.apply_now).pack(fill="x", pady=(0, 5))
+            actions = ttk.Frame(parent)
+            actions.pack(fill="x", pady=(0, 6))
+            ttk.Button(actions, text=self._tr("Start", "เริ่ม"),
+                        style="Action.TButton",
+                        command=lambda: self.set_enabled(self.mode, True)).pack(
+                            side="left", fill="x", expand=True, padx=(0, 3))
+            ttk.Button(actions, text=self._tr("Stop", "หยุด"),
+                        style="Action.TButton",
+                        command=lambda: self.set_enabled(self.mode, False)).pack(
+                            side="left", fill="x", expand=True, padx=(3, 0))
+            ttk.Button(parent, text=self._tr("Discover controls", "ดึง control"),
+                       command=self.discover).pack(fill="x", pady=(0, 5))
+            ttk.Label(parent, text=self._tr(
+                "Close / X stops this app's worker before exiting.",
+                "ปิดหน้าต่างด้วย X เพื่อหยุด worker ของแอปก่อนออก"),
+                 style="Hint.TLabel").pack(anchor="w", pady=(0, 5))
 
         def _tab_changed(self, _event=None):
             try:
@@ -1842,9 +1956,10 @@ def build_app():
             self.save_job = self.root.after(450, self.save_settings)
 
         def collect_config(self, enabled=None, mode=None):
+            self._save_pools()
             config = load_cfg(self.config_path)
+            config["language"] = self.language_preference
             st = config["status"]
-            st["messages"] = messages_from_slots(var.get() for var in self.fields)
             st["background_enter_target"] = "combo" if self.combo_enter.get() else "edit"
             mq = st["marquee"]
             try:
@@ -1855,8 +1970,13 @@ def build_app():
                 raise ValueError(self._tr("Enter valid marquee speed values.",
                                           "กรอกค่าความเร็วข้อความเลื่อนให้ถูกต้อง")) from exc
             if mode is not None:
+                st["messages"] = messages_from_slots(
+                    var.get() for var in self._fields_for_mode(mode))
                 st["random"] = mode == "random"
                 mq["enabled"] = mode == "marquee"
+            if enabled:
+                # "Start" means rotate a status now, not after one interval.
+                st["set_on_start"] = True
             if enabled is not None:
                 st["enabled"] = enabled
             if st["enabled"] and not st["messages"]:
@@ -1875,12 +1995,18 @@ def build_app():
                 write_config(self.runtime_config_path, runtime)
                 self.config = config
                 if notify:
-                    self.note.configure(text=self._tr("Saved to shared config.json",
-                                                      "บันทึกใน config.json แล้ว"))
+                    self.note.configure(text=self._tr("Saved to standalone status config",
+                                                      "บันทึกการตั้งค่า Status Changer แล้ว"))
                 return config
-            except (OSError, ValueError, KeyError) as exc:
+            except (OSError, sqlite3.Error, ValueError, KeyError) as exc:
                 self.note.configure(text=str(exc), foreground="#a52834")
                 return None
+
+        def _save_pools(self):
+            write_status_pool(
+                self.pool_paths["random"], [var.get() for var in self.random_fields])
+            write_status_pool(
+                self.pool_paths["marquee"], [var.get() for var in self.marquee_fields])
 
         def apply_now(self):
             """Immediately apply the selected or first configured status to Camfrog."""
@@ -1891,7 +2017,7 @@ def build_app():
             chosen = None
             try:
                 focused = self.root.focus_get()
-                for entry, var in self.entry_widgets:
+                for entry, var in self.entry_widgets[self.mode]:
                     if entry == focused:
                         val = var.get().strip()
                         if val:
@@ -1901,7 +2027,7 @@ def build_app():
                 pass
 
             if not chosen:
-                msgs = messages_from_slots(var.get() for var in self.fields)
+                msgs = messages_from_slots(var.get() for var in self._fields_for_mode())
                 if msgs:
                     chosen = msgs[0]
 
@@ -1922,53 +2048,53 @@ def build_app():
                 cfg_copy.setdefault("safety", {})["require_foreground"] = False
                 try:
                     return cmd_status(cfg_copy, status_str)
-                except LookupError:
-                    if cmd_detect(cfg, self.config_path, apply=True) == 0:
+                except (LookupError, RuntimeError):
+                    try:
+                        detected = cmd_detect(cfg, self.config_path, apply=True)
+                    except RuntimeError as e:
+                        raise RuntimeError(self._tr(
+                            "Cannot find Camfrog window. Is Camfrog running?",
+                            "ไม่พบหน้าต่าง Camfrog เปิดแล้วหรือยัง")) from e
+                    if detected == 0:
                         cfg = load_cfg(self.config_path)
                         cfg_copy = copy.deepcopy(cfg)
                         cfg_copy.setdefault("safety", {})["require_foreground"] = False
                         return cmd_status(cfg_copy, status_str)
-                    raise
+                    raise RuntimeError(self._tr(
+                        "Could not find status controls. Open a chat room in Camfrog and retry.",
+                        "ไม่พบ control ของ status เปิดห้องแชทใน Camfrog แล้วลองใหม่"))
 
             display_preview = status_str[:22] + "…" if len(status_str) > 22 else status_str
             self.run_task(do_apply, self._tr(f"Applied: {display_preview}",
                                              f"เปลี่ยนสถานะแล้ว: {display_preview}"))
 
-        def _auto_start_if_idle(self):
-            try:
-                config = load_cfg(self.config_path)
-                if not config.get("status", {}).get("enabled", False):
-                    return
-                main_pid = running_pid(config)
-                if not main_pid:
-                    self._start_worker(config)
-            except Exception as exc:
-                logging.debug("Auto-start check failed: %s", exc)
+        def discover(self):
+            """Scan the running Camfrog window for status/room controls and write the
+            detected selectors into this app's config (apply=True)."""
+            def do():
+                cfg = load_cfg(self.config_path)
+                rc = cmd_detect(cfg, self.config_path, apply=True)
+                if rc == 0:
+                    self.config = load_cfg(self.config_path)
+                return rc
+            self.run_task(do, self._tr("Controls discovered", "ดึง control แล้ว"))
 
         def set_enabled(self, mode, enabled):
             config = self.save_settings(enabled=enabled, mode=mode)
             if config is None:
                 return
             self.mode = mode
+            runtime = runtime_config(config)
+            worker_pid = running_pid(runtime)
             if enabled:
-                main_pid = running_pid(config)
-                worker_pid = self._worker_pid()
-                if main_pid:
-                    if worker_pid == main_pid:
-                        self.note.configure(text=self._tr("Status worker is already running.",
-                                                          "ตัวเปลี่ยนสถานะกำลังทำงานอยู่"),
-                                             foreground="#138a55")
-                    else:
-                        self.note.configure(text=self._tr("Settings saved for the running bot.",
-                                                          "บันทึกค่าให้บอทที่กำลังทำงานแล้ว"),
-                                             foreground="#138a55")
+                if worker_pid:
+                    self.note.configure(text=self._tr("Status worker is already running.",
+                                                      "ตัวเปลี่ยนสถานะกำลังทำงานอยู่"),
+                                         foreground="#138a55")
                     return
                 self._start_worker(config)
             else:
-                main_pid = running_pid(config)
-                worker_pid = self._worker_pid()
-                if main_pid and worker_pid == main_pid:
-                    runtime = runtime_config(config)
+                if worker_pid:
                     self.run_task(lambda: self._stop_worker(runtime),
                                   self._tr("Status worker stopped.", "หยุดตัวเปลี่ยนสถานะแล้ว"))
                 else:
@@ -1982,34 +2108,20 @@ def build_app():
             def start():
                 rc = cmd_start_worker(runtime, args)
                 if rc == 0:
-                    pid = running_pid(runtime)
-                    if not pid:
-                        raise RuntimeError(self._tr(
-                            "Worker started but its process could not be verified.",
-                            "เริ่ม worker แล้วแต่ตรวจสอบโปรเซสไม่ได้"))
-                    try:
-                        self.worker_marker_path.write_text(str(pid), encoding="ascii")
-                    except OSError:
-                        # Do not leave an untracked worker if its ownership marker
-                        # cannot be written; roll it back before reporting failure.
-                        cmd_stop(runtime)
-                        raise
+                    deadline = time.monotonic() + 5.0
+                    while time.monotonic() < deadline:
+                        if running_pid(runtime):
+                            return rc
+                        time.sleep(0.1)
+                    raise RuntimeError(self._tr(
+                        "Worker started but its process could not be verified.",
+                        "เริ่ม worker แล้วแต่ตรวจสอบโปรเซสไม่ได้"))
                 return rc
 
             self.run_task(start, self._tr("Status worker started.", "เริ่มตัวเปลี่ยนสถานะแล้ว"))
 
         def _stop_worker(self, runtime):
-            result = cmd_stop(runtime)
-            if result in (None, 0):
-                self.worker_marker_path.unlink(missing_ok=True)
-            return result
-
-        def _worker_pid(self):
-            try:
-                pid = int(self.worker_marker_path.read_text(encoding="ascii").strip())
-                return pid if pid_alive(pid) else None
-            except (OSError, ValueError):
-                return None
+            return cmd_stop(runtime)
 
         def run_task(self, function, done_text, on_done=None):
             if self.busy:
@@ -2065,24 +2177,7 @@ def build_app():
                 except tk.TclError:
                     pass
 
-        def on_close(self):
-            if getattr(self, "tray", None) and self.tray.active:
-                self.hide_to_tray()
-            else:
-                self.exit_app()
-
-        def hide_to_tray(self):
-            try:
-                self.root.withdraw()
-                self.note.configure(
-                    text=self._tr("Hidden in system tray. Click icon to restore.",
-                                  "ซ่อนใน system tray แล้ว คลิกไอคอนเพื่อเปิด"),
-                    foreground="#53636d",
-                )
-            except tk.TclError:
-                pass
-
-        def show_from_tray(self):
+        def _restore_window(self):
             try:
                 self.root.deiconify()
                 self.root.lift()
@@ -2090,13 +2185,8 @@ def build_app():
             except tk.TclError:
                 pass
 
-        def exit_app(self):
-            if getattr(self, "tray", None):
-                self.tray.shutdown()
-            self.close_app()
-
         def close_app(self):
-            """Exit fully, stopping only the status-only worker this window owns."""
+            """Stop the standalone worker and exit; never leave the UI in the tray."""
             if self.busy:
                 self.close_requested = True
                 self.note.configure(text=self._tr(
@@ -2105,10 +2195,8 @@ def build_app():
                 return
             try:
                 config = load_cfg(self.config_path)
-                worker_pid = self._worker_pid()
-                main_pid_val = running_pid(config)
-                if worker_pid and worker_pid == main_pid_val:
-                    runtime = runtime_config(config)
+                runtime = runtime_config(config)
+                if running_pid(runtime):
                     self.note.configure(text=self._tr(
                         "Stopping the status worker before exit…",
                         "กำลังหยุดตัวเปลี่ยนสถานะก่อนออก…"), foreground="#53636d")
@@ -2119,8 +2207,6 @@ def build_app():
                     )
                     if started:
                         return
-                if self.worker_marker_path.exists() and not worker_pid:
-                    self.worker_marker_path.unlink(missing_ok=True)
             except Exception as exc:
                 logging.exception("Could not prepare a clean Status Changer exit")
                 messagebox.showerror(
@@ -2143,15 +2229,13 @@ def build_app():
                     foreground="#a52834")
 
         def _finalize_close(self):
-            if getattr(self, "tray", None):
-                self.tray.shutdown()
             if self.save_job is not None:
                 try:
                     self.root.after_cancel(self.save_job)
                 except tk.TclError:
                     pass
                 self.save_job = None
-                self.save_settings()
+            self.save_settings(enabled=False, mode=self.mode)
             for job in (self.state_job, self.task_poll_job):
                 if job is not None:
                     try:
@@ -2184,7 +2268,7 @@ def build_app():
 
                 def new_wndproc(hwnd, msg, wparam, lparam):
                     if msg == SingleInstanceGuard.WM_SHOWME:
-                        self.root.after(0, self.show_from_tray)
+                        self.root.after(0, self._restore_window)
                         return 0
                     return self.user32.CallWindowProcW(self.old_wndproc, hwnd, msg, wparam, lparam)
 
@@ -2200,12 +2284,10 @@ def build_app():
                 return
             try:
                 config = load_cfg(self.config_path)
-                pid = running_pid(config)
-                worker = self._worker_pid()
+                pid = running_pid(runtime_config(config))
                 running = bool(pid)
                 self.state_label.configure(
-                    text=(self._tr("WORKER", "ตัวเปลี่ยน") if running and pid == worker else
-                          self._tr("RUNNING", "ทำงาน") if running else
+                    text=(self._tr("RUNNING", "ทำงาน") if running else
                           self._tr("STOPPED", "หยุด")),
                     foreground="#138a55" if running else "#697780",
                 )
@@ -2222,6 +2304,15 @@ def build_app():
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
 
+    if "--worker" in argv:
+        argv.remove("--worker")
+        try:
+            from camfrog_auto import main as run_status_worker
+        except ImportError as exc:
+            print(f"Standalone status worker is unavailable: {exc}")
+            return 1
+        return run_status_worker(argv)
+
     if os.name == "nt":
         try:
             import ctypes
@@ -2236,11 +2327,16 @@ def main(argv=None):
         return 0
 
     try:
-        config_path = BASE / "config.json"
+        config_path = DATA_DIR / "camfrog-status-config.json"
         if "--config" in argv:
             index = argv.index("--config")
             if index + 1 < len(argv):
                 config_path = Path(argv[index + 1])
+        elif not config_path.exists():
+            template_path = BASE / "config.json"
+            initial_config = (load_cfg(template_path) if template_path.exists()
+                              else copy.deepcopy(DEFAULTS))
+            write_config(config_path, initial_config)
         try:
             app = build_app()(config_path)
         except SystemExit as exc:

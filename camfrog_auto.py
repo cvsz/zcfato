@@ -51,6 +51,12 @@ for _n in ("stdout", "stderr"):
 BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
     else Path(__file__).resolve().parent
 
+# The standalone Status Changer (zcfato.exe) keeps its own files in <exe>\config.
+# Its parent sets ZCFATO_DATA_DIR so the hidden child worker (same exe, --worker)
+# writes to the same folder. camfrog-auto.exe is unaffected (no env var set).
+if os.environ.get("ZCFATO_DATA_DIR"):
+    BASE = Path(os.environ["ZCFATO_DATA_DIR"])
+
 # Nickname regex: Unicode word chars + space . - (Camfrog allows Thai in nicknames).
 # LINE_RE nick capture is permissive; validation happens via NICK_RE.
 NICK_RE = re.compile(r"^[\w][\w .\-]{0,31}$", re.UNICODE)
@@ -586,9 +592,17 @@ def is_own_gui_window(win) -> bool:
     and would otherwise match window_title_regex). Camfrog itself never
     uses the TkTopLevel window class."""
     try:
-        return win.class_name() == "TkTopLevel"
+        if win.class_name() == "TkTopLevel":
+            return True
     except Exception:
-        return False
+        pass
+    try:
+        title = win.window_text()
+        if title and title.startswith("Camfrog Status Changer"):
+            return True
+    except Exception:
+        pass
+    return False
 
 
 def get_window(cfg: dict):
@@ -1446,15 +1460,19 @@ class Runner:
                     self.apply_cfg(new_cfg)
                 except Exception as ex:
                     log.error(f"Failed to reload after auto-detect: {ex}")
+                    raise
                 self._do_resolve()
             else:
-                log.error("Auto-detect failed to find missing elements.")
-                raise
+                log.error("Auto-detect failed to find missing elements. Retrying on next tick.")
+                self.status_edit = None
+                self.apply_btn = None
+                self.win = None
 
     def _do_resolve(self):
         cfg = self.cfg
         st, ar = cfg["status"], cfg["autoreply"]
         self.win = get_window(cfg)
+        self.status_edit, self.apply_btn = None, None
         self.status_edit = find(self.win, st["edit"]) if st["enabled"] else None
         self.apply_btn = find(self.win, st["apply_button"]) \
             if st["enabled"] and st["apply_button"] else None
@@ -1638,6 +1656,9 @@ class Runner:
     def do_status(self, now):
         st = self.cfg["status"]
         if not self.status_edit:
+            if st["enabled"] and now >= getattr(self, "_next_status_warn", 0):
+                log.warning(t("no_ctrl", spec={"section": "status.edit"}, n=0))
+                self._next_status_warn = now + 60
             return
         if self.marq is None:
             if now - self.last_status < st["interval_seconds"]:
@@ -1736,7 +1757,10 @@ class Runner:
             log.error(t("refuse_im"))
             return 2
         self.stop_file.unlink(missing_ok=True)  # clear a stale STOP from a previous run
-        self.resolve()
+        try:
+            self.resolve()
+        except Exception as e:
+            log.warning(f"Initial resolve failed ({e}); entering retry loop.")
         log.info(t("running", dry=self.dry, stop=self.stop_file.name))
         self.im_summary()
         fails = 0
@@ -1747,6 +1771,12 @@ class Runner:
                     self.maybe_reload(now)
                     active = in_active_hours(self.cfg)
                     if active and self.cfg["status"]["enabled"]:
+                        if self.status_edit is None and now >= getattr(self, "_next_resolve_retry", 0):
+                            self._next_resolve_retry = now + 30
+                            try:
+                                self.resolve()
+                            except Exception as e:
+                                log.warning(t("re_resolve", e=e))
                         self.do_status(now)
                     if self.cfg["autoreply"]["enabled"] and self.history is None:
                         self.attach_chat(now)
@@ -2116,6 +2146,12 @@ def detect_camfrog(rows):
             c = min(combos, key=lambda r: (r["top"], r["left"]))
             out["status.edit"] = (_sel(rows, c),
                                   "top-most ComboBox (no inner Edit exposed)")
+        else:
+            edits_any = [r for r in live if r["class_name"].lower() == "edit"]
+            if edits_any:
+                e2 = min(edits_any, key=lambda r: (r["top"], r["left"]))
+                out["status.edit"] = (_sel(rows, e2),
+                                      "top-most Edit (broad fallback, verify manually)")
     return out
 
 

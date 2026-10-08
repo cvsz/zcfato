@@ -117,35 +117,34 @@ def test_single_instance_guard_non_windows_always_succeeds(monkeypatch):
     guard.release()
 
 
-def test_worker_cmd_uses_camfrog_auto_not_itself(tmp_path, monkeypatch):
-    """The background worker must be camfrog-auto's run loop, not this GUI."""
+def test_worker_cmd_runs_the_standalone_status_gui_in_worker_mode(monkeypatch, tmp_path):
+    """Development mode relaunches this script and selects its bundled worker."""
     from types import SimpleNamespace
     monkeypatch.setattr(gui.sys, "frozen", False, raising=False)
-    monkeypatch.setattr(gui, "BASE", tmp_path)
-    (tmp_path / "camfrog_auto.py").write_text("# stub", encoding="utf-8")
-    args = SimpleNamespace(config=str(tmp_path / "rt.json"), lang=None)
+    config_path = tmp_path / "camfrog-status-config.json"
+    args = SimpleNamespace(config=str(config_path), lang="en")
     cmd = gui.worker_cmd(args)
-    assert any(str(c).endswith("camfrog_auto.py") for c in cmd)
-    assert "camfrog_status_gui" not in " ".join(str(c) for c in cmd)
+    assert str(gui.Path(cmd[1]).resolve()) == str(gui.Path(gui.__file__).resolve())
+    assert "--worker" in cmd
+    assert cmd[cmd.index("--config") + 1] == str(config_path.resolve())
+    assert cmd[cmd.index("--lang") + 1] == "en"
+    assert not any(str(part).lower().endswith(("camfrog-auto.exe", "camfrog-auto-gui.exe"))
+                   for part in cmd)
 
 
-def test_worker_cmd_frozen_uses_camfrog_auto_exe(tmp_path, monkeypatch):
+def test_worker_cmd_frozen_relaunches_the_same_executable(monkeypatch, tmp_path):
     from types import SimpleNamespace
+    executable = tmp_path / "zcfato.exe"
     monkeypatch.setattr(gui.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(gui, "BASE", tmp_path)
-    (tmp_path / "camfrog-auto.exe").write_bytes(b"MZ")
-    args = SimpleNamespace(config=str(tmp_path / "rt.json"), lang=None)
+    monkeypatch.setattr(gui.sys, "executable", str(executable))
+    config_path = tmp_path / "camfrog-status-config.json"
+    args = SimpleNamespace(config=str(config_path), lang=None)
     cmd = gui.worker_cmd(args)
-    assert cmd[0].endswith("camfrog-auto.exe")
-
-
-def test_worker_cmd_frozen_missing_exe_raises(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-    monkeypatch.setattr(gui.sys, "frozen", True, raising=False)
-    monkeypatch.setattr(gui, "BASE", tmp_path)
-    args = SimpleNamespace(config=str(tmp_path / "rt.json"), lang=None)
-    with pytest.raises(FileNotFoundError):
-        gui.worker_cmd(args)
+    assert cmd[0] == str(executable)
+    assert "--worker" in cmd
+    assert cmd[cmd.index("--config") + 1] == str(config_path.resolve())
+    assert not any(str(part).lower().endswith(("camfrog-auto.exe", "camfrog-auto-gui.exe"))
+                   for part in cmd)
 
 
 def test_infinite_loop_validation_mirrors_core():

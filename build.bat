@@ -10,7 +10,7 @@ rem Select supported 64-bit Python
 rem ============================================================
 set "PYSEL="
 
-for %%V in (3.13 3.12 3.11 3.14) do (
+for %%V in (3.12 3.13 3.11 3.14) do (
     if not defined PYSEL (
         py -%%V-64 -c "import sys" >nul 2>&1
         if not errorlevel 1 set "PYSEL=py -%%V-64"
@@ -212,20 +212,14 @@ rem ============================================================
 echo.
 echo === BUILD STATUS CHANGER ===
 
-"%VENV_PY%" -m PyInstaller ^
-    --noconfirm ^
-    --clean ^
-    --onefile ^
-    --windowed ^
-    --name "camfrog-status-changer" ^
-    %ICONARG% ^
-    --collect-all pywinauto ^
-    --collect-submodules comtypes ^
-    camfrog_status_gui.py
+"%VENV_PY%" -m PyInstaller --noconfirm --clean ^
+    --distpath dist ^
+    --workpath build\zcfato\work ^
+    zcfato.spec
 
 if errorlevel 1 goto :fail
 
-if not exist "dist\camfrog-status-changer.exe" goto :fail
+if not exist "dist\zcfato.exe" goto :fail
 
 
 rem ============================================================
@@ -272,7 +266,7 @@ echo === VERIFY RELEASE ===
 
 if not exist "dist\%NAME%.exe" goto :fail
 if not exist "dist\%NAME%-gui.exe" goto :fail
-if not exist "dist\camfrog-status-changer.exe" goto :fail
+if not exist "dist\zcfato.exe" goto :fail
 if not exist "%NAME%-windows.zip" goto :fail
 
 echo.
@@ -280,11 +274,11 @@ echo BUILD OK / สร้างสำเร็จ
 echo.
 echo dist\%NAME%.exe
 echo dist\%NAME%-gui.exe
-echo dist\camfrog-status-changer.exe
+echo dist\zcfato.exe
 echo %NAME%-windows.zip
 echo.
 echo Next / ขั้นต่อไป:
-echo Run dist\camfrog-status-changer.exe to edit the shared configuration.
+echo Run dist\zcfato.exe to edit status pools and start the standalone worker.
 echo Or run dist\%NAME%-gui.exe for the full GUI.
 
 exit /b 0

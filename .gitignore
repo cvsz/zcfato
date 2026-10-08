@@ -11,9 +11,14 @@ STOP
 stats.json
 *.zip
 *.spec
+!zcfato.spec
 *.mp4
 status_history.json
 *.tmp
 
 camfrog-status-runtime.json
 camfrog_status_changer_stats.json
+
+# Stray device-probe artifacts (UPnP SCPD dumps, bundled VB6 binaries, etc.)
+samsung-*.xml
+docs/Camfrog Status 2009.exe

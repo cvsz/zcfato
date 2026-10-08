@@ -99,7 +99,7 @@ def test_doctor_bat_runs_once_and_matches_build_selection():
     doc = (root / "doctor.bat").read_text(encoding="utf-8")
     bld = (root / "build.bat").read_text(encoding="utf-8")
     assert "||" not in doc  # the old `py ... || python ...` ran doctor twice on failure
-    cand = "for %%V in (3.13 3.12 3.11 3.14) do ("
+    cand = "for %%V in (3.12 3.13 3.11 3.14) do ("
     assert cand in doc and cand in bld
 
 

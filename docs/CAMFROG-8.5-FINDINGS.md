@@ -6,6 +6,8 @@ Source: static inspection of `Camfrog Video Chat.exe` 8.5.0.51219 (x64, Camfrog 
 (window classes, control kinds, resources). No network protocol, licensing or code-patching work was done.
 **Not verified on a live Windows 11 session** — run `camfrog-auto detect` once to confirm on your machine.
 
+Related historical artifact: [static reverse-engineering notes for Camfrog Status 2009](CAMFROG-STATUS-2009-RE.md). That separate VB6 utility does not provide selectors or verified command IDs for Camfrog 8.5.
+
 | Finding | Evidence in the binary | Consequence for this tool |
 |---|---|---|
 | Native Win32/WTL shell, custom skin, 64-bit | PE32+ GUI; imports COMCTL32, GDI+; only 3 stub `RT_DIALOG`s; controls are created from skin ids at runtime | Win32 control IDs are **not** static, so the old `auto_id 1002` default was a guess. Selectors are now class-based |

@@ -41,8 +41,8 @@ if not exist dist\camfrog-auto-gui.exe (
     echo ERROR: dist\camfrog-auto-gui.exe not found
     exit /b 1
 )
-if not exist dist\camfrog-status-changer.exe (
-    echo ERROR: dist\camfrog-status-changer.exe not found
+if not exist dist\zcfato.exe (
+    echo ERROR: dist\zcfato.exe not found
     exit /b 1
 )
 if not exist line\dist\line-status-changer.exe (
@@ -53,7 +53,7 @@ echo All executables found.
 echo.
 
 rem --- GPG commit and push ---
-echo [4/4] GPG commit and push...
+echo [4/4] Commit and push...
 git add -A
 if errorlevel 1 (
     echo ERROR: git add failed
@@ -63,11 +63,18 @@ if errorlevel 1 (
 rem Check if there are changes to commit
 git diff --cached --quiet
 if errorlevel 1 (
-    echo Changes detected, creating signed commit...
+    rem Prefer a GPG-signed commit; fall back to unsigned when no secret key
+    rem is available (e.g. a fresh Windows checkout). The build itself already
+    rem succeeded -- this step only publishes it.
     git commit -S -m "build: release %DATE% %TIME%"
     if errorlevel 1 (
-        echo ERROR: GPG commit failed
-        exit /b 1
+        echo WARNING: signed commit failed; retrying as unsigned commit...
+        rem commit.gpgsign may be globally true, so explicitly disable it here.
+        git -c commit.gpgsign=false commit -m "build: release %DATE% %TIME%"
+        if errorlevel 1 (
+            echo ERROR: commit failed
+            exit /b 1
+        )
     )
     git push
     if errorlevel 1 (
@@ -76,8 +83,6 @@ if errorlevel 1 (
     )
     echo.
     echo Pushed successfully.
-) else (
-    echo No changes to commit.
 )
 
 echo.
@@ -88,6 +93,6 @@ echo.
 echo Outputs:
 echo   dist\camfrog-auto.exe
 echo   dist\camfrog-auto-gui.exe
-echo   dist\camfrog-status-changer.exe
+echo   dist\zcfato.exe
 echo   line\dist\line-status-changer.exe
 echo.
