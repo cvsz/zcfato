@@ -609,6 +609,21 @@ def get_window(cfg: dict):
     wins = [w for w in wins if not is_own_gui_window(w)]
     if not wins:
         raise RuntimeError(t("no_window"))
+
+    # Find the window that actually contains the status edit control.
+    # The status edit is in the buddy list window (has CComboBoxTS with auto_id 1436
+    # containing an Edit with auto_id 1001). Try each window until we find it.
+    st_edit_spec = cfg.get("status", {}).get("edit", {})
+    if st_edit_spec:
+        for w in wins:
+            try:
+                find(w, st_edit_spec)
+                return w
+            except Exception:
+                continue
+
+    # Fallback: return first window if status edit not found in any (for detect/initial setup)
+    log.warning("Status edit control not found in any matching window; using first window")
     return wins[0]
 
 def process_windows(main) -> list:
@@ -631,12 +646,7 @@ def find(win, spec: dict):
     items = win.descendants(**kw)
     if spec.get("auto_id") not in (None, ""):
         want = str(spec["auto_id"])
-        filtered = [c for c in items if str(_ctrl_attr(c, "automation_id")) == want]
-        if not filtered and items:
-            log.warning("auto_id %r yielded 0 matches; falling back without auto_id filter (spec=%s)",
-                        want, {k: v for k, v in spec.items() if k in kw} or spec)
-            filtered = items
-        items = filtered
+        items = [c for c in items if str(_ctrl_attr(c, "automation_id")) == want]
     if spec.get("title_re"):
         rx = re.compile(spec["title_re"])
         items = [c for c in items if rx.match(str(_ctrl_attr(c, "name")))]
