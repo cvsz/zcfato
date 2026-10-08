@@ -2343,7 +2343,7 @@ def build_parser():
     p.add_argument("--lang", choices=["auto", "th", "en"], default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in ("check", "discover", "windows", "run", "start", "stop", "state",
-                 "autostart-on", "autostart-off"):
+                 "autostart-on", "autostart-off", "cleanup-mutex"):
         sub.add_parser(name, parents=[common])
     sub.add_parser("chat-probe", parents=[common])
     sub.add_parser("im-probe", parents=[common])
@@ -2388,6 +2388,10 @@ def main(argv=None):
         return 2
     if not a.lang:
         LANG = resolve_lang(cfg["language"])
+    if a.cmd == "cleanup-mutex":
+        # This doesn't need config - just clean the mutex
+        from camfrog_status_gui import SingleInstanceGuard
+        return 0 if SingleInstanceGuard.force_cleanup() else 1
     if a.cmd == "check":
         return cmd_check(cfg)
     if a.cmd == "stop":

@@ -25,19 +25,23 @@ class SingleInstanceGuard:
 
     On non-Windows platforms, always allows the instance to run.
     If another instance exists, restores it instead of showing an error.
+    Use allow_multiple=True to bypass the check entirely.
     """
 
     ERROR_ALREADY_EXISTS = 183
     WM_SHOWME = 0x8000 + 42  # Custom message to restore window
 
-    def __init__(self, name: str = "CamfrogStatusChanger"):
+    def __init__(self, name: str = "CamfrogStatusChanger", allow_multiple: bool = False):
         self.name = name
+        self.allow_multiple = allow_multiple
         self.handle = None
         self.kernel32 = None
         self.user32 = None
 
     def acquire(self) -> bool:
-        if os.name != "nt":
+        if os.name != "nt" or self.allow_multiple:
+            if self.allow_multiple:
+                print("[SingleInstanceGuard] --allow-multiple: skipping mutex check")
             return True
         self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         self.kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
@@ -50,9 +54,11 @@ class SingleInstanceGuard:
         if not self.handle:
             raise OSError(ctypes.get_last_error(), f"Could not create mutex {mutex_name}")
         if ctypes.get_last_error() == self.ERROR_ALREADY_EXISTS:
+            print(f"[SingleInstanceGuard] Mutex {mutex_name} already exists - another instance running")
             # Another instance exists - try to restore it
             self._restore_existing_instance()
             return False
+        print(f"[SingleInstanceGuard] Created mutex {mutex_name}")
         return True
 
     def _restore_existing_instance(self):
@@ -72,6 +78,8 @@ class SingleInstanceGuard:
             self.user32.PostMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)
             self.user32.PostMessageW.restype = ctypes.c_int
 
+            found = []
+
             def enum_callback(hwnd, lparam):
                 try:
                     length = self.user32.GetWindowTextW(hwnd, ctypes.create_unicode_buffer(256), 256)
@@ -79,6 +87,7 @@ class SingleInstanceGuard:
                         title = ctypes.create_unicode_buffer(256)
                         self.user32.GetWindowTextW(hwnd, title, 256)
                         if "Camfrog Status Changer" in title.value:
+                            found.append(hwnd)
                             # Found it - send restore message
                             self.user32.PostMessageW(hwnd, self.WM_SHOWME, 0, 0)
                             return False  # Stop enumeration
@@ -88,8 +97,36 @@ class SingleInstanceGuard:
 
             callback = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(enum_callback)
             self.user32.EnumWindows(callback, 0)
-        except Exception:
+            if found:
+                print(f"[SingleInstanceGuard] Found existing window(s): {found} - sent restore message")
+            else:
+                print("[SingleInstanceGuard] Mutex exists but no matching window found (stale mutex?)")
+        except Exception as e:
+            print(f"[SingleInstanceGuard] Error restoring instance: {e}")
             pass  # Best effort
+
+    @staticmethod
+    def force_cleanup(name: str = "CamfrogStatusChanger") -> bool:
+        """Forcefully release a stale mutex by opening and closing it.
+        Returns True if a mutex was found and closed."""
+        if os.name != "nt":
+            return False
+        try:
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.OpenMutexW.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_wchar_p)
+            kernel32.OpenMutexW.restype = ctypes.c_void_p
+            kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+            kernel32.CloseHandle.restype = ctypes.c_int
+            mutex_name = f"Local\\{name}"
+            handle = kernel32.OpenMutexW(0x1F0001, False, mutex_name)  # MUTEX_ALL_ACCESS
+            if handle:
+                kernel32.CloseHandle(handle)
+                print(f"[SingleInstanceGuard] Force-cleaned stale mutex: {mutex_name}")
+                return True
+            return False
+        except Exception as e:
+            print(f"[SingleInstanceGuard] Force cleanup failed: {e}")
+            return False
 
     def release(self):
         if self.handle and self.kernel32:
@@ -2334,6 +2371,16 @@ def main(argv=None):
             return 1
         return run_status_worker(argv)
 
+    # Handle --cleanup-mutex before single-instance guard
+    if "--cleanup-mutex" in argv:
+        argv.remove("--cleanup-mutex")
+        return 0 if SingleInstanceGuard.force_cleanup() else 1
+
+    allow_multiple = False
+    if "--allow-multiple" in argv:
+        argv.remove("--allow-multiple")
+        allow_multiple = True
+
     if os.name == "nt":
         try:
             import ctypes
@@ -2343,7 +2390,8 @@ def main(argv=None):
 
     # Single-instance guard: a second launch restores the existing window
     # (posted as WM_SHOWME in acquire()) and exits silently.
-    instance = SingleInstanceGuard()
+    # Use --allow-multiple to bypass this check.
+    instance = SingleInstanceGuard(allow_multiple=allow_multiple)
     if not instance.acquire():
         return 0
 
