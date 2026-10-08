@@ -104,7 +104,7 @@ BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
 # worker PID/STOP). Defaults to <exe>\config; the parent sets ZCFATO_DATA_DIR so
 # the hidden child worker (same exe, --worker) writes to the same folder.
 DATA_DIR = Path(os.environ["ZCFATO_DATA_DIR"]) if os.environ.get("ZCFATO_DATA_DIR") \
-    else BASE / "config"
+    else (BASE if BASE.name.lower() == "config" else BASE / "config")
 
 NICK_RE = re.compile(r"^[\w][\w .\-]{0,31}$", re.UNICODE)
 
@@ -874,6 +874,8 @@ def expand(text: str, nick: str = "", own: str = "") -> str:
     return text
 
 def atomic_write(path: Union[str, Path], text: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)  # the config subfolder may not exist yet
     tmp = Path(str(path) + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     for i in range(5):  # AV/indexers can briefly lock the target
@@ -1635,6 +1637,7 @@ STATUS_SLOTS = 10
 def read_status_pool(path, seed_messages=None):
     """Read one ten-slot pool, seeding a new database from legacy settings once."""
     path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     was_missing = not path.exists()
     with closing(sqlite3.connect(path)) as connection:
         with connection:
@@ -1655,9 +1658,11 @@ def read_status_pool(path, seed_messages=None):
 
 def write_status_pool(path, values):
     """Persist all ten slots in a mode-specific SQLite database."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     values = [str(value) for value in values[:STATUS_SLOTS]]
     values.extend([""] * (STATUS_SLOTS - len(values)))
-    with closing(sqlite3.connect(Path(path))) as connection:
+    with closing(sqlite3.connect(path)) as connection:
         with connection:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS status_slots "

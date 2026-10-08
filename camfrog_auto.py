@@ -1013,6 +1013,8 @@ def match_rule(rules: list[dict], msg: str, mlang: str, own: str) -> Optional[di
 
 
 def atomic_write(path: Union[str, Path], text: str) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)  # the config subfolder may not exist yet
     tmp = Path(str(path) + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     for i in range(5):  # AV/indexers can briefly lock the target
