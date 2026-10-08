@@ -1842,10 +1842,14 @@ def build_app():
                 pass
             style.configure("Brand.TLabel", font=("Segoe UI", 10, "bold"), foreground="#126c68")
             style.configure("State.TLabel", font=("Segoe UI", 9, "bold"))
+            style.configure("State.OK.TLabel", font=("Segoe UI", 9, "bold"), foreground="#138a55")
+            style.configure("State.STOP.TLabel", font=("Segoe UI", 9, "bold"), foreground="#a52834")
             style.configure("Hint.TLabel", font=("Segoe UI", 8), foreground="#53636d")
             style.configure("Mode.TNotebook", tabmargins=(0, 5, 0, 0))
             style.configure("Mode.TNotebook.Tab", padding=(12, 7), font=("Segoe UI", 9, "bold"))
             style.configure("Action.TButton", padding=(10, 7), font=("Segoe UI", 9, "bold"))
+            style.configure("Card.TFrame", background="#f4f7f7", padding=(2, 2))
+            style.configure("Entry.TEntry", padding=(2, 2))
             outer = ttk.Frame(root, padding=(12, 10, 12, 10))
             outer.pack(fill="both", expand=True)
 
@@ -1901,27 +1905,29 @@ def build_app():
                     "Marquee statuses and timing are kept separate from Random Status.",
                     "รายการและจังหวะข้อความเลื่อนแยกจากโหมดสุ่ม"),
                     style="Hint.TLabel").pack(anchor="w", pady=(0, 6))
-                speed = ttk.Frame(page)
-                speed.pack(fill="x", pady=(0, 3))
-                ttk.Label(speed, text=self._tr("Step", "จังหวะ")).pack(side="left")
-                ttk.Spinbox(speed, textvariable=self.step, from_=MARQUEE_STEP_MIN,
-                            to=10, increment=0.1, width=4).pack(side="left", padx=(3, 5))
-                ttk.Label(speed, text="s").pack(side="left")
-                ttk.Label(speed, text=self._tr("Stride", "ก้าว")).pack(side="left", padx=(5, 2))
-                ttk.Spinbox(speed, textvariable=self.stride, from_=1, to=10,
-                            increment=1, width=2).pack(side="left")
-                ttk.Checkbutton(speed, text=self._tr("Loop", "วนลูป"),
-                                variable=self.infinite_loop,
-                                command=self.schedule_save).pack(side="left", padx=(8, 0))
+            speed = ttk.Frame(page, style="Card.TFrame", padding=4)
+            speed.pack(fill="x", pady=(0, 4))
+            ttk.Label(speed, text=self._tr("Step", "จังหวะ"),
+                      background="#f4f7f7").pack(side="left", padx=(4, 0))
+            ttk.Spinbox(speed, textvariable=self.step, from_=MARQUEE_STEP_MIN,
+                        to=10, increment=0.1, width=4).pack(side="left", padx=(3, 5))
+            ttk.Label(speed, text="s", background="#f4f7f7").pack(side="left")
+            ttk.Label(speed, text=self._tr("Stride", "ก้าว"),
+                      background="#f4f7f7").pack(side="left", padx=(5, 2))
+            ttk.Spinbox(speed, textvariable=self.stride, from_=1, to=10,
+                        increment=1, width=2).pack(side="left")
+            ttk.Checkbutton(speed, text=self._tr("Loop", "วนลูป"),
+                            variable=self.infinite_loop,
+                            command=self.schedule_save).pack(side="left", padx=(8, 0))
 
-            entries = ttk.Frame(page)
-            entries.pack(fill="both", expand=True)
+            entries = ttk.Frame(page, style="Card.TFrame", padding=4)
+            entries.pack(fill="both", expand=True, pady=(4, 0))
             for index, var in enumerate(self._fields_for_mode(mode)):
                 ttk.Label(entries, text=f"{index + 1:02d}", width=3,
-                          foreground="#53636d").grid(
-                    row=index, column=0, sticky="w", pady=3)
-                entry = ttk.Entry(entries, textvariable=var)
-                entry.grid(row=index, column=1, sticky="ew", pady=3)
+                          background="#f4f7f7", foreground="#53636d").grid(
+                    row=index, column=0, sticky="w", pady=3, padx=(4, 8))
+                entry = ttk.Entry(entries, textvariable=var, style="Entry.TEntry")
+                entry.grid(row=index, column=1, sticky="ew", pady=3, padx=(0, 4))
                 self.entry_widgets[mode].append((entry, var))
             entries.columnconfigure(1, weight=1)
 
@@ -2294,7 +2300,7 @@ def build_app():
                 self.state_label.configure(
                     text=(self._tr("RUNNING", "ทำงาน") if running else
                           self._tr("STOPPED", "หยุด")),
-                    foreground="#138a55" if running else "#697780",
+                    style=("State.OK.TLabel" if running else "State.STOP.TLabel"),
                 )
             except Exception:
                 pass
