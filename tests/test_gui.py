@@ -1,7 +1,6 @@
 """GUI tests: the Tk-free logic always runs; the Tk smoke test needs tkinter + a display."""
 import copy
 import json
-import os
 import sys
 import time
 from pathlib import Path
@@ -69,10 +68,10 @@ def test_model_saves_valid_and_blocks_invalid(tmp_path):
 
 
 def test_im_config_uses_own_nickname_and_required_allowlist():
-    cfg = ca.load_cfg(ROOT / "config.json")
-    cfg["autoreply"]["own_nickname"] = "CamfrogNoom"
+    cfg = ca.load_cfg(ROOT / "config.example.json")
+    cfg["autoreply"]["own_nickname"] = "OwnerNick"
     cfg["autoreply_im"]["enabled"] = True
-    cfg["autoreply_im"]["only_nicknames"] = ["zdevz"]
+    cfg["autoreply_im"]["only_nicknames"] = ["FriendA"]
     assert not g.ConfigModel.check(cfg)[0]
     cfg["autoreply_im"]["only_nicknames"] = []
     assert any("only_nicknames" in error for error in g.ConfigModel.check(cfg)[0])
@@ -85,14 +84,19 @@ def test_autosave_live_confirmation_gate():
 
 
 def test_empty_selector_rejected():
-    cfg = ca.load_cfg(ROOT / "config.json")
+    cfg = ca.load_cfg(ROOT / "config.example.json")
+    cfg["autoreply"]["enabled"] = True
     cfg["autoreply"]["input"] = {"index": 0}
     errs, _ = ca.validate(cfg)
     assert any("no criteria" in e for e in errs)
 
 
 def test_explain_matches_cli_engine():
-    cfg = ca.load_cfg(ROOT / "config.json")
+    cfg = ca.load_cfg(ROOT / "config.example.json")
+    cfg["autoreply"]["rules"] = [
+        {"pattern": "^goodbye$", "reply": "Bye"},
+        {"pattern": "hello", "reply": "Hi", "lang": "en"},
+    ]
     out = g.explain(cfg, "Bob", "hello there")
     assert "rule #2" in out and "language" in out
     assert "SKIPPED" in g.explain(cfg, "Bob", "see https://x.y")
@@ -100,11 +104,12 @@ def test_explain_matches_cli_engine():
 
 
 def test_explain_matches_im_engine():
-    cfg = ca.load_cfg(ROOT / "config.json")
-    cfg["autoreply"]["own_nickname"] = "CamfrogNoom"
-    cfg["autoreply_im"]["only_nicknames"] = ["zdevz"]
+    cfg = ca.load_cfg(ROOT / "config.example.json")
+    cfg["autoreply"]["own_nickname"] = "OwnerNick"
+    cfg["autoreply_im"]["rules"] = [{"pattern": "hello", "reply": "Hi"}]
+    cfg["autoreply_im"]["only_nicknames"] = ["FriendA"]
     cfg["autoreply_im"]["enabled"] = True
-    assert "rule #1" in g.explain(cfg, "zdevz", "hello", im=True)
+    assert "rule #1" in g.explain(cfg, "FriendA", "hello", im=True)
     assert "SKIPPED" in g.explain(cfg, "someone-else", "hello", im=True)
 
 
@@ -113,35 +118,26 @@ def test_tail_and_stats(tmp_path):
     f.write_text("\n".join(str(i) for i in range(1000)), encoding="utf-8")
     assert g.tail_text(f, lines=3) == "997\n998\n999"
     assert g.tail_text(tmp_path / "none.log") == ""
-    assert g.read_stats(ca.load_cfg(ROOT / "config.json")) == {}
+    assert g.read_stats(ca.load_cfg(ROOT / "config.example.json")) == {}
 
 
 def test_cli_passthrough(capsys):
-    assert g.main(["check", "--config", str(ROOT / "config.json")]) == 0
+    assert g.main(["check", "--config", str(ROOT / "config.example.json")]) == 0
     assert "config OK" in capsys.readouterr().out
 
 
-_DISPLAY_ROOT = None
+from conftest import has_display, tk_root  # noqa: E402
 
 
-def _display():
-    global _DISPLAY_ROOT
-    try:
-        import tkinter
-        _DISPLAY_ROOT = tkinter.Tk()
-        _DISPLAY_ROOT.withdraw()
-        return True
-    except Exception:
-        return False
-
-
-@pytest.mark.skipif(not _display(), reason="needs tkinter + display")
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
 def test_gui_smoke(tmp_path, monkeypatch):
-    (tmp_path / "config.json").write_text((ROOT / "config.json").read_text("utf-8"), encoding="utf-8")
-    # Reuse the display probe's Tcl/Tk root. Some Windows Python installs fail
-    # to initialize Tcl a second time after creating and destroying the probe.
+    config = json.loads((ROOT / "config.example.json").read_text("utf-8"))
+    config["autoreply_im"]["only_nicknames"] = ["FriendA"]
+    (tmp_path / "config.json").write_text(
+        json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    # Reuse the process-wide Tcl/Tk root (see tests/conftest.py).
     import tkinter
-    root = _DISPLAY_ROOT
+    root = tk_root()
     root.deiconify()
     monkeypatch.setattr(tkinter, "Tk", lambda: root)
     app = g.build_app()(tmp_path / "config.json")
@@ -153,7 +149,7 @@ def test_gui_smoke(tmp_path, monkeypatch):
     assert not errs and cfg["status"]["messages"] == app.draft["status"]["messages"]
     assert cfg["autoreply"]["rules"] == app.draft["autoreply"]["rules"]
     assert cfg["autoreply"]["own_nickname"] == app.draft["autoreply"]["own_nickname"]
-    assert cfg["autoreply_im"]["only_nicknames"] == ["zdevz"]
+    assert cfg["autoreply_im"]["only_nicknames"] == ["FriendA"]
     assert hasattr(app, "im_tree") and hasattr(app, "t_im_skips") and hasattr(app, "tiout")
     assert app.t_msgs.bind("<Control-c>") and app.t_msgs.bind("<Control-v>")
     assert app.t_msgs.bind("<Button-3>")
@@ -193,18 +189,18 @@ def test_gui_smoke(tmp_path, monkeypatch):
     app.clipboard_virtual(event, "<<Paste>>")
     app.root.update()
     assert entry.get() == "clipboard-roundtrip"
-    app.tin.set("zdevz")
+    app.tin.set("FriendA")
     im_fields = {path[1] for path, _kind, _var, _label in app.binds if path[0] == "autoreply_im"}
     assert {"enabled", "dry_run", "window_title_regex", "max_windows", "log_kinds", "only_nicknames",
             "prefix", "answer_first_message", "per_sender_cooldown_seconds", "max_per_sender_per_day",
             "global_min_gap_seconds", "max_per_hour", "delay_range_seconds", "max_reply_length",
             "max_incoming_length", "ignore_links"} <= im_fields
     allowlist = next(var for path, _kind, var, _label in app.binds if path == ("autoreply_im", "only_nicknames"))
-    allowlist.set("zdevz, smoke")
+    allowlist.set("FriendA, FriendB")
     app.cancel_autosave()
     app.auto_apply()
-    assert json.loads((tmp_path / "config.json").read_text("utf-8"))["autoreply_im"]["only_nicknames"] == ["zdevz", "smoke"]
-    allowlist.set("zdevz")
+    assert json.loads((tmp_path / "config.json").read_text("utf-8"))["autoreply_im"]["only_nicknames"] == ["FriendA", "FriendB"]
+    allowlist.set("FriendA")
     app.cancel_autosave()
     app.auto_apply()
     app.test_rule()
@@ -218,5 +214,74 @@ def test_gui_smoke(tmp_path, monkeypatch):
     app.switch_lang()
     assert ca.LANG == "en"
     assert app.save() is True  # shipped config: selector clash is only a warning in dry-run
-    app.tick()
-    app.root.destroy()
+    app.tick()  # the shared root is left alive for later smoke tests
+
+
+class FakeVar:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+def _room_profile_sel_vars():
+    """sel_vars as tab_setup builds them for room/im_reply: no status boxes."""
+    return {
+        ("autoreply", "history"): ({k: FakeVar() for k in g.SEL_FIELDS}, False),
+        ("autoreply", "input"): ({k: FakeVar() for k in g.SEL_FIELDS}, False),
+    }
+
+
+def test_apply_proposal_skips_keys_without_boxes():
+    proposal = {
+        "status.edit": {"control_type": "Edit", "auto_id": "1001", "index": 0},
+        "autoreply.history": {"control_type": "Document", "index": 2},
+        "autoreply.input": {"control_type": "Edit", "index": 1},
+    }
+    applied, skipped = g.apply_proposal_to_vars(_room_profile_sel_vars(), proposal)
+    assert skipped == ["status.edit"]
+    assert sorted(applied) == ["autoreply.history", "autoreply.input"]
+
+
+def test_apply_proposal_fills_index_as_string():
+    sel_vars = _room_profile_sel_vars()
+    applied, skipped = g.apply_proposal_to_vars(
+        sel_vars, {"autoreply.input": {"control_type": "Edit", "index": 3}})
+    assert (applied, skipped) == (["autoreply.input"], [])
+    assert sel_vars[("autoreply", "input")][0]["control_type"].get() == "Edit"
+    assert sel_vars[("autoreply", "input")][0]["index"].get() == "3"
+
+
+def test_apply_proposal_covers_full_profile():
+    sel_vars = _room_profile_sel_vars()
+    sel_vars[("status", "edit")] = ({k: FakeVar() for k in g.SEL_FIELDS}, False)
+    proposal = {"status.edit": {"control_type": "Edit", "index": 0}}
+    assert g.apply_proposal_to_vars(sel_vars, proposal) == (["status.edit"], [])
+
+
+def test_iter_proposals_skips_malformed_lines():
+    out = ("det: status.edit -> {}  [why]\n"
+           "PROPOSAL {\"a.b\": {\"index\": 0}}\n"
+           "PROPOSAL not-json{{{\n"
+           "PROPOSAL [1, 2]\n"
+           "PROPOSAL {\"c.d\": {\"index\": 1}}")
+    assert list(g.iter_proposals(out)) == [{"a.b": {"index": 0}}, {"c.d": {"index": 1}}]
+    assert list(g.iter_proposals("no proposals here")) == []
+
+
+@pytest.mark.parametrize(("argv", "expected"), [
+    (["check"], True),
+    (["--lang", "th", "run"], True),
+    (["--config", "mycheck", "run"], True),
+    (["--config", "check"], False),
+    (["--config", "--lang"], False),
+    (["--lang", "th"], False),
+    (["--config"], False),
+    ([], False),
+])
+def test_has_cli_command_skips_option_values(argv, expected):
+    assert g.has_cli_command(argv) is expected

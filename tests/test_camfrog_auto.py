@@ -14,9 +14,18 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def cfg():
-    x = c.load_cfg(ROOT / "config.json")
+    x = c.load_cfg(ROOT / "config.example.json")
     x["dry_run"] = True  # tests must not depend on the user's live settings in the shipped config
+    x["status"]["enabled"] = True
+    x["autoreply"]["enabled"] = True
+    x["status"]["enabled"] = True
+    x["autoreply"]["enabled"] = True
     x["autoreply"]["own_nickname"] = ""
+    x["autoreply"]["rules"] = [
+        {"pattern": "@me", "reply": "Hello {sender}", "mention": True},
+        {"pattern": "hello", "reply": "Hi {sender}", "lang": "en"},
+    ]
+    x["autoreply"]["skip_patterns"] = ["free money"]
     return x
 
 
@@ -28,15 +37,15 @@ def _reset_lang(tmp_path, monkeypatch):
     c.LANG = "en"
 
 
-def test_shipped_config_valid(cfg):
+def test_example_config_valid(cfg):
     errs, _ = c.validate(cfg)
     assert errs == []
 
 
 @pytest.mark.parametrize("argv", [
-    ["check", "--config", str(ROOT / "config.json")],
-    ["--config", str(ROOT / "config.json"), "check"],
-    ["--lang", "th", "check", "--config", str(ROOT / "config.json")],
+    ["check", "--config", str(ROOT / "config.example.json")],
+    ["--config", str(ROOT / "config.example.json"), "check"],
+    ["--lang", "th", "check", "--config", str(ROOT / "config.example.json")],
 ])
 def test_option_order(argv):
     assert c.main(argv) == 0
@@ -189,6 +198,7 @@ def test_stats_written_atomically(cfg, tmp_path, monkeypatch):
 
 
 def test_hot_reload_accepts_valid_and_rejects_invalid(cfg, tmp_path, monkeypatch):
+    original_pattern = cfg["autoreply"]["rules"][0]["pattern"]
     monkeypatch.setattr(c, "BASE", tmp_path)
     monkeypatch.setattr(c.Runner, "resolve", lambda self: None)  # no UI in tests
     path = tmp_path / "config.json"
@@ -207,7 +217,7 @@ def test_hot_reload_accepts_valid_and_rejects_invalid(cfg, tmp_path, monkeypatch
     os.utime(path, (path.stat().st_atime, path.stat().st_mtime + 10))
     r.maybe_reload(200.0)
     assert r.cfg["autoreply"]["max_per_hour"] == 7
-    assert r.cfg["autoreply"]["rules"][0]["pattern"] == ".*"
+    assert r.cfg["autoreply"]["rules"][0]["pattern"] == original_pattern
     # going live without own_nickname via reload is rejected
     data["autoreply"]["rules"][0]["pattern"] = ".*"
     data["dry_run"] = False
@@ -230,8 +240,15 @@ def test_init_command(tmp_path, capsys):
     assert c.main(["init", "--config", str(p), "--force"]) == 0
 
 
-def test_test_rules_command(capsys):
-    cfgp = str(ROOT / "config.json")
+def test_test_rules_command(tmp_path, capsys):
+    config = c.load_cfg(ROOT / "config.example.json")
+    config["autoreply"]["rules"] = [
+        {"pattern": "hello", "reply": "Hello {sender}", "lang": "en"},
+        {"pattern": "สวัสดี", "reply": "สวัสดี {sender}"},
+    ]
+    cfg_file = tmp_path / "config.json"
+    cfg_file.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    cfgp = str(cfg_file)
     assert c.main(["test-rules", "สวัสดีครับ", "--sender", "Bob", "--config", cfgp]) == 0
     out = capsys.readouterr().out
     assert "rule #2" in out and "Bob" in out
@@ -244,7 +261,7 @@ def test_test_rules_command(capsys):
 def test_test_rules_file(tmp_path, capsys):
     f = tmp_path / "chat.txt"
     f.write_text("alice: hello\nnot a message line\n/ban x: hi\n", encoding="utf-8")
-    assert c.main(["test-rules", "--file", str(f), "--config", str(ROOT / "config.json")]) == 0
+    assert c.main(["test-rules", "--file", str(f), "--config", str(ROOT / "config.example.json")]) == 0
     out = capsys.readouterr().out
     assert "alice" in out and "ignored line" in out
 
@@ -357,7 +374,7 @@ def test_do_status_runs_marquee_then_settles_on_full_text(cfg, monkeypatch):
     cfg["status"]["language_mode"] = "th"
     cfg["status"]["messages"] = [{"th": THAI, "en": "x"}]
     cfg["status"]["max_length"] = 120
-    cfg["status"]["marquee"].update(enabled=True, width=16, stride=4, step_seconds=5, max_frames=12)
+    cfg["status"]["marquee"].update(enabled=True, scroll=True, width=16, stride=4, step_seconds=5, max_frames=12)
     r = c.Runner(cfg)
     sent = []
     r.status_edit, r.apply_btn = object(), None
@@ -391,7 +408,7 @@ def test_marquee_waits_after_slow_ui_update(cfg, monkeypatch):
     cfg["status"]["language_mode"] = "en"
     cfg["status"]["messages"] = ["A long status message that must scroll"]
     cfg["status"]["max_length"] = 120
-    cfg["status"]["marquee"].update(enabled=True, width=10, stride=2,
+    cfg["status"]["marquee"].update(enabled=True, scroll=True, width=10, stride=2,
                                      step_seconds=0.5, max_frames=20)
     r = c.Runner(cfg)
     r.status_edit, r.apply_btn = object(), None
@@ -437,12 +454,14 @@ def test_blank_status_is_skipped_not_sent(cfg, monkeypatch):
 
 
 def test_validate_marquee_and_history_rules(cfg):
-    cfg["status"]["marquee"].update(enabled=True, step_seconds=0.1)
+    cfg["status"]["marquee"].update(enabled=True, scroll=True, step_seconds=0.1)
     cfg["status"]["language_cycle"] = ["fr"]
     cfg["status"]["history"]["mode"] = "bogus"
     errs, _ = c.validate(cfg)
     assert len(errs) == 3, errs
-    cfg2 = c.load_cfg(ROOT / "config.json")
+    cfg2 = c.load_cfg(ROOT / "config.example.json")
+    cfg2["status"]["enabled"] = True
+    cfg2["status"]["history"]["use_as_source"] = True
     cfg2["status"]["schedules"] = [{"start": "00:00", "end": "01:00", "messages": ["x"]}]
     _, warns = c.validate(cfg2)
     assert any("schedules" in w for w in warns)
@@ -450,7 +469,7 @@ def test_validate_marquee_and_history_rules(cfg):
 
 # ---------- CLI ----------
 def test_marquee_and_history_cli(tmp_path, capsys):
-    cfgp = str(ROOT / "config.json")
+    cfgp = str(ROOT / "config.example.json")
     assert c.main(["marquee", THAI, "--width", "16", "--config", cfgp]) == 0
     out = capsys.readouterr().out
     assert "frame(s)" in out and "  1 |" in out
@@ -487,3 +506,93 @@ def test_get_window_skips_own_tk_gui(monkeypatch):
                         SimpleNamespace(Desktop=lambda backend=None: fake_empty))
     with pytest.raises(RuntimeError):
         c.get_window({"window_title_regex": ".*Camfrog.*"})
+
+
+def test_is_own_gui_window_matches_split_status_app_titles_when_class_lookup_fails():
+    from types import SimpleNamespace
+
+    for title in ("Camfrog Random Status", "Camfrog Marquee Status"):
+        own = SimpleNamespace(
+            class_name=lambda: (_ for _ in ()).throw(OSError()),
+            window_text=lambda title=title: title,
+        )
+        assert c.is_own_gui_window(own) is True
+
+
+def test_runner_retry_attrs_initialized(cfg):
+    """A failed initial resolve must leave a retryable runner, not AttributeError."""
+    r = c.Runner(cfg)
+    assert r.status_edit is None
+    assert r.apply_btn is None
+    assert r.win is None
+    assert r.history is None
+    assert r.input is None
+    assert r.chat_win is None
+    assert r._next_resolve_retry == 0.0
+
+
+def test_runner_failed_resolve_stays_retryable(cfg, monkeypatch):
+    """Mirror the field log: window missing -> resolve raises -> loop lines must not crash."""
+    import time
+
+    monkeypatch.setattr(c, "get_window", lambda _cfg: (_ for _ in ()).throw(
+        RuntimeError("Camfrog window not found (check window_title_regex)")))
+    r = c.Runner(cfg)
+    with pytest.raises(RuntimeError):
+        r.resolve()
+    now = time.monotonic()
+    assert r.status_edit is None and now >= r._next_resolve_retry  # run() line: no AttributeError
+    assert r.history is None  # autoreply branch: no AttributeError
+
+
+def test_marquee_scroll_off_applies_whole_line_per_tick(cfg):
+    r = c.Runner(cfg)
+    long_text = " status message that is definitely longer than twenty-eight clusters wide "
+    r.cfg["status"]["marquee"]["enabled"] = True
+    r.cfg["status"]["marquee"]["scroll"] = False
+    assert r.build_frames(long_text) == [c.clip(long_text, r.cfg["status"]["max_length"])]
+
+
+def test_marquee_scroll_on_splits_frames(cfg):
+    r = c.Runner(cfg)
+    mq = r.cfg["status"]["marquee"]
+    mq.update({"enabled": True, "scroll": True, "width": 10, "stride": 2,
+               "separator": " ", "cycles": 1, "max_frames": 80, "infinite_loop": False})
+    frames = r.build_frames(" status message that is definitely longer than ten clusters ")
+    assert len(frames) > 1
+
+
+def test_marquee_defaults_to_per_line(cfg):
+    assert c.DEFAULTS["status"]["marquee"]["scroll"] is False
+
+
+def test_marquee_shape_skipped_when_scroll_off(cfg):
+    cfg["status"]["enabled"] = True
+    cfg["status"]["messages"] = ["hello world, this is long enough"]
+    cfg["status"]["marquee"]["enabled"] = True
+    cfg["status"]["marquee"]["scroll"] = False
+    cfg["status"]["marquee"]["width"] = 3  # garbage, but unused without scrolling
+    errs, _ = c.validate(cfg)
+    assert not [e for e in errs if "marquee" in e]
+
+
+def test_marquee_shape_checked_when_scroll_on(cfg):
+    cfg["status"]["enabled"] = True
+    cfg["status"]["messages"] = ["hello world, this is long enough"]
+    cfg["status"]["marquee"]["enabled"] = True
+    cfg["status"]["marquee"]["scroll"] = True
+    cfg["status"]["marquee"]["width"] = 3
+    errs, _ = c.validate(cfg)
+    assert any("marquee" in e for e in errs)
+
+
+def test_old_config_without_scroll_defaults_to_per_line(cfg, tmp_path):
+    import json
+
+    slim = {"status": {"messages": ["hello world, this is long enough"]}}
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps(slim), encoding="utf-8")
+    loaded = c.load_cfg(path)
+    assert loaded["status"]["marquee"]["scroll"] is False
+    assert c.Runner(loaded).build_frames("a long status line " * 10) == [
+        c.clip("a long status line " * 10, loaded["status"]["max_length"])]

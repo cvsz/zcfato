@@ -49,3 +49,19 @@ def test_stale_file_detection(tmp_path, monkeypatch):
 
 def test_shipped_project_files_are_not_stale():
     assert doctor.stale_files() == []
+
+
+def test_download_probe_has_timeout_and_handles_hang(monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def fake_run(*args, **kwargs):
+        calls.append(kwargs)
+        raise subprocess.TimeoutExpired(cmd="pip", timeout=90)
+
+    monkeypatch.setattr(doctor.subprocess, "run", fake_run)
+    ok, tail = doctor.try_download()
+    assert ok is False
+    assert any("timed out" in line for line in tail)
+    assert calls and calls[0].get("timeout") == 90

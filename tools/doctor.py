@@ -82,9 +82,12 @@ def icon_problem():
 
 def try_download():
     with tempfile.TemporaryDirectory() as d:
-        r = subprocess.run([sys.executable, "-m", "pip", "download", "pywin32>=311",
-                            "--only-binary=:all:", "--no-deps", "-d", d, "-q"],
-                           capture_output=True, text=True)
+        try:
+            r = subprocess.run([sys.executable, "-m", "pip", "download", "pywin32>=311",
+                                "--only-binary=:all:", "--no-deps", "-d", d, "-q"],
+                               capture_output=True, text=True, timeout=90)
+        except subprocess.TimeoutExpired:
+            return False, ["pip download timed out after 90 s (offline?)"]
         return r.returncode == 0, (r.stderr or r.stdout).strip().splitlines()[-3:]
 
 

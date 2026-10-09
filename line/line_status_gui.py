@@ -11,7 +11,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from config_store import ConfigError, load_config, save_config, validate_status_text
+from config_store import load_config, save_config, validate_status_text
 from clipboard_support import ClipboardController, get_clipboard_text, set_clipboard_text
 from line_automation import (
     process_for_window, read_profile_status, select_image_in_open_dialog,
@@ -426,7 +426,7 @@ def build_app(config_path=CONFIG_PATH):
                 self.note.configure(text=f"อ่าน line_config.json ไม่ได้: {exc}")
 
         def persist_config(self):
-            self.config = save_config(self.config_path, self.config)
+            save_config(self.config_path, self.config)
 
         def refresh_history(self):
             self.config = load_config(self.config_path)

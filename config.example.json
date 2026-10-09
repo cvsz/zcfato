@@ -1,0 +1,144 @@
+{
+  "language": "auto",
+  "reload_config": true,
+  "stats": {
+    "enabled": true,
+    "file": "stats.json",
+    "write_seconds": 60
+  },
+  "window_title_regex": ".*Camfrog.*",
+  "dry_run": true,
+  "poll_seconds": 1.5,
+  "log": {
+    "level": "INFO",
+    "file": "camfrog_auto.log",
+    "max_bytes": 1000000,
+    "backups": 3,
+    "log_message_text": true
+  },
+  "active_hours": {
+    "enabled": false,
+    "start": "09:00",
+    "end": "23:30"
+  },
+  "safety": {
+    "stop_file": "STOP",
+    "pid_file": "camfrog_auto.pid",
+    "require_foreground": true,
+    "restore_previous_window": true,
+    "max_consecutive_failures": 5
+  },
+  "status": {
+    "enabled": false,
+    "edit": {
+      "class_name": "Edit",
+      "auto_id": "1001",
+      "index": 0
+    },
+    "apply_button": null,
+    "background_enter_target": "edit",
+    "interval_seconds": 600,
+    "set_on_start": true,
+    "random": false,
+    "language_mode": "both",
+    "retry_seconds": 30,
+    "max_length": 120,
+    "messages": [
+      {
+        "th": "สวัสดีครับ ยินดีคุยด้วยครับ",
+        "en": "Hello, happy to chat"
+      },
+      {
+        "th": "ทักทายกันได้เลยครับ",
+        "en": "Please feel free to say hi"
+      }
+    ],
+    "schedules": [],
+    "language_cycle": [],
+    "marquee": {
+      "enabled": false,
+      "width": 28,
+      "stride": 2,
+      "step_seconds": 0.5,
+      "separator": "   •   ",
+      "cycles": 1,
+      "max_frames": 80,
+      "infinite_loop": false
+    },
+    "history": {
+      "enabled": true,
+      "file": "status_history.json",
+      "max_items": 50,
+      "record": true,
+      "use_as_source": false,
+      "seed_from_messages": true,
+      "mode": "rotate"
+    }
+  },
+  "autoreply": {
+    "enabled": false,
+    "own_nickname": "",
+    "window_title_regex": "",
+    "log_kind": "room",
+    "history_tail": 150,
+    "history": {
+      "class_name": "AtlAxWinLic140",
+      "auto_id": "1002",
+      "index": 0
+    },
+    "input": {
+      "class_name": "AtlAxWinLic140",
+      "auto_id": "1002",
+      "index": 1
+    },
+    "ignore_nicknames": [],
+    "only_nicknames": [],
+    "per_sender_cooldown_seconds": 300,
+    "global_min_gap_seconds": 20,
+    "max_per_hour": 30,
+    "delay_range_seconds": [
+      2.0,
+      5.0
+    ],
+    "max_reply_length": 200,
+    "max_incoming_length": 500,
+    "rules": [],
+    "skip_patterns": [],
+    "ignore_links": true
+  },
+  "autoreply_im": {
+    "enabled": false,
+    "dry_run": true,
+    "window_title_regex": "",
+    "max_windows": 5,
+    "log_kinds": [
+      "im"
+    ],
+    "only_nicknames": [],
+    "rules": [],
+    "skip_patterns": [],
+    "ignore_links": true,
+    "prefix": "[auto] ",
+    "answer_first_message": true,
+    "per_sender_cooldown_seconds": 3600,
+    "max_per_sender_per_day": 3,
+    "global_min_gap_seconds": 20,
+    "max_per_hour": 10,
+    "delay_range_seconds": [
+      2.0,
+      5.0
+    ],
+    "max_reply_length": 200,
+    "max_incoming_length": 500
+  },
+  "dj": {
+    "enabled": false,
+    "prefix": "!",
+    "queue_file": "dj_queue.json",
+    "max_per_user": 3,
+    "music_dir": "music",
+    "audio_backend": "chat",
+    "announce_now": "[dj] Now playing: {title} (requested by {user})",
+    "announce_queued": "[dj] Queued #{pos}: {title}"
+  }
+}

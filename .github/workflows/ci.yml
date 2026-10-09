@@ -12,9 +12,9 @@ jobs:
         with: { python-version: "3.12" }
       - run: sudo apt-get update && sudo apt-get install -y xvfb python3-tk
       - run: pip install pytest
-      - run: python -m py_compile camfrog_auto.py camfrog_gui.py
-      - run: python camfrog_auto.py check --config config.json
-      - run: python camfrog_auto.py --lang th check --config config.json
+      - run: python -m py_compile camfrog_auto.py camfrog_gui.py camfrog_status_gui.py camfrog_private_chat_gui.py camfrog_music_gui.py room_control_gui.py im_autoreply_gui.py status_random_gui.py status_marquee_gui.py chat_im_private_gui.py camfrog_tray.py clipboard_support.py room_control_entry.py chat_im_private_entry.py status_random_entry.py status_marquee_entry.py im_autoreply_entry.py music_dj_entry.py web_status_entry.py tools/web_status.py line/*.py
+      - run: python camfrog_auto.py check --config config.example.json
+      - run: python camfrog_auto.py --lang th check --config config.example.json
       - run: xvfb-run -a pytest -q
   build-windows:
     needs: test
@@ -28,6 +28,8 @@ jobs:
         shell: cmd
       - uses: actions/upload-artifact@v4
         with:
-          name: camfrog-auto-windows
-          path: dist/
+          name: camfrog-features-windows
+          path: |
+            dist/
+            camfrog-features-windows.zip
           if-no-files-found: error

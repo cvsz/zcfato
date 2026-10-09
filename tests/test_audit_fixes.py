@@ -13,9 +13,15 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def cfg():
-    x = c.load_cfg(ROOT / "config.json")
+    x = c.load_cfg(ROOT / "config.example.json")
     x["dry_run"] = True  # tests must not depend on the user's live settings in the shipped config
+    x["status"]["enabled"] = True
+    x["autoreply"]["enabled"] = True
+    x["status"]["enabled"] = True
+    x["autoreply"]["enabled"] = True
     x["autoreply"]["own_nickname"] = ""
+    x["autoreply"]["rules"] = [{"pattern": "hello", "reply": "Hi {sender}"}]
+    x["autoreply"]["skip_patterns"] = ["สมัครเว็บพนันฟรี", r"free money(?!less)"]
     return x
 
 
@@ -35,7 +41,7 @@ def test_history_keeps_newcomer_when_full(tmp_path):
     assert len(h.items) == 5
 
 
-def test_shipped_skip_pattern_catches_embedded_thai(cfg):
+def test_skip_patterns_catch_embedded_thai_and_english(cfg):
     sk = c.compile_skips(cfg["autoreply"])
     assert c.is_skipped("สมัครเว็บพนันฟรี", sk, True) == "pattern"
     assert c.is_skipped("get FREE MONEY now", sk, True) == "pattern"
@@ -135,6 +141,8 @@ def test_pid_reuse_guard(monkeypatch):
     monkeypatch.setattr(c.os, "name", "nt")
     assert c.pid_is_ours(1, r"C:\Windows\explorer.exe") is False
     assert c.pid_is_ours(1, r"C:\x\camfrog-auto.exe") is True
+    monkeypatch.setattr(c.sys, "executable", "room-control.exe")
+    assert c.pid_is_ours(1, "room-control.exe") is True
     assert c.pid_is_ours(1, r"C:\Python313\pythonw.exe") is True
     assert c.pid_is_ours(1, "") is True        # unknown -> old behaviour
 

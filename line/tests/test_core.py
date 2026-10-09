@@ -8,6 +8,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+LINE_DIR = Path(__file__).resolve().parents[1]
+if str(LINE_DIR) not in sys.path:
+    sys.path.insert(0, str(LINE_DIR))
+
 from config_store import (
     ConfigError,
     default_config,
@@ -25,6 +29,7 @@ from line_automation import (
     is_save_name,
     is_status_name,
     is_status_name_broad,
+    match_field_context,
     process_for_window,
 )
 from line_tray import LineTrayIcon
@@ -60,6 +65,11 @@ class ConfigStoreTests(unittest.TestCase):
         self.assertEqual(data, default_config())
         self.assertTrue(self.path.is_file())
         self.assertEqual(load_config(self.path), data)
+
+    def test_save_config_returns_none_callers_keep_their_dict(self):
+        data = default_config()
+        self.assertIsNone(save_config(self.path, data))
+        self.assertEqual(load_config(self.path)["schema_version"], 2)
 
     def test_reads_legacy_config_and_adds_schema_on_save(self):
         self.path.write_text(json.dumps({"last_text": "ไทย", "messages": ["ok"]}),
@@ -153,6 +163,21 @@ class AccessibilityGuardTests(unittest.TestCase):
         self.assertTrue(is_save_name("Save"))
         self.assertTrue(is_save_name("บันทึก"))
         self.assertFalse(is_save_name("Save draft"))
+
+    def test_match_field_context_supports_single_name_matchers(self):
+        self.assertTrue(match_field_context(is_status_name, ["Search", "Status message"]))
+        self.assertFalse(match_field_context(is_status_name, ["Search", "Write a message"]))
+
+    def test_match_field_context_supports_list_context_matchers(self):
+        self.assertTrue(match_field_context(is_profile_name_context, ["Profile", "Display name"]))
+        self.assertFalse(match_field_context(is_profile_name_context, ["Display name"]))
+        self.assertFalse(match_field_context(is_profile_name_context, ["Search"]))
+
+    def test_match_field_context_never_raises(self):
+        def boom(value):
+            raise ValueError("wrong shape")
+
+        self.assertFalse(match_field_context(boom, ["Profile", "Name"]))
         self.assertFalse(is_save_name("Save messages"))
 
     def test_profile_name_match_is_exact(self):
@@ -277,11 +302,9 @@ class AccessibilityGuardTests(unittest.TestCase):
         api.CloseHandle.assert_called_once_with("process-handle")
 
 
-try:
-    import tkinter as _tkinter
-    _HAS_TK = True
-except ImportError:
-    _HAS_TK = False
+import importlib.util
+
+_HAS_TK = importlib.util.find_spec("tkinter") is not None
 
 
 @unittest.skipUnless(_HAS_TK, "Tkinter is not installed in this Python environment")
@@ -513,6 +536,26 @@ class ScheduleTests(unittest.TestCase):
         self.assertEqual(len(due), 1)
         mark_schedule_fired(schedule, "abc", due[0][1])
         self.assertIn("abc", schedule["last_fired"])
+
+    def test_malformed_items_are_skipped_not_fatal(self):
+        now = datetime(2026, 10, 5, 9, 0, 30)  # Monday
+        good = {"id": "good", "mode": "weekly", "enabled": True, "days": [0],
+                "time": "09:00", "text": "Hi"}
+        bad_items = [
+            "not-a-dict",
+            {"mode": "weekly", "days": [0], "time": "09:00"},          # no id
+            {"id": 7, "mode": "weekly", "days": [0], "time": "09:00"},  # non-str id
+            {"id": "x", "mode": "weekly", "time": "09:00"},             # no days
+            {"id": "x", "mode": "weekly", "days": [0], "time": "nope"},  # bad time
+            {"id": "x", "mode": "weekly", "days": [0], "time": "25:99"},  # out of range
+            {"id": "x", "mode": "interval", "interval_minutes": 0},     # out of range
+            {"id": "x", "mode": "interval", "interval_minutes": "abc"},  # bad type
+        ]
+        schedule = {"paused": False, "items": [good] + bad_items, "last_fired": {}}
+        due = due_schedules(schedule, now)
+        self.assertEqual([item["id"] for item, _ in due], ["good"])
+        self.assertEqual(due_schedules(
+            {"paused": False, "items": bad_items, "last_fired": "not-a-dict"}, now), [])
 
     def test_schedule_prunes_aware_and_stale_markers_without_type_error(self):
         now = datetime.now(timezone.utc)

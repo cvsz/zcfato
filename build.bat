@@ -3,7 +3,7 @@ chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-set "NAME=camfrog-auto"
+set "FEATURE_NAME=camfrog-features"
 
 rem ============================================================
 rem Select supported 64-bit Python
@@ -85,8 +85,23 @@ echo === PYTHON COMPILE CHECK ===
     camfrog_auto.py ^
     camfrog_gui.py ^
     camfrog_status_gui.py ^
+    camfrog_private_chat_gui.py ^
+    camfrog_music_gui.py ^
+    room_control_gui.py ^
+    im_autoreply_gui.py ^
+    status_random_gui.py ^
+    status_marquee_gui.py ^
+    chat_im_private_gui.py ^
+    room_control_entry.py ^
+    chat_im_private_entry.py ^
+    status_random_entry.py ^
+    status_marquee_entry.py ^
+    im_autoreply_entry.py ^
+    music_dj_entry.py ^
     camfrog_tray.py ^
-    clipboard_support.py
+    clipboard_support.py ^
+    web_status_entry.py ^
+    tools\web_status.py
 
 if errorlevel 1 goto :fail
 
@@ -101,14 +116,14 @@ if errorlevel 1 goto :fail
 echo.
 echo === CONFIG VALIDATION EN ===
 
-"%VENV_PY%" camfrog_auto.py check --config config.json
+"%VENV_PY%" camfrog_auto.py check --config config.example.json
 if errorlevel 1 goto :fail
 
 
 echo.
 echo === CONFIG VALIDATION TH ===
 
-"%VENV_PY%" camfrog_auto.py --lang th check --config config.json
+"%VENV_PY%" camfrog_auto.py --lang th check --config config.example.json
 if errorlevel 1 goto :fail
 
 
@@ -118,10 +133,6 @@ rem ============================================================
 
 echo.
 echo === STOP OLD APPLICATIONS ===
-
-if exist "dist\%NAME%.exe" (
-    "dist\%NAME%.exe" stop >nul 2>&1
-)
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass ^
     -File "%~dp0tools\end_dist_processes.ps1"
@@ -140,9 +151,24 @@ echo.
 echo === CLEAN BUILD DIRECTORIES ===
 
 if exist "build" rmdir /s /q "build"
-if exist "dist" rmdir /s /q "dist"
-
-if exist "dist" goto :distlocked
+if not exist "dist" mkdir "dist"
+if exist "dist\room-control\room-control.exe" del /q "dist\room-control\room-control.exe"
+if exist "dist\chat-im-private\chat-im-private.exe" del /q "dist\chat-im-private\chat-im-private.exe"
+if exist "dist\status-random\status-random.exe" del /q "dist\status-random\status-random.exe"
+if exist "dist\status-marquee\status-marquee.exe" del /q "dist\status-marquee\status-marquee.exe"
+if exist "dist\im-autoreply\im-autoreply.exe" del /q "dist\im-autoreply\im-autoreply.exe"
+if exist "dist\music-dj\music-dj.exe" del /q "dist\music-dj\music-dj.exe"
+if exist "dist\web-status\web-status.exe" del /q "dist\web-status\web-status.exe"
+if exist "dist\camfrog-auto.exe" del /q "dist\camfrog-auto.exe"
+if exist "dist\camfrog-auto-gui.exe" del /q "dist\camfrog-auto-gui.exe"
+if exist "dist\zcfato.exe" del /q "dist\zcfato.exe"
+if exist "dist\SHA256SUMS.txt" del /q "dist\SHA256SUMS.txt"
+if exist "camfrog-features-windows.zip" del /q "camfrog-features-windows.zip"
+if exist "camfrog-auto-windows.zip" del /q "camfrog-auto-windows.zip"
+rem Remove obsolete single-app documentation and launchers from the old dist layout.
+for %%F in (README.md CONFIG.md check-config.bat gui.bat run-background.bat start-background.bat state.bat stop.bat test-rules.bat) do (
+    if exist "dist\%%F" del /q "dist\%%F"
+)
 
 
 rem ============================================================
@@ -160,89 +186,88 @@ if exist "app.ico" (
 
 
 rem ============================================================
-rem CLI executable
+rem Feature executables
 rem ============================================================
 
 echo.
-echo === BUILD CLI ===
+echo === BUILD ROOM CONTROL ===
 
 "%VENV_PY%" -m PyInstaller ^
-    --noconfirm ^
-    --clean ^
-    --onefile ^
-    --console ^
-    --name "%NAME%" ^
-    %ICONARG% ^
-    --collect-all pywinauto ^
-    --collect-submodules comtypes ^
-    camfrog_auto.py
-
+    --noconfirm --clean --onefile --windowed ^
+    --distpath dist\room-control --workpath build\room-control ^
+    --name room-control %ICONARG% ^
+    --collect-all pywinauto --collect-submodules comtypes ^
+    room_control_entry.py
 if errorlevel 1 goto :fail
 
-if not exist "dist\%NAME%.exe" goto :fail
-
-
-rem ============================================================
-rem Full GUI executable
-rem ============================================================
 
 echo.
-echo === BUILD GUI ===
+echo === BUILD PRIVATE CHAT WINDOW MANAGER ===
 
 "%VENV_PY%" -m PyInstaller ^
-    --noconfirm ^
-    --clean ^
-    --onefile ^
-    --windowed ^
-    --name "%NAME%-gui" ^
-    %ICONARG% ^
-    --collect-all pywinauto ^
-    --collect-submodules comtypes ^
-    camfrog_gui.py
-
+    --noconfirm --clean --onefile --windowed ^
+    --distpath dist\chat-im-private --workpath build\chat-im-private ^
+    --name chat-im-private %ICONARG% ^
+    --collect-all pywinauto --collect-submodules comtypes ^
+    chat_im_private_entry.py
 if errorlevel 1 goto :fail
 
-if not exist "dist\%NAME%-gui.exe" goto :fail
-
-
-rem ============================================================
-rem Status changer executable
-rem ============================================================
 
 echo.
-echo === BUILD STATUS CHANGER ===
+echo === BUILD RANDOM STATUS ===
 
-"%VENV_PY%" -m PyInstaller --noconfirm --clean ^
-    --distpath dist ^
-    --workpath build\zcfato\work ^
-    zcfato.spec
-
+"%VENV_PY%" -m PyInstaller ^
+    --noconfirm --clean --onefile --windowed ^
+    --distpath dist\status-random --workpath build\status-random ^
+    --name status-random %ICONARG% ^
+    --collect-all pywinauto --collect-submodules comtypes ^
+    status_random_entry.py
 if errorlevel 1 goto :fail
 
-if not exist "dist\zcfato.exe" goto :fail
-
-
-rem ============================================================
-rem Distribution files
-rem ============================================================
 
 echo.
-echo === COPY DISTRIBUTION FILES ===
+echo === BUILD MARQUEE STATUS ===
 
-copy /y "config.json" "dist\config.json" >nul
+"%VENV_PY%" -m PyInstaller ^
+    --noconfirm --clean --onefile --windowed ^
+    --distpath dist\status-marquee --workpath build\status-marquee ^
+    --name status-marquee %ICONARG% ^
+    --collect-all pywinauto --collect-submodules comtypes ^
+    status_marquee_entry.py
 if errorlevel 1 goto :fail
 
-if exist "app.ico" (
-    copy /y "app.ico" "dist\app.ico" >nul
-)
 
-copy /y "CONFIG.md" "dist\CONFIG.md" >nul
+echo.
+echo === BUILD PRIVATE IM AUTO-REPLY ===
+
+"%VENV_PY%" -m PyInstaller ^
+    --noconfirm --clean --onefile --windowed ^
+    --distpath dist\im-autoreply --workpath build\im-autoreply ^
+    --name im-autoreply %ICONARG% ^
+    --collect-all pywinauto --collect-submodules comtypes ^
+    im_autoreply_entry.py
 if errorlevel 1 goto :fail
 
-copy /y "README.md" "dist\README.md" >nul
+
+echo.
+echo === BUILD WEB STATUS UPDATER (GUI + CONSOLE PROTOTYPE) ===
+
+"%VENV_PY%" -m PyInstaller ^
+    --noconfirm --clean --onefile --windowed ^
+    --distpath dist\web-status --workpath build\web-status ^
+    --name web-status %ICONARG% ^
+    web_status_entry.py
 if errorlevel 1 goto :fail
 
-copy /y "extras\*.bat" "dist\" >nul
+
+echo === BUILD MUSIC DJ ===
+
+"%VENV_PY%" -m PyInstaller ^
+    --noconfirm --clean --onefile --windowed ^
+    --distpath dist\music-dj --workpath build\music-dj ^
+    --name music-dj %ICONARG% ^
+    --collect-all pywinauto --collect-submodules comtypes ^
+    music_dj_entry.py
 if errorlevel 1 goto :fail
 
 
@@ -251,54 +276,48 @@ rem Package + SHA256
 rem ============================================================
 
 echo.
-echo === PACKAGE RELEASE ===
+echo === PACKAGE FEATURE APPS ===
 
-"%VENV_PY%" tools\package.py "%NAME%"
+"%VENV_PY%" tools\package.py "%FEATURE_NAME%" --executables-only
 if errorlevel 1 goto :fail
 
 
-rem ============================================================
 rem Final verification
 rem ============================================================
 
 echo.
-echo === VERIFY RELEASE ===
+echo === VERIFY FEATURE APPS ===
 
-if not exist "dist\%NAME%.exe" goto :fail
-if not exist "dist\%NAME%-gui.exe" goto :fail
-if not exist "dist\zcfato.exe" goto :fail
-if not exist "%NAME%-windows.zip" goto :fail
+if not exist "dist\room-control\room-control.exe" goto :fail
+if not exist "dist\chat-im-private\chat-im-private.exe" goto :fail
+if not exist "dist\status-random\status-random.exe" goto :fail
+if not exist "dist\status-marquee\status-marquee.exe" goto :fail
+if not exist "dist\im-autoreply\im-autoreply.exe" goto :fail
+if not exist "dist\web-status\web-status.exe" goto :fail
+if not exist "dist\music-dj\music-dj.exe" goto :fail
+if not exist "dist\SHA256SUMS.txt" goto :fail
+if not exist "%FEATURE_NAME%-windows.zip" goto :fail
 
 echo.
 echo BUILD OK / สร้างสำเร็จ
 echo.
-echo dist\%NAME%.exe
-echo dist\%NAME%-gui.exe
-echo dist\zcfato.exe
-echo %NAME%-windows.zip
+echo dist\room-control\room-control.exe
+echo dist\chat-im-private\chat-im-private.exe
+echo dist\status-random\status-random.exe
+echo dist\status-marquee\status-marquee.exe
+echo dist\im-autoreply\im-autoreply.exe
+echo dist\music-dj\music-dj.exe
+echo dist\web-status\web-status.exe
+echo dist\SHA256SUMS.txt
+echo %FEATURE_NAME%-windows.zip
+
 echo.
-echo Next / ขั้นต่อไป:
-echo Run dist\zcfato.exe to edit status pools and start the standalone worker.
-echo Or run dist\%NAME%-gui.exe for the full GUI.
+echo Each executable creates its own config and runtime data beside itself.
 
 exit /b 0
 
 
-rem ============================================================
 rem Error handlers
-rem ============================================================
-
-:distlocked
-echo.
-echo ERROR: cannot delete the dist folder.
-echo A file in dist is still being used.
-echo Close camfrog-auto, antivirus scanning, or Explorer windows using dist.
-echo.
-echo ข้อผิดพลาด: ไม่สามารถลบโฟลเดอร์ dist ได้
-echo กรุณาปิด camfrog-auto และโปรแกรมที่กำลังใช้ไฟล์ใน dist
-goto :fail
-
-
 :pywin
 %PYSEL% tools\doctor.py
 

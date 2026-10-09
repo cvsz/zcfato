@@ -1,16 +1,13 @@
-"""camfrog-auto GUI  |  หน้าจอควบคุม camfrog-auto  (Tkinter)
+"""Tkinter GUI source used by the Room Control and IM Auto-reply executables.
 
-  camfrog-auto-gui.exe            open the GUI / เปิดหน้าจอ
-  camfrog-auto-gui.exe <command>  any CLI command (run, start, stop, check ...) / คำสั่ง CLI
-
-The GUI edits config.json, starts/stops the hidden background bot (same code path as
-`camfrog-auto start` / `stop`) and shows state, stats and the live log. Closing the
-window does NOT stop the bot. The logic (ConfigModel & helpers) is Tk-free and tested.
+Each packaged entrypoint selects a feature profile and stores its own config
+beside its executable. Running this module directly keeps the combined source UI.
 """
 import ctypes
 import os
 import contextlib
 import copy
+import argparse
 import io
 import json
 import queue
@@ -23,9 +20,50 @@ from types import SimpleNamespace
 import camfrog_auto as ca
 from clipboard_support import ClipboardController
 
-CLI_COMMANDS = {"check", "discover", "detect", "chat-probe", "windows", "run", "start", "stop", "state", "status",
+APP_PROFILE = os.environ.get("CAMFROG_APP_PROFILE", "full").lower()
+APP_NAME = {"room": "Room Control", "im_reply": "IM Auto-reply"}.get(
+    APP_PROFILE, "Camfrog Auto")
+
+
+def apply_app_profile(cfg):
+    cfg = copy.deepcopy(cfg)
+    if APP_PROFILE not in ("full", "room", "im_reply"):
+        raise ValueError(f"Unknown Camfrog app profile: {APP_PROFILE}")
+    if APP_PROFILE == "room":
+        cfg["status"]["enabled"] = False
+        cfg["autoreply_im"]["enabled"] = False
+    elif APP_PROFILE == "im_reply":
+        cfg["status"]["enabled"] = False
+        cfg["autoreply"]["enabled"] = False
+    return cfg
+
+
+CLI_COMMANDS = {"check", "discover", "detect", "chat-probe", "im-probe", "windows", "run", "start", "stop", "state", "status",
                 "autostart-on", "autostart-off", "init", "marquee", "history", "history-add",
                 "history-import", "test-rules"}
+
+
+def has_cli_command(argv):
+    """Detect CLI passthrough without mistaking an option value for a command."""
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in ("--config", "--lang"):
+            index += 2
+            continue
+        if token in CLI_COMMANDS:
+            return True
+        index += 1
+    return False
+
+
+def parse_gui_args(argv):
+    parser = argparse.ArgumentParser(description="Camfrog feature app")
+    parser.add_argument("--config", default=None, help="use an alternate app-local config")
+    args = parser.parse_args(argv)
+    if args.config is not None and not args.config.strip():
+        parser.error("argument --config: expected a path")
+    return args
 SEL_FIELDS = ("control_type", "auto_id", "class_name", "title", "title_re", "index")
 
 
@@ -76,6 +114,42 @@ def strs_to_sel(d, allow_empty=False):
     return out
 
 
+def iter_proposals(out):
+    """Yield PROPOSAL dicts from detect output, skipping malformed lines.
+
+    A corrupt PROPOSAL line must never kill the Tk pump loop.
+    """
+    for line in str(out).splitlines():
+        if not line.startswith("PROPOSAL "):
+            continue
+        try:
+            proposal = json.loads(line[9:])
+        except ValueError:
+            continue
+        if isinstance(proposal, dict):
+            yield proposal
+
+
+def apply_proposal_to_vars(sel_vars, proposal):
+    """Fill selector StringVars from a detect PROPOSAL dict.
+
+    sel_vars maps key tuples to (vars_dict, optional) as built by
+    selector_group. Keys with no visible box (e.g. status.edit in the
+    room/im_reply profiles) are skipped, never KeyError.
+    Returns (applied_keys, skipped_keys)."""
+    applied, skipped = [], []
+    for key, sel in proposal.items():
+        pair = sel_vars.get(tuple(key.split(".")))
+        if pair is None:
+            skipped.append(key)
+            continue
+        vars_ = pair[0]
+        for k in SEL_FIELDS:
+            vars_[k].set(sel.get(k, "") if k != "index" else str(sel.get("index", 0)))
+        applied.append(key)
+    return applied, skipped
+
+
 def reply_to_fields(spec):
     """rule reply (str | list | {th,en}) -> (th_text, en_text, any_text), one variant per line."""
     def lines(x):
@@ -101,14 +175,19 @@ class ConfigModel:
     """Load / validate / atomically save config.json. Never writes an invalid config."""
 
     def __init__(self, path):
-        self.path = Path(path)
+        self.path = Path(path).resolve()
+        if APP_PROFILE in ("room", "im_reply"):
+            try:
+                self.path.relative_to(ca.BASE.resolve())
+            except ValueError as exc:
+                raise ValueError("This app's config must stay inside its own folder.") from exc
         self.cfg = None
 
     def load(self):
         if not self.path.exists():
             with contextlib.redirect_stdout(io.StringIO()):
                 ca.cmd_init(self.path, False)
-        self.cfg = ca.load_cfg(self.path)
+        self.cfg = apply_app_profile(ca.load_cfg(self.path))
         return self.cfg
 
     @staticmethod
@@ -121,6 +200,7 @@ class ConfigModel:
         return errs, warns
 
     def save(self, cfg):
+        cfg = apply_app_profile(cfg)
         errs, warns = self.check(cfg)
         if errs:
             return errs, warns
@@ -254,7 +334,7 @@ def build_app():
             try:
                 self.draft = copy.deepcopy(self.model.load())
             except Exception as e:
-                messagebox.showerror("camfrog-auto", ca.t("cannot_load", e=e))
+                messagebox.showerror(APP_NAME, ca.t("cannot_load", e=e))
                 self.root.destroy()
                 raise SystemExit(2)
             ca.LANG = ca.resolve_lang(self.draft["language"])
@@ -294,7 +374,7 @@ def build_app():
             for w in self.root.winfo_children():
                 w.destroy()
             self.binds = []
-            self.root.title(f"camfrog-auto  -  {self.model.path}")
+            self.root.title(f"{APP_NAME}  -  {self.model.path}")
             self.setup_clipboard_menu()
             top = ttk.Frame(self.root, padding=(8, 6))
             top.pack(fill="x")
@@ -316,12 +396,19 @@ def build_app():
             self.msg.pack(side="left", padx=12)
             self.nb = ttk.Notebook(self.root)
             self.nb.pack(fill="both", expand=True, padx=8)
-            for name, fn in (("Dashboard|แดชบอร์ด", self.tab_dashboard), ("Setup|ตั้งค่าเริ่มต้น", self.tab_setup),
-                             ("Status|สถานะ", self.tab_status), ("Auto-reply|ตอบอัตโนมัติ", self.tab_reply),
-                             ("History|ประวัติ", self.tab_history), ("Advanced|ขั้นสูง", self.tab_advanced)):
+            tab_specs = (("Dashboard|แดชบอร์ด", "Dashboard", self.tab_dashboard),
+                         ("Setup|ตั้งค่าเริ่มต้น", "Setup", self.tab_setup),
+                         ("Status|สถานะ", "Status", self.tab_status),
+                         ("Auto-reply|ตอบอัตโนมัติ", "Auto-reply", self.tab_reply),
+                         ("History|ประวัติ", "History", self.tab_history),
+                         ("Advanced|ขั้นสูง", "Advanced", self.tab_advanced))
+            visible_tabs = ({"Dashboard", "Setup", "Auto-reply"}
+                            if APP_PROFILE in ("room", "im_reply") else None)
+            for name, key, fn in tab_specs:
                 f = ttk.Frame(self.nb, padding=8)
-                self.nb.add(f, text=bi(name))
                 fn(f)
+                if visible_tabs is None or key in visible_tabs:
+                    self.nb.add(f, text=bi(name))
             self.load_ui()
             self.install_clipboard_support(self.root)
             self.attach_autosave_hooks()
@@ -452,8 +539,9 @@ def build_app():
                        command=lambda: self.helper("discover")).pack(side="left", padx=6)
             ttk.Label(row, text=bi("Windows only. Copy values from controls.txt into the boxes below.|"
                                    "เฉพาะ Windows คัดลอกค่าจาก controls.txt มาใส่ช่องด้านล่าง"), foreground="#666").pack(side="left")
-            self.selector_group(f, "Status box selector|selector ช่องสถานะ", ("status", "edit"))
-            self.selector_group(f, "Status apply button (optional)|ปุ่มยืนยันสถานะ (ไม่จำเป็น)", ("status", "apply_button"), True)
+            if APP_PROFILE == "full":
+                self.selector_group(f, "Status box selector|selector ช่องสถานะ", ("status", "edit"))
+                self.selector_group(f, "Status apply button (optional)|ปุ่มยืนยันสถานะ (ไม่จำเป็น)", ("status", "apply_button"), True)
             self.selector_group(f, "Chat history selector|selector ประวัติแชท", ("autoreply", "history"))
             self.selector_group(f, "Chat input selector|selector ช่องพิมพ์แชท", ("autoreply", "input"))
             self.helper_out = tk.Text(f, height=8, state="disabled")
@@ -488,6 +576,7 @@ def build_app():
             g2.pack(side="left", padx=20, fill="x", expand=True)
             m = ("status", "marquee")
             self.field(g1, "Enabled|เปิดใช้", m + ("enabled",), "bool")
+            self.field(g1, "Scroll frames|เลื่อนเฟรม", m + ("scroll",), "bool")
             self.field(g1, "Width (8-80)|ความกว้าง", m + ("width",), "int", width=6)
             self.field(g1, "Stride|เลื่อนต่อเฟรม", m + ("stride",), "int", width=6)
             self.field(g1, "Step seconds (min 0.5)|วินาทีต่อเฟรม", m + ("step_seconds",), "float", width=6)
@@ -504,10 +593,12 @@ def build_app():
             tabs.pack(fill="both", expand=True)
             room = ttk.Frame(tabs, padding=6)
             im = ttk.Frame(tabs, padding=6)
-            tabs.add(room, text=bi("Room chat|แชทในห้อง"))
-            tabs.add(im, text=bi("Private IM|แชทส่วนตัว IM"))
             self.tab_room_reply(room)
             self.tab_im_reply(im)
+            if APP_PROFILE in ("full", "room"):
+                tabs.add(room, text=bi("Room chat|แชทในห้อง"))
+            if APP_PROFILE in ("full", "im_reply"):
+                tabs.add(im, text=bi("Private IM|แชทส่วนตัว IM"))
 
         def tab_room_reply(self, f):
             top = ttk.Frame(f)
@@ -828,7 +919,7 @@ def build_app():
             try:
                 self.draft = copy.deepcopy(self.model.load())
             except Exception as e:
-                messagebox.showerror("camfrog-auto", ca.t("cannot_load", e=e))
+                messagebox.showerror(APP_NAME, ca.t("cannot_load", e=e))
                 return
             ca.LANG = ca.resolve_lang(self.draft["language"])
             self.build()
@@ -881,7 +972,7 @@ def build_app():
         def helper(self, cmd):
             cfg, errs = self.collect()
             if errs or ConfigModel.check(cfg)[0]:
-                messagebox.showerror("camfrog-auto", "\n".join(errs or ConfigModel.check(cfg)[0]))
+                messagebox.showerror(APP_NAME, "\n".join(errs or ConfigModel.check(cfg)[0]))
                 return
             ca.setup_logging(cfg)
             fn = {"windows": lambda: ca.cmd_windows(cfg), "discover": lambda: ca.cmd_discover(cfg),
@@ -893,18 +984,22 @@ def build_app():
             """Run detection and fill selectors; auto-apply saves valid proposals."""
             cfg, errs = self.collect()
             if errs or ConfigModel.check(cfg)[0]:
-                messagebox.showerror("camfrog-auto", "\n".join(errs or ConfigModel.check(cfg)[0]))
+                messagebox.showerror(APP_NAME, "\n".join(errs or ConfigModel.check(cfg)[0]))
                 return
             ca.setup_logging(cfg)
             self.run_bg(lambda: ca.cmd_detect(cfg, self.model.path, False, True), "detect")
 
         def apply_proposal(self, out):
-            for line in out.splitlines():
-                if line.startswith("PROPOSAL "):
-                    for key, sel in json.loads(line[9:]).items():
-                        vars_ = self.sel_vars[tuple(key.split("."))][0]
-                        for k in SEL_FIELDS:
-                            vars_[k].set(sel.get(k, "") if k != "index" else str(sel.get("index", 0)))
+            skipped = []
+            for proposal in iter_proposals(out):
+                _applied, missed = apply_proposal_to_vars(self.sel_vars, proposal)
+                for key in missed:
+                    try:
+                        self._set(self.draft, tuple(key.split(".")), proposal[key])
+                    except (KeyError, TypeError, AttributeError):
+                        pass
+                skipped += missed
+            return skipped
 
         def run_bg(self, fn, kind):
             if self.busy:
@@ -936,10 +1031,16 @@ def build_app():
                         self.close_app()  # bot keeps running hidden; reopen the GUI any time
                         return
                     if kind in ("helper", "detect") and out:
+                        extra = ""
                         if kind == "detect" and rc == 0:
-                            self.apply_proposal(out)
+                            skipped = self.apply_proposal(out)
+                            if skipped:
+                                extra = "\n" + "\n".join(
+                                    bi("kept in config (no box in this app): {0}|"
+                                       "อยู่ใน config แล้ว (ไม่มีช่องในแอปนี้): {0}").format(k)
+                                    for k in skipped)
                         self.set_text(self.helper_out, "\n".join(
-                            ln for ln in out.splitlines() if not ln.startswith("PROPOSAL ")))
+                            ln for ln in out.splitlines() if not ln.startswith("PROPOSAL ")) + extra)
                     self.refresh_state()
             except queue.Empty:
                 pass
@@ -1122,16 +1223,27 @@ def build_app():
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
-    if any(a in CLI_COMMANDS for a in argv):  # CLI passthrough (also how `start` relaunches this exe)
+    if has_cli_command(argv):  # CLI passthrough (also how `start` relaunches this exe)
         return ca.main(argv)
+    try:
+        args = parse_gui_args(argv)
+    except SystemExit as exc:
+        return exc.code
     if os.name == "nt":  # crisp text on Windows 11 high-DPI displays
         try:
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
-    cfg_path = ca.BASE / "config.json"
-    if "--config" in argv and argv.index("--config") + 1 < len(argv):
-        cfg_path = Path(argv[argv.index("--config") + 1])
+    cfg_path = Path(args.config) if args.config else ca.BASE / "config.json"
+    if not cfg_path.is_absolute():
+        cfg_path = ca.BASE / cfg_path
+    cfg_path = cfg_path.resolve()
+    if APP_PROFILE in ("room", "im_reply"):
+        try:
+            cfg_path.relative_to(ca.BASE.resolve())
+        except ValueError:
+            print("This app's config must stay inside its own folder.")
+            return 2
     try:
         app = build_app()(cfg_path)
     except SystemExit as e:

@@ -28,6 +28,28 @@ def test_sums_missing_exe(tmp_path):
     raise AssertionError("expected FileNotFoundError")
 
 
+def test_feature_package_requires_only_the_standalone_executables(tmp_path):
+    for relative in package.FEATURE_EXECUTABLES:
+        executable = tmp_path / relative
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(relative.encode())
+
+    sums = package.write_sums(tmp_path, "camfrog-features")
+    assert [line.split("  ", 1)[1] for line in sums.read_text().splitlines()] == list(
+        package.FEATURE_EXECUTABLES)
+    bundle = package.make_zip(tmp_path, tmp_path / "bundle.zip", executables_only=True)
+    with zipfile.ZipFile(bundle) as archive:
+        assert set(archive.namelist()) == set(package.FEATURE_EXECUTABLES) | {"SHA256SUMS.txt"}
+
+    (tmp_path / "legacy.exe").write_bytes(b"old app")
+    try:
+        package.write_sums(tmp_path, "camfrog-features")
+    except ValueError as exc:
+        assert "legacy.exe" in str(exc)
+    else:
+        raise AssertionError("expected an unexpected executable to stop packaging")
+
+
 def test_zip_contains_files_with_relative_paths(tmp_path):
     d = tmp_path / "dist"
     (d / "sub").mkdir(parents=True)
@@ -107,7 +129,7 @@ def test_missing_window_is_a_clean_error_not_a_traceback(tmp_path, monkeypatch):
     import shutil
     root = Path(__file__).resolve().parent.parent
     cfgp = tmp_path / "config.json"
-    shutil.copy(root / "config.json", cfgp)
+    shutil.copy(root / "config.example.json", cfgp)
     monkeypatch.setattr(ca, "BASE", tmp_path)
 
     def boom(cfg):

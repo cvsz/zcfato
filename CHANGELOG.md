@@ -7,8 +7,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- **Music DJ app** (`music-dj`): room bot that answers `!request` / `!queue` / `!current` / `!skip` / `!help` in chat, keeps a persistent `dj_queue.json`, and can play `.wav` files locally (`dj.audio_backend: "local"`) with automatic next-song advance. New `dj` config section; needs `autoreply.enabled` for chat plumbing. GUI has a queue view with owner Skip/Clear buttons.
+- `--chrome` CLI flag and GUI **Chrome** button: import the Camfrog session straight from Chrome's cookie store (nothing written to disk; DPAPI / AES-GCM decrypted in memory; clear error points to the cookies.txt fallback when the `cryptography` package is missing).
+- `status.marquee.scroll` (default `false`): one whole pool line per tick, lines rotate 1..N and wrap; `true` keeps the old frame-scrolling behavior.
+
 ### Changed
-- Updated `config.json` with production nicknames and window regex for live use.
+- **GUI split: one self-contained module per feature exe.** `room_control_gui.py`, `im_autoreply_gui.py`, `camfrog_music_gui.py`, `status_random_gui.py`, `status_marquee_gui.py`, `chat_im_private_gui.py` (renamed from `camfrog_private_chat_gui.py`), and `web_status_gui.py` (now includes the former `tools/web_status.py` logic) each inline the engine and clipboard helpers they need; no module imports another project module. Entry points no longer switch profiles/modes through environment variables. See `docs/gui-split.md`.
+
+### Fixed
+- `Runner.__init__` initializes resolve targets so the resolve-retry loop degrades to warnings instead of crashing.
+- Chrome DPAPI decryption no longer reads freed memory (`_data_blob` pins the backing buffer).
 
 ## [2.18.0] - 2026-10-07
 

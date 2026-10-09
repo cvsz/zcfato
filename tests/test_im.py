@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.fixture
 def cfg():
-    x = c.load_cfg(ROOT / "config.json")
+    x = c.load_cfg(ROOT / "config.example.json")
     x["dry_run"] = True
     x["autoreply"]["own_nickname"] = "Me"
     return x
@@ -21,6 +21,7 @@ def cfg():
 
 @pytest.fixture
 def im_cfg(cfg):
+    cfg["autoreply"]["enabled"] = True
     cfg["autoreply_im"].update(enabled=True, only_nicknames=["Friend"], dry_run=False)
     cfg["autoreply_im"]["rules"] = [{"pattern": ".*", "reply": "away, back later"}]
     cfg["dry_run"] = False

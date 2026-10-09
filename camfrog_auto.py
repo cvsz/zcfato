@@ -22,7 +22,6 @@ Options (before or after the command): --config PATH  --lang auto|th|en
 NOTE: untested against a live Camfrog build. Set selectors in config.json via `discover`.
 """
 import argparse
-import contextlib
 import copy
 import ctypes
 import datetime as dt
@@ -37,7 +36,7 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
-from typing import Any, Callable, Optional, Union
+from typing import Any, Optional, Union
 
 # Windowed/no-console builds have no stdout/stderr; force UTF-8 so Thai prints safely.
 for _n in ("stdout", "stderr"):
@@ -51,11 +50,15 @@ for _n in ("stdout", "stderr"):
 BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
     else Path(__file__).resolve().parent
 
-# The standalone Status Changer (zcfato.exe) keeps its own files in <exe>\config.
-# Its parent sets ZCFATO_DATA_DIR so the hidden child worker (same exe, --worker)
-# writes to the same folder. camfrog-auto.exe is unaffected (no env var set).
+APP_PROFILE = os.environ.get("CAMFROG_APP_PROFILE", "full").lower()
+APP_PROFILES = {"full", "room", "im_reply", "status", "music"}
+
+# Standalone executables can pin runtime state to their own directory. Status
+# workers use ZCFATO_DATA_DIR, which takes precedence over the GUI app directory.
 if os.environ.get("ZCFATO_DATA_DIR"):
     BASE = Path(os.environ["ZCFATO_DATA_DIR"])
+elif os.environ.get("CAMFROG_APP_DATA_DIR"):
+    BASE = Path(os.environ["CAMFROG_APP_DATA_DIR"])
 
 # Nickname regex: Unicode word chars + space . - (Camfrog allows Thai in nicknames).
 # LINE_RE nick capture is permissive; validation happens via NICK_RE.
@@ -303,7 +306,7 @@ DEFAULTS = {
         "language_mode": "both", "retry_seconds": 30, "max_length": 120, "messages": [],
         "schedules": [],
         "language_cycle": [],
-        "marquee": {"enabled": False, "width": 28, "stride": 2, "step_seconds": 0.5,
+        "marquee": {"enabled": False, "scroll": False, "width": 28, "stride": 2, "step_seconds": 0.5,
                     "separator": "   \u2022   ", "cycles": 1, "max_frames": 80, "infinite_loop": False},
         "history": {"enabled": True, "file": "status_history.json", "max_items": 50,
                     "record": True, "use_as_source": False, "seed_from_messages": True,
@@ -331,11 +334,44 @@ DEFAULTS = {
         "global_min_gap_seconds": 20, "max_per_hour": 10, "delay_range_seconds": [2.0, 5.0],
         "max_reply_length": 200, "max_incoming_length": 500,
     },
+    # Room music DJ: chat commands (!request/!queue/!current/!skip/!help) with a
+    # persistent queue. Needs autoreply.enabled for chat plumbing. Audio backends:
+    # "chat" announces only; "local" also plays .wav files on this machine
+    # (route them into Camfrog with a virtual cable / stereo mix for the room
+    # to hear; MP3 needs converting to WAV first).
+    "dj": {
+        "enabled": False, "prefix": "!", "queue_file": "dj_queue.json",
+        "max_per_user": 3, "music_dir": "music", "audio_backend": "chat",
+        "announce_now": "[dj] Now playing: {title} (requested by {user})",
+        "announce_queued": "[dj] Queued #{pos}: {title}",
+    },
 }
 
 
 def _im(cfg):
     return cfg.get("autoreply_im") or DEFAULTS["autoreply_im"]
+
+
+def apply_app_profile(cfg):
+    """Disable features owned by other standalone executables."""
+    if APP_PROFILE not in APP_PROFILES:
+        raise ValueError(f"Unknown Camfrog app profile: {APP_PROFILE}")
+    if APP_PROFILE == "full":
+        return cfg
+    result = copy.deepcopy(cfg)
+    if APP_PROFILE == "room":
+        result["status"]["enabled"] = False
+        result["autoreply_im"]["enabled"] = False
+    elif APP_PROFILE == "im_reply":
+        result["status"]["enabled"] = False
+        result["autoreply"]["enabled"] = False
+    elif APP_PROFILE == "status":
+        result["autoreply"]["enabled"] = False
+        result["autoreply_im"]["enabled"] = False
+    elif APP_PROFILE == "music":
+        result["status"]["enabled"] = False
+        result["autoreply_im"]["enabled"] = False
+    return result
 
 
 def deep_merge(base: dict, over: dict) -> dict:
@@ -447,7 +483,8 @@ def _validate(cfg, errs, warns):
         mq, hs = st["marquee"], st["history"]
         try:
             inf = mq.get("infinite_loop", False)
-            if mq["enabled"] and not (8 <= mq["width"] <= 80 and mq["width"] <= st["max_length"]
+            scroll = mq.get("scroll", False)
+            if mq["enabled"] and scroll and not (8 <= mq["width"] <= 80 and mq["width"] <= st["max_length"]
                                       and 1 <= mq["stride"] <= mq["width"]
                                       and mq["step_seconds"] >= 0.5
                                       and (inf or (1 <= mq["cycles"] <= 5))
@@ -501,6 +538,7 @@ def _validate(cfg, errs, warns):
         if not ar["own_nickname"].strip():
             warns.append(t("w_nick"))
     _validate_im(cfg, errs, warns)
+    _validate_dj(cfg, errs, warns)
     if not cfg["dry_run"]:
         warns.append(t("w_live"))
 
@@ -571,6 +609,28 @@ def _validate_im(cfg, errs, warns):
         warns.append(t("w_im_norules"))
 
 
+def _validate_dj(cfg, errs, warns):
+    """Room music DJ: needs chat plumbing, a sane prefix, caps and a backend."""
+    dj = cfg.get("dj") or DEFAULTS["dj"]
+    if not dj["enabled"]:
+        return
+    if not cfg["autoreply"]["enabled"]:
+        errs.append("dj needs autoreply.enabled (chat plumbing)")
+    pre = dj.get("prefix", "!")
+    if not isinstance(pre, str) or not pre.strip() or pre.lstrip().startswith("/"):
+        errs.append("dj.prefix must be a non-empty, non-command string")
+    v = dj.get("max_per_user", 3)
+    if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 50:
+        errs.append("dj.max_per_user must be 1-50")
+    if dj.get("audio_backend", "chat") not in ("chat", "local"):
+        errs.append('dj.audio_backend must be "chat" or "local"')
+    for key in ("announce_now", "announce_queued"):
+        if not isinstance(dj.get(key), str) or not dj[key]:
+            errs.append(f"dj.{key} must be a non-empty string")
+    if not dj.get("queue_file"):
+        errs.append("dj.queue_file must be set")
+
+
 def in_window(start: str, end: str, now: Optional[dt.time] = None) -> bool:
     now = now or dt.datetime.now().time()
     s, e = parse_hm(start), parse_hm(end)
@@ -598,7 +658,8 @@ def is_own_gui_window(win) -> bool:
         pass
     try:
         title = win.window_text()
-        if title and title.startswith("Camfrog Status Changer"):
+        if title and title.startswith((
+                "Camfrog Status Changer", "Camfrog Random Status", "Camfrog Marquee Status")):
             return True
     except Exception:
         pass
@@ -1336,7 +1397,13 @@ def cmd_state(cfg):
     return 0 if running else 1
 
 
-RUN_KEY, RUN_VALUE = r"Software\Microsoft\Windows\CurrentVersion\Run", "CamfrogAuto"
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = {
+    "room": "CamfrogRoomControl",
+    "im_reply": "CamfrogIMAutoReply",
+    "status": f"CamfrogStatus{os.environ.get('ZCFATO_STATUS_MODE', 'App').title()}",
+    "music": "CamfrogMusicDJ",
+}.get(APP_PROFILE, "CamfrogAuto")
 
 
 def cmd_autostart(args, enable):
@@ -1359,19 +1426,138 @@ def cmd_autostart(args, enable):
 
 
 # ---------- runner ----------
+class DJError(ValueError):
+    """A refused DJ request with a user-facing reason."""
+
+
+class DJQueue:
+    """Persistent song-request queue: {current: {title, user} | None, queue: [...] }."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+        self.current, self.queue = None, []
+
+    def load(self):
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(raw, dict):
+            return
+        cur = raw.get("current")
+        if isinstance(cur, dict) and str(cur.get("title", "")).strip():
+            self.current = {"title": str(cur["title"]).strip(), "user": str(cur.get("user", ""))}
+        items = raw.get("queue")
+        if isinstance(items, list):
+            for it in items:
+                if isinstance(it, dict) and str(it.get("title", "")).strip():
+                    self.queue.append({"title": str(it["title"]).strip(),
+                                       "user": str(it.get("user", ""))})
+
+    def save(self):
+        try:
+            atomic_write(self.path, json.dumps(
+                {"current": self.current, "queue": self.queue},
+                ensure_ascii=False, indent=2) + "\n")
+        except Exception as e:  # queue must never break the bot
+            log.debug("dj save failed: %s", e)
+
+    def add(self, title, user, max_per_user=3):
+        title, user = str(title).strip(), str(user).strip()
+        if not title:
+            raise DJError("give a song name: !request <song>")
+        mine = [q for q in self.queue if q["user"].lower() == user.lower()]
+        if len(mine) >= max(1, max_per_user):
+            raise DJError(f"{user} already has {len(mine)} songs queued")
+        if any(q["title"].lower() == title.lower() for q in self.queue):
+            raise DJError(f'"{title}" is already queued')
+        self.queue.append({"title": title, "user": user})
+        return len(self.queue)
+
+    def skip(self, nick, owner):
+        """Advance if nick requested the current song or owns the bot. Returns next or None."""
+        if self.current is None:
+            raise DJError("nothing is playing")
+        nick, owner = nick.lower(), (owner or "").lower()
+        if nick != self.current["user"].lower() and nick != owner:
+            raise DJError("only the requester or the bot owner can skip")
+        self.current = self.queue.pop(0) if self.queue else None
+        return self.current
+
+    def advance(self):
+        self.current = self.queue.pop(0) if self.queue else None
+        return self.current
+
+
+def dj_find_song(music_dir, title):
+    """Match a request against .wav files in music_dir. Returns Path or None."""
+    want = str(title).strip().lower()
+    if not want:
+        return None
+    try:
+        wavs = sorted(Path(music_dir).glob("*.wav"))
+    except OSError:
+        return None
+    for wav in wavs:
+        if want in wav.stem.lower():
+            return wav
+    return None
+
+
+def dj_wav_duration(path):
+    """Seconds of a WAV file, or None when unreadable."""
+    try:
+        import wave
+        with wave.open(str(path), "rb") as wav:
+            rate = wav.getframerate()
+            return wav.getnframes() / rate if rate else None
+    except Exception:
+        return None
+
+
+def dj_play(path):
+    """Play a WAV file async on Windows (winsound). Returns True when started."""
+    if os.name != "nt":
+        return False
+    try:
+        import winsound
+        winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+        return True
+    except Exception as e:
+        log.debug("dj play failed: %s", e)
+        return False
+
+
+def dj_stop():
+    try:
+        if os.name == "nt":
+            import winsound
+            winsound.PlaySound(None, 0)
+    except Exception:
+        pass
+
+
 class Runner:
     def __init__(self, cfg, cfg_path=None):
         self.cfg_path = Path(cfg_path) if cfg_path else None
         self._mtime = self.cfg_path.stat().st_mtime if self.cfg_path and self.cfg_path.exists() else 0
         self._next_reload = 0.0
+        self._next_resolve_retry = 0.0
         self.marq, self.lang_i, self.msg_i, self.current_text = None, 0, {}, None
-        self.chat_win, self.next_attach = None, 0.0
+        self.next_attach = 0.0
         self.im_wins, self.im_next_attach, self.im_hint_at = {}, 0.0, 0.0
+        # Resolve targets: stay None until _do_resolve() succeeds, so the
+        # retry loop degrades to warnings instead of AttributeError.
+        self.win = self.status_edit = self.apply_btn = None
+        self.history = self.input = self.chat_win = None
         self.apply_cfg(cfg)
         self.sender_last, self.sent = {}, []
         self.im_sender_last, self.im_day, self.im_sent, self.im_next_ok = {}, {}, [], 0.0
         self.next_reply_ok = 0.0
         self.status_i = 0
+        self.dj_prev = []
+        self.dj_started = 0.0
+        self.dj_length = 0.0
         self.last_status = -1e9 if cfg["status"]["set_on_start"] else time.monotonic()
         self.prev = []
         self.stats = {"started": dt.datetime.now().isoformat(timespec="seconds"),
@@ -1380,6 +1566,7 @@ class Runner:
         self._next_stats = 0.0
 
     def apply_cfg(self, cfg):
+        cfg = apply_app_profile(cfg)
         self.cfg = cfg
         self.dry = cfg["dry_run"]
         self.stop_file = BASE / cfg["safety"]["stop_file"]
@@ -1425,7 +1612,7 @@ class Runner:
             return
         self._mtime = mt
         try:
-            new = load_cfg(self.cfg_path)
+            new = apply_app_profile(load_cfg(self.cfg_path))
             errs, _ = validate(new)
             if not new["dry_run"] and new["autoreply"]["enabled"] \
                     and not new["autoreply"]["own_nickname"].strip():
@@ -1661,8 +1848,8 @@ class Runner:
         st, mq = self.cfg["status"], self.cfg["status"]["marquee"]
         limit = st["max_length"]
         final = clip(text, limit)
-        if not mq["enabled"]:
-            return [final]
+        if not mq["enabled"] or not mq.get("scroll", False):
+            return [final]  # per-line rotation: one whole line per tick
         inf = mq.get("infinite_loop", False)
         frames = [clip(f, limit) for f in marquee_frames(
             text, mq["width"], mq["stride"], mq["separator"], mq["cycles"], mq["max_frames"], inf)]
@@ -1717,6 +1904,8 @@ class Runner:
 
     def do_chat(self, can_reply):
         ar = self.cfg["autoreply"]
+        dj = self.cfg.get("dj") or DEFAULTS["dj"]
+        dj_pre = dj.get("prefix", "!") if dj["enabled"] else ""
         cur = read_chat(self.history, ar["history_tail"]).splitlines()
         fresh, self.prev = new_lines(self.prev, cur), cur
         if not can_reply:
@@ -1733,6 +1922,8 @@ class Runner:
             if not m:
                 continue  # continuation / system line: never act on it
             nick, msg = m["nick"].strip(), m["msg"][: ar["max_incoming_length"]]
+            if dj_pre and msg.startswith(dj_pre):
+                continue  # DJ commands belong to do_dj, never to room rules
             lk, mlang = nick.lower(), detect_lang(m["msg"])
             if (not NICK_RE.match(nick) or lk == self.own or lk in self.ignore
                     or (self.only and lk not in self.only)):
@@ -1765,6 +1956,121 @@ class Runner:
             self.stats["by_rule"][key] = self.stats["by_rule"].get(key, 0) + 1
             log.info(t("replied", nick=nick, text=shown(reply)))
 
+    def dj_command(self, queue, dj, cmd, arg, nick, owner):
+        """One DJ chat command -> reply text (None = not a DJ command)."""
+        if cmd in ("request", "req", "song"):
+            title = arg
+            if dj.get("audio_backend", "chat") == "local":
+                song = dj_find_song(BASE / dj.get("music_dir", "music"), arg)
+                if song is None:
+                    raise DJError(f'not found as .wav in music/: "{arg}"')
+                title = song.stem
+            if queue.current is not None \
+                    and queue.current["title"].lower() == title.lower():
+                raise DJError(f'"{title}" is playing now')
+            pos = queue.add(title, nick, dj.get("max_per_user", 3))
+            if queue.current is None:
+                queue.current = queue.queue.pop(0)
+                self.dj_start_playback(queue, dj)
+                return dj["announce_now"].format(title=queue.current["title"],
+                                                user=queue.current["user"])
+            return dj["announce_queued"].format(pos=pos, title=title)
+        if cmd == "queue":
+            if not queue.queue:
+                return "[dj] queue is empty"
+            lines = [f"{i}. {q['title']} ({q['user']})"
+                     for i, q in enumerate(queue.queue[:10], 1)]
+            return "[dj] queue: " + " | ".join(lines)
+        if cmd in ("current", "np"):
+            if queue.current is None:
+                return "[dj] nothing is playing"
+            return "[dj] current: {0} ({1})".format(queue.current["title"],
+                                                   queue.current["user"])
+        if cmd == "skip":
+            nxt = queue.skip(nick, owner)
+            self.dj_start_playback(queue, dj)
+            if nxt is None:
+                return "[dj] skipped, queue is empty"
+            return dj["announce_now"].format(title=nxt["title"], user=nxt["user"])
+        if cmd == "help":
+            return "[dj] commands: !request <song> !queue !current !skip"
+        return None
+
+    def dj_start_playback(self, queue, dj):
+        """Begin local audio for the current song (or stop when empty)."""
+        self.dj_started, self.dj_length = 0.0, 0.0
+        if queue.current is None or self.dry:
+            dj_stop()
+            return
+        if dj.get("audio_backend", "chat") != "local":
+            return
+        song = dj_find_song(BASE / dj.get("music_dir", "music"), queue.current["title"])
+        if song is None:
+            return
+        if dj_play(song):
+            self.dj_started = time.monotonic()
+            self.dj_length = dj_wav_duration(song) or 0.0
+
+    def dj_auto_advance(self, queue, dj):
+        """Move to the next song when the WAV finished. Returns True if changed."""
+        if queue.current is None or not self.dj_started or not self.dj_length:
+            if queue.current is not None and not self.dj_started \
+                    and not self.dry and dj.get("audio_backend", "chat") == "local":
+                self.dj_start_playback(queue, dj)  # resume after restart
+                return True
+            return False
+        if time.monotonic() - self.dj_started < self.dj_length:
+            return False
+        nxt = queue.advance()
+        self.dj_start_playback(queue, dj)
+        if nxt is None:
+            self.say_now("[dj] queue finished")
+        else:
+            self.say_now(dj["announce_now"].format(title=nxt["title"], user=nxt["user"]))
+        return True
+
+    def say_now(self, text):
+        if not self.send(self.input, text, None, self.chat_win):
+            raise RuntimeError(t("reply_fail"))
+        log.info(t("replied", nick="dj", text=shown(text)))
+
+    def do_dj(self, active):
+        dj = self.cfg.get("dj") or DEFAULTS["dj"]
+        if not (dj["enabled"] and active and self.history is not None
+                and self.input is not None):
+            return
+        ar = self.cfg["autoreply"]
+        cur = read_chat(self.history, ar["history_tail"]).splitlines()
+        fresh, self.dj_prev = new_lines(getattr(self, "dj_prev", []), cur), cur
+        queue = DJQueue(BASE / dj["queue_file"])
+        queue.load()
+        pre = dj.get("prefix", "!") or "!"
+        owner = self.own
+        dirty = False
+        for line in fresh:
+            m = LINE_RE.match(line.strip())
+            if not m:
+                continue
+            nick, msg = m["nick"].strip(), m["msg"][:200]
+            lk = nick.lower()
+            if not NICK_RE.match(nick) or lk == self.own:
+                continue
+            if not msg.startswith(pre):
+                continue
+            cmd, _, arg = msg[len(pre):].strip().partition(" ")
+            try:
+                reply = self.dj_command(queue, dj, cmd.lower(), arg.strip(), nick, owner)
+            except DJError as e:
+                reply = f"[dj] {e}"
+            if reply is None:
+                continue
+            self.say_now(reply)
+            dirty = True
+        if self.dj_auto_advance(queue, dj):
+            dirty = True
+        if dirty:
+            queue.save()
+
     def run(self):
         cfg = self.cfg
         if not self.dry and cfg["autoreply"]["enabled"] and not self.own:
@@ -1788,7 +2094,7 @@ class Runner:
                     self.maybe_reload(now)
                     active = in_active_hours(self.cfg)
                     if active and self.cfg["status"]["enabled"]:
-                        if self.status_edit is None and now >= getattr(self, "_next_resolve_retry", 0):
+                        if self.status_edit is None and now >= self._next_resolve_retry:
                             self._next_resolve_retry = now + 30
                             try:
                                 self.resolve()
@@ -1799,6 +2105,7 @@ class Runner:
                         self.attach_chat(now)
                     if self.history is not None:
                         self.do_chat(active)
+                    self.do_dj(active)
                     if _im(self.cfg)["enabled"]:
                         self.attach_im(now)
                         self.do_im(active)
@@ -2276,7 +2583,7 @@ def cmd_im_probe(cfg):
             print(f"  [main]  {title!r}: buddy list / main window (never used)")
             continue
         try:
-            inp, hist = find(w, ar["input"]), find(w, ar["history"])
+            _, hist = find(w, ar["input"]), find(w, ar["history"])
         except Exception:
             print(f"  [other] {title!r}: no chat input/history panes found with the autoreply selectors")
             continue
@@ -2333,6 +2640,45 @@ CLI_COMMANDS = {
     "test-rules",
 }
 
+PROFILE_COMMANDS = {
+    "room": {
+        "check", "discover", "windows", "run", "start", "stop", "state",
+        "autostart-on", "autostart-off", "chat-probe", "detect", "init",
+        "test-rules",
+    },
+    "im_reply": {
+        "check", "discover", "windows", "run", "start", "stop", "state",
+        "autostart-on", "autostart-off", "im-probe", "detect", "init",
+        "test-rules",
+    },
+    "status": {
+        "check", "discover", "windows", "run", "start", "stop", "state",
+        "status", "marquee", "history", "history-add", "history-import",
+        "detect", "init",
+    },
+    "music": {
+        "check", "discover", "windows", "run", "start", "stop", "state",
+        "autostart-on", "autostart-off", "chat-probe", "detect", "init",
+        "test-rules",
+    },
+}
+
+
+def profile_command_error(profile, args):
+    """Return an error for a command outside this executable's feature boundary."""
+    if profile == "full":
+        return None
+    if profile not in PROFILE_COMMANDS:
+        return f"Unknown Camfrog app profile: {profile}"
+    if args.cmd not in PROFILE_COMMANDS[profile]:
+        return f"Command '{args.cmd}' is not available in the {profile} app."
+    if args.cmd == "test-rules":
+        if profile == "im_reply" and not args.im:
+            return "The IM Auto-reply app requires 'test-rules --im'."
+        if profile == "room" and args.im:
+            return "The Room Control app cannot test private IM rules."
+    return None
+
 
 def build_parser():
     common = argparse.ArgumentParser(add_help=False)
@@ -2343,7 +2689,7 @@ def build_parser():
     p.add_argument("--lang", choices=["auto", "th", "en"], default=None)
     sub = p.add_subparsers(dest="cmd", required=True)
     for name in ("check", "discover", "windows", "run", "start", "stop", "state",
-                 "autostart-on", "autostart-off", "cleanup-mutex"):
+                 "autostart-on", "autostart-off"):
         sub.add_parser(name, parents=[common])
     sub.add_parser("chat-probe", parents=[common])
     sub.add_parser("im-probe", parents=[common])
@@ -2378,20 +2724,28 @@ def main(argv=None):
     a = build_parser().parse_args(argv)
     LANG = resolve_lang(a.lang)
     LANG_LOCKED = bool(a.lang and a.lang != "auto")
+    profile_error = profile_command_error(APP_PROFILE, a)
+    if profile_error:
+        print(profile_error)
+        return 2
     cfg_path = Path(a.config) if a.config else BASE / "config.json"
+    if APP_PROFILE in ("room", "im_reply", "status"):
+        if not cfg_path.is_absolute():
+            cfg_path = BASE / cfg_path
+        try:
+            cfg_path.resolve().relative_to(BASE.resolve())
+        except ValueError:
+            print("This app's config must stay inside its own folder.")
+            return 2
     if a.cmd == "init":
         return cmd_init(cfg_path, a.force)
     try:
-        cfg = load_cfg(cfg_path)
+        cfg = apply_app_profile(load_cfg(cfg_path))
     except Exception as e:
         print(t("cannot_load", e=e))
         return 2
     if not a.lang:
         LANG = resolve_lang(cfg["language"])
-    if a.cmd == "cleanup-mutex":
-        # This doesn't need config - just clean the mutex
-        from camfrog_status_gui import SingleInstanceGuard
-        return 0 if SingleInstanceGuard.force_cleanup() else 1
     if a.cmd == "check":
         return cmd_check(cfg)
     if a.cmd == "stop":

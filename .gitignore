@@ -11,10 +11,25 @@ STOP
 stats.json
 *.zip
 *.spec
-!zcfato.spec
 *.mp4
 status_history.json
+random.db
+marquee.db
+private-chat-config.json
+room-control-data/
+im-autoreply-data/
+chat-im-private-data/
+random-data/
+marquee-data/
+music-dj-data/
 *.tmp
+/config.json
+/config/camfrog-status-config.json
+
+# Exported browser cookies are session secrets: never commit them.
+*cookies*.txt
+cookies.sqlite
+Cookies
 
 camfrog-status-runtime.json
 camfrog_status_changer_stats.json

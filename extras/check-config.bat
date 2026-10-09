@@ -1,4 +1,4 @@
 @echo off
-cd /d "%~dp0"
-camfrog-auto.exe check %*
+cd /d "%~dp0.."
+python camfrog_auto.py check %*
 pause

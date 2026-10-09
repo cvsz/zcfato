@@ -1,5 +1,4 @@
 """Offline tests for Camfrog 8.x control detection and the CEF chat reader."""
-import json
 import camfrog_auto as ca
 
 

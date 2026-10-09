@@ -2,7 +2,17 @@ $ErrorActionPreference = 'Stop'
 
 $distPath = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $PSScriptRoot) 'dist'))
 $distPrefix = $distPath.TrimEnd('\') + '\'
-$names = @('camfrog-auto.exe', 'camfrog-auto-gui.exe', 'zcfato.exe')
+$names = @(
+    'camfrog-auto.exe',
+    'camfrog-auto-gui.exe',
+    'zcfato.exe',
+    'room-control.exe',
+    'chat-im-private.exe',
+    'status-random.exe',
+    'status-marquee.exe',
+    'im-autoreply.exe',
+    'web-status.exe'
+)
 
 function Get-ProjectProcesses {
     @(Get-WmiObject -Class Win32_Process | Where-Object {

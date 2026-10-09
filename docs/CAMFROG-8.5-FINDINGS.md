@@ -4,7 +4,7 @@
 
 Source: static inspection of `Camfrog Video Chat.exe` 8.5.0.51219 (x64, Camfrog LLC), the **UI structure only**
 (window classes, control kinds, resources). No network protocol, licensing or code-patching work was done.
-**Not verified on a live Windows 11 session** — run `camfrog-auto detect` once to confirm on your machine.
+**Not verified on a live Windows 11 session** — run `python camfrog_auto.py detect` once to confirm on your machine.
 
 Related historical artifact: [static reverse-engineering notes for Camfrog Status 2009](CAMFROG-STATUS-2009-RE.md). That separate VB6 utility does not provide selectors or verified command IDs for Camfrog 8.5.
 
@@ -14,14 +14,14 @@ Related historical artifact: [static reverse-engineering notes for Camfrog Statu
 | Chat input = RichEdit | WTL `CRichEditTS`, window class `RICHEDIT50W` | `autoreply.input = {class_name: RICHEDIT50W}`; `write_text` falls back to `WM_SETTEXT` when UIA ValuePattern is missing |
 | Custom status = combo box | `CComboBoxTS` / `CComboBoxHistoryTS`, skin ids `custom_status_combo`, `custom_status_text`, `menu_status_*` | `status.edit = {class_name: Edit}` (the combo's inner Edit); detect falls back to the ComboBox itself |
 | Room log = embedded Chromium | imports `libcef.dll`; chat lines are HTML (`<a class='username'>`…); `camfrog://` scheme handler | The log is a UIA **Document** whose Name is the page title → new `read_chat()` reads its TextPattern (never `window_text()`) |
-| Not elevated | manifest `asInvoker`, `uiAccess=false` | Run camfrog-auto at the same (non-admin) level |
+| Not elevated | manifest `asInvoker`, `uiAccess=false` | Run Python and Camfrog at the same (non-admin) level |
 | Skin ids are not UIA ids | `mt_status_text`, `send_button`, … come from the skin | Don't rely on them as `auto_id`; check `controls.txt` |
 
 ## Verify on your PC (2 minutes)
 1. Open Camfrog and **join a room** (stay visible, not in tray).
-2. `camfrog-auto detect` (or GUI → Setup → *Auto-detect*). It prints the three selectors and writes `detect_report.txt`
-   (structure only, no chat text). `detect --apply` writes them to `config.json`.
-3. `camfrog-auto check`, then `camfrog-auto status "test"` with `dry_run: true`, then `run`.
+2. `python camfrog_auto.py detect` (or Room Control → Setup → *Auto-detect*). It prints the three selectors and writes `detect_report.txt`
+   (structure only, no chat text). `python camfrog_auto.py detect --apply` writes them to the source CLI `config.json`.
+3. Run `python camfrog_auto.py check`, then `python camfrog_auto.py status "test"` with `dry_run: true`, then `python camfrog_auto.py run`.
 
 ## Known risks
 - If Chromium accessibility is off the Document may be empty → no replies are generated (it fails safe: nothing is sent).
@@ -34,7 +34,7 @@ Related historical artifact: [static reverse-engineering notes for Camfrog Statu
 - The chat room is **not** in this window: rooms open as separate windows of the same process. v2.11 scans every window of
   the Camfrog process and attaches to the room automatically (`autoreply.window_title_regex` narrows it, blank = auto).
 - Still unverified: the room window's input/history classes (`RICHEDIT50W` / Chromium `Document` are from static analysis).
-  Open a room and run `camfrog-auto detect`, then send `detect_report.txt`.
+  Open a room and run `python camfrog_auto.py detect`, then send `detect_report.txt`.
 - `controls.txt` / `detect_report.txt` no longer include contact or chat text (tree/list items are redacted).
 
 ## Verified on a real PC (chat-room window, "<Room>: Video Chat Room")
@@ -46,5 +46,5 @@ Related historical artifact: [static reverse-engineering notes for Camfrog Statu
   turns them into `nick: message`; join/leave notices (no Hyperlink) are ignored.
 - Sending: no text control exists, so the tool brings the room to front, clicks the box, pastes (clipboard restored), presses Enter,
   and aborts if the room is not the foreground window at any step.
-- Still unverified: whether UIA exposes element **names** for the web text (the dumps redact names). Run `camfrog-auto chat-probe`:
+- Still unverified: whether UIA exposes element **names** for the web text (the dumps redact names). Run `python camfrog_auto.py chat-probe`:
   it prints the last parsed lines; lines marked `OK` are ones the bot could answer.

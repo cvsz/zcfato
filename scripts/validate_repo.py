@@ -62,7 +62,11 @@ def validate_markdown_links() -> list[str]:
     for md in sorted(ROOT.rglob("*.md")):
         if ".git" in md.parts or ".venv" in md.parts:
             continue
-        text = md.read_text(encoding="utf-8")
+        try:
+            text = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            errors.append(f"{md.relative_to(ROOT)}: cannot read file: {exc}")
+            continue
         for match in LINK_RE.finditer(text):
             raw = match.group(1).strip()
             if not raw or raw.startswith(SKIP_PREFIXES):

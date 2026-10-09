@@ -14,14 +14,27 @@ def due_schedules(schedule, now=None, grace_seconds=90):
     now = now or datetime.now()
     if schedule.get("paused"):
         return []
-    fired = schedule.setdefault("last_fired", {})
+    fired = schedule.get("last_fired")
+    if not isinstance(fired, dict):
+        fired = {}
+        schedule["last_fired"] = fired
     due = []
     for item in schedule.get("items", []):
+        if not isinstance(item, dict):
+            continue
         if not item.get("enabled", True):
             continue
-        item_id = item["id"]
+        item_id = item.get("id")
+        if not item_id or not isinstance(item_id, str):
+            continue
         mode = item.get("mode", "weekly")
         if mode == "interval":
+            try:
+                minutes = int(item.get("interval_minutes"))
+            except (TypeError, ValueError):
+                continue
+            if not 1 <= minutes <= 10080:
+                continue
             previous_raw = fired.get(item_id)
             try:
                 previous = datetime.fromisoformat(previous_raw) if previous_raw else None
@@ -29,14 +42,22 @@ def due_schedules(schedule, now=None, grace_seconds=90):
                 previous = None
             # ISO-8601 markers may be naive (older configs) or timezone-aware
             # (hand-edited/imported configs). Compare both forms on one timeline.
-            if previous is None or now.timestamp() - previous.timestamp() >= item["interval_minutes"] * 60:
+            if previous is None or now.timestamp() - previous.timestamp() >= minutes * 60:
                 occurrence = now.isoformat(timespec="seconds")
                 due.append((dict(item), occurrence))
             continue
 
-        if now.weekday() not in item["days"]:
+        days = item.get("days")
+        if not isinstance(days, (list, tuple)) or not days:
             continue
-        hour, minute = map(int, item["time"].split(":"))
+        try:
+            if now.weekday() not in days:
+                continue
+            hour, minute = map(int, str(item.get("time", "")).split(":"))
+            if not (0 <= hour <= 23 and 0 <= minute <= 59):
+                continue
+        except (ValueError, AttributeError):
+            continue
         scheduled = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
         age = (now - scheduled).total_seconds()
         if 0 <= age <= grace_seconds:

@@ -86,6 +86,26 @@ def has_status_context(names):
     return any(is_status_name(name) for name in names)
 
 
+def match_field_context(field_match, names):
+    """Try a field matcher against UIA context names in both shapes.
+
+    Single-name matchers (is_status_name) take one name; context matchers
+    (is_profile_name_context) take the whole list. A matcher that raises
+    (e.g. wrong shape) counts as no-match instead of a traceback.
+    """
+    names = list(names)
+    for name in names:
+        try:
+            if field_match(name):
+                return True
+        except Exception:
+            continue
+    try:
+        return bool(field_match(names))
+    except Exception:
+        return False
+
+
 def has_status_context_broad(names):
     return any(is_status_name_broad(name) for name in names)
 
@@ -273,7 +293,7 @@ def _focused_profile_editor(hwnd, pid, field_match, field_label, activate=True,
         matches = []
         for ctrl in edits:
             try:
-                if any(field_match(name) for name in accessible_context_names(ctrl.element_info)):
+                if match_field_context(field_match, accessible_context_names(ctrl.element_info)):
                     matches.append(ctrl)
             except Exception:
                 continue
@@ -304,7 +324,7 @@ def _focused_profile_editor(hwnd, pid, field_match, field_label, activate=True,
         raise AutomationError("Could not verify which LINE control has focus.") from exc
     if focus_pid != pid or top_level != hwnd:
         raise AutomationError("The field is not in the selected LINE window.")
-    if activate and not any(field_match(name) for name in accessible_context_names(info)):
+    if activate and not match_field_context(field_match, accessible_context_names(info)):
         raise AutomationError(
             f"Windows could not confirm this is LINE's {field_label} field. No text was changed."
         )

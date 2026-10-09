@@ -4,22 +4,22 @@ setlocal
 cd /d "%~dp0"
 
 echo ============================================================
-echo FULL BUILD: camfrog-auto + line-status-changer
+echo FULL BUILD: Camfrog feature apps + line-status-changer
 echo ============================================================
 echo.
 
-rem --- Build camfrog-auto ---
-echo [1/4] Building camfrog-auto...
+rem --- Build Camfrog feature apps ---
+echo [1/3] Building Camfrog feature apps...
 call build.bat
 if errorlevel 1 (
     echo.
-    echo BUILD FAILED: camfrog-auto
+    echo BUILD FAILED: Camfrog feature apps
     exit /b 1
 )
 echo.
 
 rem --- Build line-status-changer ---
-echo [2/4] Building line-status-changer...
+echo [2/3] Building line-status-changer...
 cd line
 call build.bat
 if errorlevel 1 (
@@ -31,59 +31,54 @@ if errorlevel 1 (
 cd ..
 echo.
 
-rem --- Verify both exes exist ---
-echo [3/4] Verifying outputs...
-if not exist dist\camfrog-auto.exe (
-    echo ERROR: dist\camfrog-auto.exe not found
+rem --- Verify all build outputs ---
+echo [3/3] Verifying outputs...
+if not exist dist\room-control\room-control.exe (
+    echo ERROR: dist\room-control\room-control.exe not found
     exit /b 1
 )
-if not exist dist\camfrog-auto-gui.exe (
-    echo ERROR: dist\camfrog-auto-gui.exe not found
+if not exist dist\chat-im-private\chat-im-private.exe (
+    echo ERROR: dist\chat-im-private\chat-im-private.exe not found
     exit /b 1
 )
-if not exist dist\zcfato.exe (
-    echo ERROR: dist\zcfato.exe not found
+if not exist dist\status-random\status-random.exe (
+    echo ERROR: dist\status-random\status-random.exe not found
+    exit /b 1
+)
+if not exist dist\status-marquee\status-marquee.exe (
+    echo ERROR: dist\status-marquee\status-marquee.exe not found
+    exit /b 1
+)
+if not exist dist\im-autoreply\im-autoreply.exe (
+    echo ERROR: dist\im-autoreply\im-autoreply.exe not found
+    exit /b 1
+)
+if not exist dist\web-status\web-status.exe (
+    echo ERROR: dist\web-status\web-status.exe not found
+    exit /b 1
+)
+if not exist dist\music-dj\music-dj.exe (
+    echo ERROR: dist\music-dj\music-dj.exe not found
     exit /b 1
 )
 if not exist line\dist\line-status-changer.exe (
     echo ERROR: line\dist\line-status-changer.exe not found
     exit /b 1
 )
-echo All executables found.
-echo.
-
-rem --- GPG commit and push ---
-echo [4/4] Commit and push...
-git add -A
-if errorlevel 1 (
-    echo ERROR: git add failed
+if not exist line\dist\line_config.json (
+    echo ERROR: line\dist\line_config.json not found
     exit /b 1
 )
-
-rem Check if there are changes to commit
-git diff --cached --quiet
-if errorlevel 1 (
-    rem Prefer a GPG-signed commit; fall back to unsigned when no secret key
-    rem is available (e.g. a fresh Windows checkout). The build itself already
-    rem succeeded -- this step only publishes it.
-    git commit -S -m "build: release %DATE% %TIME%"
-    if errorlevel 1 (
-        echo WARNING: signed commit failed; retrying as unsigned commit...
-        rem commit.gpgsign may be globally true, so explicitly disable it here.
-        git -c commit.gpgsign=false commit -m "build: release %DATE% %TIME%"
-        if errorlevel 1 (
-            echo ERROR: commit failed
-            exit /b 1
-        )
-    )
-    git push
-    if errorlevel 1 (
-        echo ERROR: git push failed
-        exit /b 1
-    )
-    echo.
-    echo Pushed successfully.
+if not exist camfrog-features-windows.zip (
+    echo ERROR: camfrog-features-windows.zip not found
+    exit /b 1
 )
+if not exist dist\SHA256SUMS.txt (
+    echo ERROR: dist\SHA256SUMS.txt not found
+    exit /b 1
+)
+echo All expected outputs found.
+echo.
 
 echo.
 echo ============================================================
@@ -91,8 +86,17 @@ echo FULL BUILD COMPLETE
 echo ============================================================
 echo.
 echo Outputs:
-echo   dist\camfrog-auto.exe
-echo   dist\camfrog-auto-gui.exe
-echo   dist\zcfato.exe
+echo   dist\room-control\room-control.exe
+echo   dist\chat-im-private\chat-im-private.exe
+echo   dist\status-random\status-random.exe
+echo   dist\status-marquee\status-marquee.exe
+echo   dist\im-autoreply\im-autoreply.exe
+echo   dist\web-status\web-status.exe
+echo   dist\music-dj\music-dj.exe
+echo   camfrog-features-windows.zip
+echo   dist\SHA256SUMS.txt
 echo   line\dist\line-status-changer.exe
-echo.
+echo   line\dist\line_config.json
+echo.
+echo Build only: no Git staging, commit, or push is performed.
+echo.

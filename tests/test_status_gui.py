@@ -27,7 +27,7 @@ def test_status_changer_parses_one_language_without_losing_it():
     assert gui.messages_from_slots([" ไทย || ", " || English "]) == ["ไทย", "English"]
 
 
-def test_runtime_config_disables_autoreply_and_sets_background_mode():
+def test_runtime_config_disables_autoreply_and_preserves_foreground_safety():
     base_cfg = {
         "autoreply": {"enabled": True},
         "autoreply_im": {"enabled": True},
@@ -38,12 +38,45 @@ def test_runtime_config_disables_autoreply_and_sets_background_mode():
     rt = gui.runtime_config(base_cfg)
     assert rt["autoreply"]["enabled"] is False
     assert rt["autoreply_im"]["enabled"] is False
-    assert rt["safety"]["require_foreground"] is False
+    assert rt["safety"]["require_foreground"] is True
     assert rt["stats"]["file"] == "camfrog_status_changer_stats.json"
     assert rt["log"]["file"] == "camfrog_status_changer.log"
     # Ensure original config is not mutated
     assert base_cfg["autoreply"]["enabled"] is True
     assert base_cfg["safety"]["require_foreground"] is True
+
+
+def test_apply_status_text_preserves_foreground_setting(tmp_path, monkeypatch):
+    config_path = tmp_path / "camfrog-status-config.json"
+    config_path.write_text(
+        '{"dry_run": false, "safety": {"require_foreground": true}}',
+        encoding="utf-8",
+    )
+    calls = []
+    win, ctrl = object(), object()
+    monkeypatch.setattr(
+        gui, "get_window", lambda _config: win,
+    )
+    monkeypatch.setattr(gui, "find", lambda _win, _spec: ctrl)
+    monkeypatch.setattr(gui, "commit", lambda *args: calls.append(args) or True)
+
+    assert gui.apply_status_text(config_path, "status text") == 0
+    assert calls[0][0] is win
+    assert calls[0][1] is ctrl
+    assert calls[0][2] == "status text"
+    assert calls[0][3] is False  # live send, dry_run off
+    assert calls[0][4] is True   # focus Camfrog and use foreground Enter
+
+
+def test_status_live_toggle_maps_to_dry_run_without_mutating_config():
+    original = {"dry_run": True}
+
+    preview = gui.status_config_for_live_send(original, False)
+    live = gui.status_config_for_live_send(original, True)
+
+    assert preview["dry_run"] is True
+    assert live["dry_run"] is False
+    assert original["dry_run"] is True
 
 
 def test_text_to_message_and_message_to_text():
@@ -66,6 +99,15 @@ def test_get_window_skips_own_tk_gui():
     assert gui.is_own_gui_window(own) is True
     assert gui.is_own_gui_window(real) is False
     assert gui.is_own_gui_window(SimpleNamespace(class_name=lambda: (_ for _ in ()).throw(OSError()))) is False
+
+
+def test_status_gui_own_window_titles_cover_random_and_marquee_when_class_lookup_fails():
+    for title in ("Camfrog Random Status", "Camfrog Marquee Status"):
+        own = SimpleNamespace(
+            class_name=lambda: (_ for _ in ()).throw(OSError()),
+            window_text=lambda title=title: title,
+        )
+        assert gui.is_own_gui_window(own) is True
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows mutex test")
@@ -134,7 +176,7 @@ def test_worker_cmd_runs_the_standalone_status_gui_in_worker_mode(monkeypatch, t
 
 def test_worker_cmd_frozen_relaunches_the_same_executable(monkeypatch, tmp_path):
     from types import SimpleNamespace
-    executable = tmp_path / "zcfato.exe"
+    executable = tmp_path / "status-random.exe"
     monkeypatch.setattr(gui.sys, "frozen", True, raising=False)
     monkeypatch.setattr(gui.sys, "executable", str(executable))
     config_path = tmp_path / "camfrog-status-config.json"
@@ -153,6 +195,7 @@ def test_infinite_loop_validation_mirrors_core():
     cfg["status"]["enabled"] = True
     cfg["status"]["messages"] = ["hello world, this is long enough"]
     cfg["status"]["marquee"]["enabled"] = True
+    cfg["status"]["marquee"]["scroll"] = True
     cfg["status"]["marquee"]["width"] = 10
     cfg["status"]["marquee"]["infinite_loop"] = True
     cfg["status"]["marquee"]["cycles"] = 0  # ignored when infinite
@@ -226,3 +269,51 @@ def test_runner_uses_combo_target_for_status_only(tmp_path, monkeypatch):
     runner.send(object(), "chat", win=object())
     assert calls[0][-1] == "combo"
     assert calls[1][-1] == "edit"
+
+
+def test_parse_interval_seconds_passes_through_valid_values():
+    assert gui.parse_interval_seconds("30") == 30
+    assert gui.parse_interval_seconds("90") == 90
+    assert gui.parse_interval_seconds(" 600 ") == 600
+
+
+def test_parse_interval_seconds_clamps_up_to_minimum():
+    assert gui.parse_interval_seconds("10") == gui.RANDOM_INTERVAL_MIN
+    assert gui.parse_interval_seconds("-5") == gui.RANDOM_INTERVAL_MIN
+
+
+def test_parse_interval_seconds_clamps_down_to_maximum():
+    assert gui.parse_interval_seconds("999999") == gui.RANDOM_INTERVAL_MAX
+    assert gui.parse_interval_seconds("90") == 90
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "12.5.3", "nan", "inf", "-inf", None])
+def test_parse_interval_seconds_rejects_bad_input(bad):
+    with pytest.raises(ValueError):
+        gui.parse_interval_seconds(bad)
+
+
+def test_parsed_interval_seconds_passes_validation():
+    import copy
+    cfg = copy.deepcopy(gui.DEFAULTS)
+    cfg["status"]["enabled"] = True
+    cfg["status"]["messages"] = ["hello world, this is long enough"]
+    cfg["status"]["interval_seconds"] = gui.parse_interval_seconds("45")
+    errs, _ = gui.validate(cfg)
+    assert not [e for e in errs if "interval" in e]
+
+
+def test_status_gui_marquee_defaults_to_per_line():
+    assert gui.DEFAULTS["status"]["marquee"]["scroll"] is False
+
+
+def test_status_gui_marquee_shape_skipped_when_scroll_off():
+    import copy
+    cfg = copy.deepcopy(gui.DEFAULTS)
+    cfg["status"]["enabled"] = True
+    cfg["status"]["messages"] = ["hello world, this is long enough"]
+    cfg["status"]["marquee"]["enabled"] = True
+    cfg["status"]["marquee"]["scroll"] = False
+    cfg["status"]["marquee"]["width"] = 3
+    errs, _ = gui.validate(cfg)
+    assert not [e for e in errs if "marquee" in e]

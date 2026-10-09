@@ -1,5 +1,5 @@
 @echo off
-rem Run camfrog-auto hidden in the background (no window). Stop with stop.bat. Log: camfrog_auto.log
-cd /d "%~dp0"
-camfrog-auto.exe start %*
+rem Source CLI wrapper; requires Python and this checkout.
+cd /d "%~dp0.."
+python camfrog_auto.py start %*
 timeout /t 5 >nul

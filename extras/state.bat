@@ -1,4 +1,4 @@
 @echo off
-cd /d "%~dp0"
-camfrog-auto.exe state %*
+cd /d "%~dp0.."
+python camfrog_auto.py state %*
 pause
