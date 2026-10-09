@@ -1,4 +1,5 @@
 """Tk-free tests for the prototype web status updater (no network)."""
+import os
 import sys
 from pathlib import Path
 
@@ -6,6 +7,14 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools import web_status as ws  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _isolated_credentials(tmp_path, monkeypatch):
+    """Point the credential store at an empty folder and drop ambient values."""
+    monkeypatch.setattr(ws, "BASE", tmp_path)
+    monkeypatch.delenv("CAMFROG_USER", raising=False)
+    monkeypatch.delenv("CAMFROG_PASSWORD", raising=False)
 
 
 class FakeResponse:
@@ -38,6 +47,21 @@ def _patch_opener(monkeypatch, body):
     return fake
 
 
+def _patch_opener_sequence(monkeypatch, bodies):
+    """One reply per call: e.g. the login result, then the profile page."""
+    remaining = list(bodies)
+
+    class SequenceOpener(FakeOpener):
+        def open(self, request, timeout=None):
+            self.calls.append(request)
+            body = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+            return FakeResponse(body)
+
+    fake = SequenceOpener(b"")
+    monkeypatch.setattr(ws.urllib.request, "build_opener", lambda *args: fake)
+    return fake
+
+
 def test_dry_run_touches_nothing(monkeypatch, capsys):
     monkeypatch.setattr(ws.urllib.request, "build_opener", lambda *a: (_ for _ in ()).throw(
         AssertionError("no network in dry-run")))
@@ -45,7 +69,7 @@ def test_dry_run_touches_nothing(monkeypatch, capsys):
         AssertionError("no password prompt in dry-run")))
     assert ws.main(["--login", "Seaza", "--status", "hello"]) == 0
     out = capsys.readouterr().out
-    assert "profiles.camfrog.com/Seaza" in out
+    assert "profiles.camfrog.com/home.php" in out
 
 
 def test_how_to_capture_exit_ok(capsys):
@@ -76,9 +100,13 @@ def test_live_wrong_password_reports_auth_failure(monkeypatch, capsys):
 
 def test_live_login_success_still_gated(monkeypatch, capsys):
     monkeypatch.setattr(ws.getpass, "getpass", lambda *a: "pw")
-    _patch_opener(monkeypatch, b"https://profiles.camfrog.com/en/")
+    _patch_opener_sequence(monkeypatch, [
+        b"https://profiles.camfrog.com/en/",               # login reply
+        b"<title>Camfrog - home</title>var nick = 'Seaza';",  # profile page
+    ])
     assert ws.main(["--login", "Seaza", "--status", "hi", "--live"]) == 3
-    assert "no verified status-update endpoint" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "not confirmed" in out and "--confirm-update" in out
 
 
 def test_live_prompt_cancel_sends_nothing(monkeypatch, capsys):
@@ -142,7 +170,7 @@ def test_probe_never_claims_verified_blindly(tmp_path, monkeypatch, capsys):
     _patch_opener(monkeypatch, b"<title>Camfrog - Profile Page</title>hello")
     assert ws.main(["--login", "Seaza", "--status", "hi",
                     "--cookies-file", _cookie_file(tmp_path), "--probe"]) == 0
-    assert "UNCONFIRMED" in capsys.readouterr().out
+    assert "no signed-in marker" in capsys.readouterr().out
 
 
 def test_probe_requires_cookies_file():
@@ -176,16 +204,95 @@ def test_parse_rotate_interval_clamps_and_rejects():
             ws.parse_rotate_interval(bad)
 
 
-def test_perform_update_refused_until_endpoint_verified():
-    ok, message = ws.perform_update(None, "Seaza", "hi", 1.0)
+def test_perform_update_refused_until_confirmed():
+    ok, message = ws.perform_update(None, "hi", 1.0)
     assert ok is False
-    assert "no verified status-update endpoint" in message
+    assert "not confirmed" in message and "--confirm-update" in message
 
 
-def _chrome_profile(tmp_path, name="Default", rows=((".camfrog.com", "sess", "plain", b""),)):
+def test_perform_update_confirmed_needs_csrf(monkeypatch):
+    fake = _patch_opener(monkeypatch, b"<title>no token here</title>")
+    ok, message = ws.perform_update(fake, "hi", 1.0, confirm=True)
+    assert ok is False
+    assert "CSRF" in message
+    assert fake.calls  # it did read the profile page first
+
+
+def test_perform_update_confirmed_posts_status(monkeypatch):
+    page = (b"<title>Camfrog</title>"
+            b"var csrf = '90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0';"
+            b"var nick = 'Seaza';")
+    fake = _patch_opener(monkeypatch, page)
+    posted = {}
+
+    def fake_post(opener, url, fields, timeout):
+        posted["url"] = url
+        posted["fields"] = fields
+        return '{"response":"ok"}'
+
+    monkeypatch.setattr(ws, "_post", fake_post)
+    ok, message = ws.perform_update(fake, "hi there", 1.0, confirm=True)
+    assert ok is True, message
+    assert posted["url"] == ws.WEB_UPDATE_URL
+    assert posted["fields"] == {"status": "hi there",
+                                "csrf": "90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0"}
+
+
+def test_extract_csrf_from_logged_in_page():
+    page = ("<html>var csrf = '90d230418b54c662c347d84f32f663e0a94fc5ab';"
+            "var nick = 'Seaza';</html>")
+    assert ws.extract_csrf(page).startswith("90d2")
+    assert ws.extract_csrf("<html>nothing</html>") == ""
+
+
+def test_summarize_session_reports_signed_in():
+    page = ("<title>Camfrog - \u0e0b\u0e48\u0e2d\u0e19</title>"
+            "<div class=\"nav-user-logged\">var _user_id = '146802792';"
+            "var nick = 'Seaza';")
+    verdict, detail = ws.summarize_session(page)
+    assert verdict == "signed-in"
+    assert "Seaza" in detail and "146802792" in detail
+
+
+def test_encrypted_credentials_roundtrip(tmp_path, monkeypatch):
+    """DPAPI protect/unprotect on Windows; a reversible stub everywhere else."""
+    if os.name == "nt":
+        ok, message = ws.save_credentials("Seaza", "s3cret")
+        assert ok, message
+        assert (tmp_path / ".env.enc").is_file()
+        assert "CAMFROG_PASSWORD=s3cret" not in (tmp_path / ".env.enc").read_text()
+        monkeypatch.delenv("CAMFROG_USER", raising=False)
+        monkeypatch.delenv("CAMFROG_PASSWORD", raising=False)
+        assert ws.load_env_enc() is True
+        assert os.environ["CAMFROG_USER"] == "Seaza"
+        assert os.environ["CAMFROG_PASSWORD"] == "s3cret"
+    else:
+        monkeypatch.setattr(ws, "dpapi_protect",
+                            lambda data: b"blob:" + data)
+        monkeypatch.setattr(ws, "dpapi_unprotect",
+                            lambda blob: blob[len(b"blob:"):])
+        ok, message = ws.save_credentials("Seaza", "s3cret")
+        assert ok, message
+        assert ws.load_env_enc() is True
+        assert os.environ["CAMFROG_USER"] == "Seaza"
+        assert os.environ["CAMFROG_PASSWORD"] == "s3cret"
+
+
+def test_env_enc_is_gitignored():
+    import subprocess
+    root = Path(__file__).resolve().parents[1]
+    rc = subprocess.run(["git", "-C", str(root), "check-ignore", ".env.enc"],
+                        capture_output=True)
+    assert rc.returncode == 0, ".env.enc must be git-ignored"
+
+
+def _chrome_profile(tmp_path, name="Default", rows=((".camfrog.com", "sess", "plain", b""),),
+                   network=False):
     import sqlite3
 
     profile = tmp_path / "chrome" / name
+    if network:
+        profile = profile / "Network"
     profile.mkdir(parents=True)
     db = profile / "Cookies"
     connection = sqlite3.connect(db)
@@ -211,6 +318,34 @@ def test_find_chrome_profiles_only_standard_dirs(tmp_path):
     found = ws.find_chrome_profiles(str(base))
     assert [name for name, _db in found] == ["Default", "Profile 1"]
     assert ws.find_chrome_profiles(str(tmp_path / "nope")) == []
+
+
+def test_find_chrome_profiles_network_layout(tmp_path):
+    """Chrome 127+ keeps the cookie DB under <profile>/Network/Cookies."""
+    base = _chrome_profile(tmp_path, network=True)
+    (base / "Profile 1" / "Network").mkdir(parents=True)
+    import sqlite3
+    connection = sqlite3.connect(base / "Profile 1" / "Network" / "Cookies")
+    connection.execute("CREATE TABLE cookies(a)")
+    connection.commit()
+    connection.close()
+    found = ws.find_chrome_profiles(str(base))
+    assert [name for name, _db in found] == ["Default", "Profile 1"]
+    assert found[0][1].endswith("Network" + os.sep + "Cookies")
+
+
+def test_find_chrome_profiles_prefers_network_over_legacy(tmp_path):
+    """A stale legacy Cookies file must not shadow the live Network database."""
+    base = _chrome_profile(tmp_path, network=True)
+    (base / "Default" / "Cookies").write_bytes(b"stale legacy db")
+    found = dict(ws.find_chrome_profiles(str(base)))
+    assert found["Default"].endswith("Network" + os.sep + "Cookies")
+
+
+def test_import_from_network_layout(tmp_path):
+    jar = ws.import_chrome_jar(str(_chrome_profile(tmp_path, network=True)))
+    assert len(jar) == 1
+    assert [c.value for c in jar] == ["plain"]
 
 
 def test_import_plain_values_and_redacts_summary(tmp_path):

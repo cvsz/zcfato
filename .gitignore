@@ -24,6 +24,8 @@ marquee-data/
 music-dj-data/
 *.tmp
 /config.json
+.env
+.env.enc
 /config/camfrog-status-config.json
 
 # Exported browser cookies are session secrets: never commit them.

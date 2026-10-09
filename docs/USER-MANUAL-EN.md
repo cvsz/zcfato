@@ -71,9 +71,10 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 
 ## 10. Web Status (prototype)
 
-Status: login flow mapped, update endpoint UNVERIFIED — live sends stay refused until confirmed.
+Status: login flow mapped; the status-update endpoint was captured from a logged-in `profiles.camfrog.com/home.php` session (POST `{status, csrf}` to `/ajax/update_status.php`) and stays gated — the first live send needs `--confirm-update`.
 
 - No args opens the GUI; any args use the CLI (`web-status.exe --login Seaza --status "..."`). Dry-run is default — no network at all.
+- **Account (stored encrypted)** section in the GUI: enter nickname + password, press **Save encrypted**. The pair is sealed with Windows DPAPI into `.env.enc` next to the app — it decrypts only under your Windows user, so a copied file is useless elsewhere. Nothing plaintext is written, and the password is never logged or shown. After saving, the CLI needs no `--login` and no password prompt (it reads `.env.enc` in memory). `.env.enc` is git-ignored.
 - **Probe session** checks a Chrome cookie export read-only (only counts/domains are shown, never values). The **Chrome** button auto-imports the session straight from Chrome's cookie store instead — nothing is exported or saved to disk.
 - Password path: interactive prompt (CLI) or masked field (GUI), used once, cleared immediately, never stored. No CAPTCHA bypass is attempted — the server's `captcha` reply stops the tool.
 - **Start** auto-switches a multi-line pool every N seconds (live rotation needs a cookies file or the Chrome button; passwords are never stored for background use). **Stop** cancels at once.

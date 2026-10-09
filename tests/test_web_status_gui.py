@@ -1,5 +1,7 @@
 """Tk-free tests for the web status GUI routing (no display needed)."""
 import sys
+
+import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -63,3 +65,42 @@ def test_windowed_exe_never_silent_on_error(monkeypatch):
     code = wsg.run_cli_headless(["--login"], show=lambda t, m: shown.append((t, m)))
     assert code == 2
     assert "usage-text" in shown[-1][1]
+
+
+from conftest import has_display, tk_root  # noqa: E402
+
+
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
+def test_account_setup_stores_encrypted_file(tmp_path, monkeypatch):
+    """The setup section encrypts into .env.enc and never shows the password."""
+    import tkinter
+
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    monkeypatch.delenv("CAMFROG_USER", raising=False)
+    monkeypatch.delenv("CAMFROG_PASSWORD", raising=False)
+    monkeypatch.setattr("tkinter.messagebox.showinfo", lambda *a, **k: None)
+    monkeypatch.setattr("tkinter.messagebox.showerror", lambda *a, **k: None)
+    root = tk_root()
+    root.deiconify()
+    monkeypatch.setattr(tkinter, "Tk", lambda: root)
+    manager = wsg.WebStatusManager()
+    manager.root.update()
+    assert "No stored account" in manager.acct_state.cget("text")
+    assert manager.acct_pw_entry.cget("show") == "\u2022"  # masked
+
+    calls = []
+
+    def fake_save(user, password):
+        calls.append((user, password))
+        (tmp_path / ".env.enc").write_text("base64blob\n", encoding="utf-8")
+        return True, "saved the encrypted account for {0!r}.".format(user)
+
+    monkeypatch.setattr(wsg, "save_credentials", fake_save)
+    manager.acct_user.set("Seaza")
+    manager.acct_pw.set("s3cret")
+    manager.save_account()
+    assert calls == [("Seaza", "s3cret")]
+    assert manager.acct_pw.get() == ""  # cleared after saving
+    assert ".env.enc" in manager.acct_state.cget("text") or "encrypted" in \
+        manager.acct_state.cget("text")
+    assert (tmp_path / ".env.enc").read_text() == "base64blob\n"

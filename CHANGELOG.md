@@ -10,7 +10,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ### Added
 - **Music DJ app** (`music-dj`): room bot that answers `!request` / `!queue` / `!current` / `!skip` / `!help` in chat, keeps a persistent `dj_queue.json`, and can play `.wav` files locally (`dj.audio_backend: "local"`) with automatic next-song advance. New `dj` config section; needs `autoreply.enabled` for chat plumbing. GUI has a queue view with owner Skip/Clear buttons.
 - `--chrome` CLI flag and GUI **Chrome** button: import the Camfrog session straight from Chrome's cookie store (nothing written to disk; DPAPI / AES-GCM decrypted in memory; clear error points to the cookies.txt fallback when the `cryptography` package is missing).
+- Chrome 127+ keeps its cookie DB under `<profile>/Network/Cookies`; the finder now prefers it over the legacy `<profile>/Cookies`.
+- `https://profiles.camfrog.com/home.php` session probe with real signed-in markers (`nav-user-logged`, `_user_id`, `nick`), plus the captured status-update endpoint (`/ajax/update_status.php`, POST `{status, csrf}`) implemented behind the `--confirm-update` gate.
 - `status.marquee.scroll` (default `false`): one whole pool line per tick, lines rotate 1..N and wrap; `true` keeps the old frame-scrolling behavior.
+
+### Added
+- Encrypted account store for web-status: the GUI's **Account (stored encrypted)** section seals the nickname/password with Windows DPAPI into `.env.enc` (git-ignored, decrypts only under the same Windows user); the CLI then needs no `--login` and no password prompt. Plaintext `.env` still works as a legacy fallback.
 
 ### Changed
 - **GUI split: one self-contained module per feature exe.** `room_control_gui.py`, `im_autoreply_gui.py`, `camfrog_music_gui.py`, `status_random_gui.py`, `status_marquee_gui.py`, `chat_im_private_gui.py` (renamed from `camfrog_private_chat_gui.py`), and `web_status_gui.py` (now includes the former `tools/web_status.py` logic) each inline the engine and clipboard helpers they need; no module imports another project module. Entry points no longer switch profiles/modes through environment variables. See `docs/gui-split.md`.

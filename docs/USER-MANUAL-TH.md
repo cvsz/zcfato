@@ -71,7 +71,8 @@ English version: `USER-MANUAL-EN.md`.
 
 ## 10. สถานะผ่านเว็บ (รุ่นทดลอง)
 
-สถานะ: รู้ขั้นตอน login แล้ว แต่ endpoint อัปเดตยังไม่ยืนยัน การส่งจริงจึงถูกปฏิเสธไว้ก่อน
+สถานะ: รู้ขั้นตอน login แล้ว และดึง endpoint อัปเดตสถานะได้จากหน้า home.php ที่ล็อกอินอยู่ (POST `{status, csrf}` ไป `/ajax/update_status.php`) แต่ยังกั้นไว้ การส่งครั้งแรกต้องใส่ `--confirm-update`
+- ส่วน **Account (stored encrypted)** ใน GUI: กรอกนิคกับรหัสผ่านแล้วกด **Save encrypted** ข้อมูลจะถูกผนวกด้วย Windows DPAPIเก็บไว้ที่ `.env.enc` ถอดได้เฉพาะผู้ใช้ Windows คนนี้ ไฟล์ที่คัดลอกไปใช้ที่อื่นใช้ไม่ได้ จึงไม่มีข้อความplaintextบนดิสก์ และไม่มีการบันทึกรหัสผ่านใน log หรือแสดงผล หลังจากบันทึกแล้ว CLI ไม่ต้องใส่ `--login` หรือรหัสผ่านอีก (อ่านจาก `.env.enc` ในหน่วยความจำ) โดย `.env.enc` ถูก ignore โดย Git
 
 - ไม่ใส่ argument เปิด GUI ใส่ argument ใช้ CLI (`web-status.exe --login Seaza --status "..."`) ค่าเริ่มต้นคือ dry-run ไม่มีการต่อเน็ต
 - **Preview plan** แสดงสิ่งที่จะทำ **Probe session** ตรวจ session จากไฟล์ cookie อย่างเดียว (โชว์แค่จำนวน/โดเมน ไม่โชว์ค่า) ปุ่ม **Chrome** ดึง session จากที่เก็บ cookie ของ Chrome ให้อัตโนมัติ ไม่ต้องส่งออกไฟล์ ไม่บันทึกอะไรลงดิสก์

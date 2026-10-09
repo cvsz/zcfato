@@ -21,6 +21,7 @@ Security rules (fail closed):
 
 import argparse
 import getpass
+import json
 import os
 import re
 import shutil
@@ -30,16 +31,21 @@ import tempfile
 import urllib.parse
 import urllib.request
 from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
+from pathlib import Path
+
+# Frozen -> files live next to the exe; source -> the repo root (parent of tools/).
+BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+    else Path(__file__).resolve().parent.parent
 
 LOGIN_URL = "https://www.camfrog.com/en/login/check.php"
-PROFILE_URL = "https://profiles.camfrog.com/{0}"
 
-LOGIN_URL = "https://www.camfrog.com/en/login/check.php"
 
-# No verified status-update endpoint yet. Keep False until captured from a
-# logged-in browser session (see --how-to-capture) and confirmed end to end.
-WEB_UPDATE_VERIFIED = False
-WEB_UPDATE_URL = ""
+# Captured 2026-10-09 from a logged-in https://profiles.camfrog.com/home.php
+# session: the profile page's hopping box POSTs {status, csrf} here, and the
+# csrf token is embedded in that same page. The path is implemented but stays
+# gated: the first live round-trip needs an explicit --confirm-update.
+WEB_UPDATE_URL = "https://profiles.camfrog.com/ajax/update_status.php"
+HOME_URL = "https://profiles.camfrog.com/home.php"
 
 EXIT_OK = 0
 EXIT_USAGE = 2
@@ -71,12 +77,38 @@ def next_rotation(pool, index):
     return pool[index % len(pool)], (index + 1) % len(pool)
 
 
-def perform_update(opener, login, status, timeout):
-    """Single gated send point for one rotation tick. Returns (ok, message)."""
-    if not WEB_UPDATE_VERIFIED or not WEB_UPDATE_URL:
-        return False, ("update refused: no verified status-update endpoint "
-                       "(dry-run preview only). Run --how-to-capture.")
-    return False, "endpoint gate: update path not implemented yet."
+def perform_update(opener, status, timeout, confirm=False):
+    """Single gated send point for one rotation tick. Returns (ok, message).
+
+    Reads the profile page for its per-session CSRF token, then POSTs the new
+    status. Refuses unless confirm=True (fail closed until a live round-trip is
+    confirmed by the operator).
+    """
+    if not confirm:
+        return False, ("update refused: endpoint captured from home.php but not "
+                       "confirmed end to end yet; pass --confirm-update to send "
+                       "for real (dry-run preview only).")
+    html = fetch_profile(opener, "", timeout)
+    csrf = extract_csrf(html)
+    if not csrf:
+        return False, ("update refused: no CSRF token on the profile page "
+                       "(session expired or not signed in).")
+    reply = _post(opener, WEB_UPDATE_URL, {"status": status, "csrf": csrf}, timeout)
+    try:
+        data = json.loads(reply)
+    except ValueError:
+        return False, "update refused: unrecognized server reply ({0}).".format(
+            reply[:60])
+    if data.get("error"):
+        return False, "update refused by the server: {0}".format(
+            str(data.get("response"))[:80])
+    return True, "status updated ({0}).".format(str(data.get("response"))[:60])
+
+
+def extract_csrf(html):
+    """The per-session CSRF token embedded in the logged-in profile page."""
+    match = re.search(r"var\s+csrf\s*=\s*['\"]([0-9a-fA-F]{16,})['\"]", html)
+    return match.group(1) if match else ""
 
 CAPTURE_STEPS = """\
 To capture the real status-update endpoint:
@@ -105,6 +137,8 @@ To reuse your Chrome session (no password needed):
 # Markers seen on the logged-out login wall (fetched 2026-10-09).
 LOGGED_OUT_MARKERS = ("nav-btn-sign-on", ">Sign On<", "Logon to view",
                       "<title>Camfrog - Login Page</title>")
+# Markers seen on the signed-in profile page home.php (fetched 2026-10-09).
+SIGNED_IN_MARKERS = ("nav-user-logged", "var _user_id = ")
 
 CHROME_DOMAINS = (".camfrog.com", "camfrog.com")
 CHROME_ENV_OVERRIDE = "CAMFROG_CHROME_USER_DATA"
@@ -125,6 +159,9 @@ def build_parser():
                              "(Windows only; nothing is written to disk)")
     parser.add_argument("--probe", action="store_true",
                         help="check the session read-only (no status change)")
+    parser.add_argument("--confirm-update", action="store_true",
+                        help="actually POST the status to the captured endpoint "
+                             "(without it every run stays a dry-run)")
     parser.add_argument("--timeout", type=float, default=20.0)
     parser.add_argument("--how-to-capture", action="store_true",
                         help="print how to capture the update endpoint and exit")
@@ -132,10 +169,9 @@ def build_parser():
 
 
 def build_plan(login, status):
-    return ("dry-run: would sign in as {login!r} at {url} and set status "
-            "{profile} to {n} chars.".format(
-                login=login, url=LOGIN_URL,
-                profile=PROFILE_URL.format(login),
+    return ("dry-run: would sign in as {login!r} at {url}, open {home} for the "
+            "session CSRF token, and set the status to {n} chars.".format(
+                login=login, url=LOGIN_URL, home=HOME_URL,
                 n=len(status)))
 
 
@@ -179,7 +215,11 @@ def find_chrome_profiles(user_data=""):
     for name in names:
         if name != "Default" and not name.startswith("Profile "):
             continue
-        db = os.path.join(base, name, "Cookies")
+        # Chrome 127+ keeps the cookie DB under Network/; older builds (<127)
+        # used <profile>/Cookies. The Network file wins when both exist.
+        db = os.path.join(base, name, "Network", "Cookies")
+        if not os.path.isfile(db):
+            db = os.path.join(base, name, "Cookies")
         if os.path.isfile(db):
             found.append((name, db))
     return found
@@ -203,6 +243,34 @@ def _data_blob(data):
     blob = DATA_BLOB(len(raw), ctypes.cast(backing, ctypes.POINTER(ctypes.c_char)))
     blob._backing = backing
     return blob
+
+
+def dpapi_protect(data):
+    """Windows DPAPI encrypt to a blob (this user, this machine).
+
+    The result only decrypts under the same Windows user, so a copied
+    .env.enc is useless elsewhere. Raises ValueError off-Windows.
+    """
+    import ctypes
+
+    windll = getattr(ctypes, "windll", None)
+    if windll is None:
+        raise ValueError("DPAPI encrypt needs Windows")
+    if not isinstance(data, (bytes, bytearray)) or not data:
+        raise ValueError("nothing to encrypt")
+    in_blob = _data_blob(data)
+    out = type(in_blob)()
+    ok = windll.crypt32.CryptProtectData(
+        ctypes.byref(in_blob), None, None, None, None, 0, ctypes.byref(out))
+    if not ok:
+        raise ValueError("DPAPI could not encrypt this data")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        try:
+            windll.kernel32.LocalFree(out.pbData)
+        except Exception:
+            pass
 
 
 def dpapi_unprotect(blob):
@@ -320,7 +388,8 @@ def import_chrome_jar(user_data="", domains=CHROME_DOMAINS):
 
 
 def fetch_profile(opener, login, timeout):
-    request = urllib.request.Request(PROFILE_URL.format(login))
+    """The signed-in landing page: session markers plus the CSRF token."""
+    request = urllib.request.Request(HOME_URL)
     with opener.open(request, timeout=timeout) as response:
         return response.read().decode("utf-8", "replace")
 
@@ -333,10 +402,15 @@ def summarize_session(html):
         return ("logged-out",
                 "session is NOT signed in (page: {0!r}); log in via Chrome and "
                 "re-export cookies.".format(title))
+    user = re.search(r"var\s+_user_id\s*=\s*['\"](\d+)['\"]", html)
+    nick = re.search(r"var\s+nick\s*=\s*['\"]([^'\"]+)['\"]", html)
+    if user and nick:
+        return ("signed-in",
+                "session is signed in as {0!r} (user id {1}, page {2!r}).".format(
+                    nick.group(1), user.group(1), title))
     return ("unconfirmed",
-            "no login wall found (page: {0!r}, {1} chars) but login is UNCONFIRMED "
-            "without a known signed-in marker; confirm visually before any live "
-            "use.".format(title, len(html)))
+            "no login wall found (page: {0!r}, {1} chars) but no signed-in marker "
+            "either; confirm visually before any live use.".format(title, len(html)))
 
 
 def _post(opener, url, fields, timeout):
@@ -368,21 +442,103 @@ def handle_login_reply(reply):
     if reply in ("privacy", "under_16"):
         return EXIT_BLOCKED, "web login blocked: server replied {0!r}.".format(reply)
     if reply.startswith("http"):
-        if not WEB_UPDATE_VERIFIED or not WEB_UPDATE_URL:
-            return EXIT_BLOCKED, ("logged in, but no verified status-update endpoint: "
-                                  "refusing to guess it. Run --how-to-capture.")
-        return EXIT_BLOCKED, "endpoint gate: update path not implemented yet."
+        return EXIT_BLOCKED, ("logged in, but the status update was not confirmed: "
+                              "re-run with --confirm-update to POST it for real.")
     return EXIT_USAGE, "web login failed: unexpected server reply."
 
 
+ENV_ENC_NAME = ".env.enc"
+
+
+def env_enc_path():
+    return BASE / ENV_ENC_NAME
+
+
+def load_dotenv(path):
+    """Load credentials into os.environ: the DPAPI-encrypted .env.enc first,
+    then a plaintext .env (legacy). Existing environment variables always win,
+    and values are never logged.
+
+    .env.enc is written by the GUI account setup (Save encrypted) and only
+    decrypts under the Windows user that saved it.
+    """
+    if load_env_enc():
+        return True
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except OSError:
+        return False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not key or key in os.environ:
+            continue
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        os.environ[key] = value
+    return True
+
+
+def save_credentials(user, password):
+    """Encrypt the account into .env.enc (DPAPI). Returns (ok, message).
+
+    Nothing is logged; the plaintext never touches the disk.
+    """
+    import base64
+
+    user, password = str(user).strip(), str(password)
+    if not user or not password:
+        return False, "enter both the nickname and the password."
+    try:
+        blob = dpapi_protect(
+            "CAMFROG_USER={0}\nCAMFROG_PASSWORD={1}\n".format(
+                user, password).encode("utf-8"))
+        env_enc_path().write_text(
+            base64.b64encode(blob).decode("ascii") + "\n", encoding="utf-8")
+    except (OSError, ValueError) as exc:
+        return False, "could not save the encrypted account: {0}".format(exc)
+    return True, ("saved the encrypted account for {0!r} "
+                  "(this Windows user only).").format(user)
+
+
+def load_env_enc():
+    """Decrypt .env.enc into os.environ. Returns True when it was used."""
+    import base64
+
+    path = env_enc_path()
+    if not path.is_file():
+        return False
+    try:
+        blob = base64.b64decode(path.read_text(encoding="utf-8").strip())
+        text = dpapi_unprotect(blob).decode("utf-8", "replace")
+    except (OSError, ValueError):
+        return False
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if key and key not in os.environ:
+            os.environ[key] = value
+    return True
+
+
 def main(argv=None):
+    load_dotenv(BASE / ".env")
     args = build_parser().parse_args(argv)
     if args.how_to_capture:
         print(CAPTURE_STEPS)
         print(COOKIE_STEPS)
         return EXIT_OK
+    if not args.login:
+        args.login = (os.environ.get("CAMFROG_USER") or "").strip()
     if not args.login or not args.status:
-        build_parser().error("--login and --status are required")
+        build_parser().error("--login and --status are required "
+                             "(or set CAMFROG_USER in .env)")
     if not args.status.strip():
         print("refusing empty status text.")
         return EXIT_USAGE
@@ -409,16 +565,21 @@ def main(argv=None):
             return EXIT_USAGE
         _verdict, detail = summarize_session(html)
         print(detail)
-        print("no status was changed; updates stay gated until the endpoint is verified.")
+        print("no status was changed (read-only probe).")
         return EXIT_OK
     if not args.live:
         print(build_plan(args.login, args.status))
         return EXIT_OK
-    try:
-        password = getpass.getpass("Camfrog password for {0!r}: ".format(args.login))
-    except (EOFError, KeyboardInterrupt):
-        print("password prompt cancelled; nothing was sent.")
-        return EXIT_USAGE
+    env_password = os.environ.get("CAMFROG_PASSWORD")
+    if env_password:
+        password = env_password  # from .env / environment; never printed or logged
+        print("using the CAMFROG_PASSWORD from the environment (value not shown).")
+    else:
+        try:
+            password = getpass.getpass("Camfrog password for {0!r}: ".format(args.login))
+        except (EOFError, KeyboardInterrupt):
+            print("password prompt cancelled; nothing was sent.")
+            return EXIT_USAGE
     if not password:
         print("empty password; nothing was sent.")
         return EXIT_USAGE
@@ -432,7 +593,20 @@ def main(argv=None):
         del password
     code, message = handle_login_reply(reply)
     print(message)
-    return code
+    if code != EXIT_BLOCKED or not reply.startswith("http"):
+        return code
+    # Logged in: read the session page, then apply the gated update.
+    try:
+        html = fetch_profile(opener, args.login, args.timeout)
+    except Exception as exc:
+        print("profile page failed: {0}: {1}".format(type(exc).__name__, exc))
+        return EXIT_USAGE
+    _verdict, detail = summarize_session(html)
+    print(detail)
+    ok, update_message = perform_update(opener, args.status, args.timeout,
+                                        confirm=args.confirm_update)
+    print(update_message)
+    return EXIT_OK if ok else EXIT_BLOCKED
 
 
 if __name__ == "__main__":
