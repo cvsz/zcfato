@@ -25,18 +25,7 @@ def test_private_config_disables_all_bots(tmp_path, monkeypatch):
     assert config["autoreply_im"]["enabled"] is False
 
 
-_DISPLAY_ROOT = None
-
-
-def _display():
-    global _DISPLAY_ROOT
-    try:
-        import tkinter
-        _DISPLAY_ROOT = tkinter.Tk()
-        _DISPLAY_ROOT.withdraw()
-        return True
-    except Exception:
-        return False
+from conftest import has_display, tk_root  # noqa: E402
 
 
 def _buttons(manager):
@@ -54,39 +43,31 @@ def _buttons(manager):
 
 
 @pytest.fixture()
-def live_tk_root():
-    """A fresh real Tk window per test with a guaranteed live default root.
+def live_tk_root(monkeypatch):
+    """The process-wide shared Tk root with tkinter.Tk patched onto it.
 
-    Sharing one probe root across tests is fragile: any destroy (here or in
-    another module) leaves later StringVar() calls with no default root.
+    Only one Tcl interpreter may exist per process (a second one fails with
+    `invalid command name "tcl_findLibrary"` on some Windows Pythons), and the
+    root is never destroyed: destroying it would clear tkinter's default root
+    and break later StringVar() calls in other modules.
     """
     import tkinter
 
-    root = tkinter.Tk()
-    root.withdraw()
-    tkinter._default_root = root
-    try:
-        yield root
-    finally:
-        try:
-            root.destroy()
-        except Exception:
-            pass
+    root = tk_root()
+    monkeypatch.setattr(tkinter, "Tk", lambda *a, **k: root)
+    yield root
 
 
-@pytest.mark.skipif(not _display(), reason="needs tkinter + display")
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
 def test_private_chat_has_discover_button(tmp_path, monkeypatch, live_tk_root):
     monkeypatch.setattr(ca, "BASE", tmp_path)
     manager = p.PrivateChatManager(tmp_path / "private-chat-config.json")
-    try:
-        manager.root.withdraw()
-        manager.root.update()
-        assert "Discover controls" in _buttons(manager)
-    finally:
-        manager.root.destroy()
+    manager.root.withdraw()
+    manager.root.update()
+    assert "Discover controls" in _buttons(manager)
 
 
-@pytest.mark.skipif(not _display(), reason="needs tkinter + display")
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
 def test_private_chat_discover_reports_output_path(tmp_path, monkeypatch, live_tk_root):
     monkeypatch.setattr(ca, "BASE", tmp_path)
 
@@ -96,15 +77,12 @@ def test_private_chat_discover_reports_output_path(tmp_path, monkeypatch, live_t
 
     monkeypatch.setattr(ca, "cmd_discover", fake_discover)
     manager = p.PrivateChatManager(tmp_path / "private-chat-config.json")
-    try:
-        manager.root.withdraw()
-        manager.discover()
-        assert "controls.txt" in manager.status.get()
-    finally:
-        manager.root.destroy()
+    manager.root.withdraw()
+    manager.discover()
+    assert "controls.txt" in manager.status.get()
 
 
-@pytest.mark.skipif(not _display(), reason="needs tkinter + display")
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
 def test_private_chat_discover_reports_failure_in_status(tmp_path, monkeypatch, live_tk_root):
     monkeypatch.setattr(ca, "BASE", tmp_path)
 
@@ -113,9 +91,6 @@ def test_private_chat_discover_reports_failure_in_status(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(ca, "cmd_discover", fake_discover)
     manager = p.PrivateChatManager(tmp_path / "private-chat-config.json")
-    try:
-        manager.root.withdraw()
-        manager.discover()
-        assert manager.status.get().startswith("Could not discover controls:")
-    finally:
-        manager.root.destroy()
+    manager.root.withdraw()
+    manager.discover()
+    assert manager.status.get().startswith("Could not discover controls:")
