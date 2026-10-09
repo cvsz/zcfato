@@ -109,7 +109,16 @@ if errorlevel 1 goto :fail
 echo.
 echo === TESTS ===
 
-"%VENV_PY%" -m pytest -q tests
+rem Tk initialization on Windows is process-global. GUI fixtures that create or
+rem destroy a root in one test module can invalidate Tcl's tcl_findLibrary
+rem command for a later module. Run the private-chat GUI module in an isolated
+rem interpreter while still testing every test (no skips or xfails).
+"%VENV_PY%" -m pytest -q tests --ignore=tests/test_private_chat_gui.py
+if errorlevel 1 goto :fail
+
+echo.
+echo === ISOLATED PRIVATE-CHAT GUI TESTS ===
+"%VENV_PY%" -m pytest -q tests/test_private_chat_gui.py
 if errorlevel 1 goto :fail
 
 
