@@ -131,7 +131,7 @@ def test_live_network_failure_returns_int_code(monkeypatch, capsys):
     code = ws.main(["--login", "Seaza", "--status", "hi", "--live"])
     assert code == 2 and isinstance(code, int)
     out = capsys.readouterr().out
-    assert "web login request failed" in out
+    assert "login request failed" in out
     assert "pw" not in out
 
 
@@ -276,6 +276,71 @@ def test_encrypted_credentials_roundtrip(tmp_path, monkeypatch):
         assert ws.load_env_enc() is True
         assert os.environ["CAMFROG_USER"] == "Seaza"
         assert os.environ["CAMFROG_PASSWORD"] == "s3cret"
+
+
+def test_load_cookie_jar_rejects_the_encrypted_account_file(tmp_path):
+    """Pointing the cookies field at .env.enc must explain the mix-up."""
+    path = tmp_path / ".env.enc"
+    path.write_text("AQAAANCMnd8\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc:
+        ws.load_cookie_jar(str(path))
+    assert "encrypted account" in str(exc.value)
+    assert "Account section" in str(exc.value)
+
+
+def test_load_cookie_jar_names_the_extension_on_bad_files(tmp_path):
+    path = tmp_path / "cookies.txt"
+    path.write_text("not a cookies file\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc:
+        ws.load_cookie_jar(str(path))
+    assert "Get cookies.txt LOCALLY" in str(exc.value)
+
+
+def test_stored_account_reads_the_environment(monkeypatch):
+    monkeypatch.setenv("CAMFROG_USER", "Seaza")
+    monkeypatch.setenv("CAMFROG_PASSWORD", "pw")
+    assert ws.stored_account() == ("Seaza", "pw")
+    monkeypatch.delenv("CAMFROG_PASSWORD")
+    assert ws.stored_account() is None
+
+
+def test_live_update_signs_in_then_updates(monkeypatch):
+    """The cookie-free path: login -> session page -> gated update."""
+    monkeypatch.setattr(ws, "attempt_login",
+                        lambda *a: "https://profiles.camfrog.com/en/")
+    monkeypatch.setattr(ws, "fetch_profile",
+                        lambda *a: "var _user_id = '1'; var nick = 'Seaza'; "
+                                   "nav-user-logged")
+    seen = {}
+
+    def fake_update(opener, status, timeout, confirm=False):
+        seen["confirm"] = confirm
+        seen["status"] = status
+        return True, "status updated."
+
+    monkeypatch.setattr(ws, "perform_update", fake_update)
+    code, message = ws.live_update("Seaza", "pw", "hello", 1.0, confirm=True)
+    assert code == ws.EXIT_OK, message
+    assert seen == {"confirm": True, "status": "hello"}
+    assert "Seaza" in message
+
+
+def test_live_update_gated_without_confirmation(monkeypatch):
+    monkeypatch.setattr(ws, "attempt_login",
+                        lambda *a: "https://profiles.camfrog.com/en/")
+    monkeypatch.setattr(ws, "fetch_profile", lambda *a: "var nick = 'Seaza';")
+    monkeypatch.setattr(ws, "perform_update",
+                        lambda *a, **k: (False, "update refused: not confirmed"))
+    code, message = ws.live_update("Seaza", "pw", "hello", 1.0)
+    assert code == ws.EXIT_BLOCKED
+    assert "not confirmed" in message
+
+
+def test_live_update_reports_wrong_password(monkeypatch):
+    monkeypatch.setattr(ws, "attempt_login", lambda *a: "password")
+    code, message = ws.live_update("Seaza", "pw", "hello", 1.0)
+    assert code == ws.EXIT_USAGE
+    assert "nickname or password incorrect" in message
 
 
 def test_env_enc_is_gitignored():

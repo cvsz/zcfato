@@ -177,12 +177,21 @@ def build_plan(login, status):
 
 def load_cookie_jar(path):
     """Load a Netscape cookie.txt export. Raises ValueError with a safe message."""
+    if Path(path).name == ENV_ENC_NAME:
+        raise ValueError(
+            "that is your encrypted account (.env.enc), not a cookies export - "
+            "use the Account section of the GUI (Save encrypted) and leave the "
+            "cookies file empty, or export cookies with \"Get cookies.txt "
+            "LOCALLY\" and pick that file.")
     jar = MozillaCookieJar(path)
     try:
         jar.load(ignore_discard=True, ignore_expires=True)
     except Exception as exc:
-        raise ValueError("cannot load cookies file: {0}: {1}".format(
-            type(exc).__name__, exc)) from exc
+        raise ValueError(
+            "cannot load cookies file: {0}: {1}. A cookies export must come from "
+            "\"Get cookies.txt LOCALLY\" in Chrome (or the Chrome button with "
+            "Chrome closed); the Account section needs no cookies at all.".format(
+                type(exc).__name__, exc)) from exc
     if not len(jar):
         raise ValueError("cookies file holds no cookies; export camfrog.com cookies first.")
     return jar
@@ -454,6 +463,40 @@ def attempt_login(opener, login, password, timeout):
     }, timeout)
 
 
+def stored_account():
+    """(login, password) from the encrypted store / environment, if any."""
+    user = (os.environ.get("CAMFROG_USER") or "").strip()
+    password = os.environ.get("CAMFROG_PASSWORD") or ""
+    return (user, password) if user and password else None
+
+
+def live_update(login, password, status, timeout, confirm=False):
+    """Password path: sign in, then the gated status update. Returns (code, message).
+
+    Needs no cookies and no Chrome. `confirm` is the explicit operator consent
+    (the CLI --confirm-update flag, or an armed live start in the GUI).
+    """
+    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
+    try:
+        reply = attempt_login(opener, login, password, timeout)
+    except Exception as exc:
+        return EXIT_USAGE, "login request failed: {0}: {1}".format(
+            type(exc).__name__, exc)
+    finally:
+        del password
+    code, message = handle_login_reply(reply)
+    if not (code == EXIT_BLOCKED and reply.startswith("http")):
+        return code, message  # wrong password, captcha, ban, server error...
+    try:
+        html = fetch_profile(opener, login, timeout)
+    except Exception as exc:
+        return EXIT_USAGE, "profile page failed: {0}: {1}".format(
+            type(exc).__name__, exc)
+    _verdict, detail = summarize_session(html)
+    ok, update_message = perform_update(opener, status, timeout, confirm=confirm)
+    return (EXIT_OK if ok else EXIT_BLOCKED), "{0}\n{1}".format(detail, update_message)
+
+
 def handle_login_reply(reply):
     """Map the login/check.php reply to (exit_code, message). No secrets involved."""
     if reply == "password":
@@ -607,30 +650,10 @@ def main(argv=None):
     if not password:
         print("empty password; nothing was sent.")
         return EXIT_USAGE
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
-    try:
-        reply = attempt_login(opener, args.login, password, args.timeout)
-    except Exception as exc:
-        print("web login request failed: {0}: {1}".format(type(exc).__name__, exc))
-        return EXIT_USAGE
-    finally:
-        del password
-    code, message = handle_login_reply(reply)
+    code, message = live_update(args.login, password, args.status, args.timeout,
+                                confirm=args.confirm_update)
     print(message)
-    if code != EXIT_BLOCKED or not reply.startswith("http"):
-        return code
-    # Logged in: read the session page, then apply the gated update.
-    try:
-        html = fetch_profile(opener, args.login, args.timeout)
-    except Exception as exc:
-        print("profile page failed: {0}: {1}".format(type(exc).__name__, exc))
-        return EXIT_USAGE
-    _verdict, detail = summarize_session(html)
-    print(detail)
-    ok, update_message = perform_update(opener, args.status, args.timeout,
-                                        confirm=args.confirm_update)
-    print(update_message)
-    return EXIT_OK if ok else EXIT_BLOCKED
+    return code
 
 
 if __name__ == "__main__":

@@ -104,3 +104,44 @@ def test_account_setup_stores_encrypted_file(tmp_path, monkeypatch):
     assert ".env.enc" in manager.acct_state.cget("text") or "encrypted" in \
         manager.acct_state.cget("text")
     assert (tmp_path / ".env.enc").read_text() == "base64blob\n"
+
+
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
+def test_live_rotation_uses_the_saved_account(tmp_path, monkeypatch):
+    """Live Start needs no cookies when an encrypted account is saved."""
+    import tkinter
+
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    monkeypatch.delenv("CAMFROG_USER", raising=False)
+    monkeypatch.delenv("CAMFROG_PASSWORD", raising=False)
+    monkeypatch.setattr("tkinter.messagebox.showinfo", lambda *a, **k: None)
+    monkeypatch.setattr("tkinter.messagebox.askyesno", lambda *a, **k: True)
+    root = tk_root()
+    root.deiconify()
+    monkeypatch.setattr(tkinter, "Tk", lambda: root)
+    manager = wsg.WebStatusManager()
+    manager.root.update()
+
+    calls = []
+
+    def fake_live_update(login, password, status, timeout, confirm=False):
+        calls.append((login, password, status, confirm))
+        return wsg.EXIT_OK, "status updated."
+
+    monkeypatch.setattr(wsg, "live_update", fake_live_update)
+    monkeypatch.setenv("CAMFROG_USER", "Seaza")
+    monkeypatch.setenv("CAMFROG_PASSWORD", "pw")
+    manager.pool_box.delete("1.0", "end")
+    manager.pool_box.insert("1.0", "hello world")
+    manager.live.set(True)
+    manager.start()
+    # the worker thread posts the result; give the pump a moment
+    for _ in range(50):
+        manager.root.update()
+        if calls:
+            break
+        import time
+        time.sleep(0.05)
+    assert calls and calls[0][0] == "Seaza" and calls[0][2] == "hello world"
+    assert calls[0][3] is True  # an armed live start is the confirmation
+    manager.stop()
