@@ -348,6 +348,47 @@ def test_import_from_network_layout(tmp_path):
     assert [c.value for c in jar] == ["plain"]
 
 
+def test_both_modules_find_the_network_layout(tmp_path):
+    """The self-contained GUI copy must not drift from the source copy."""
+    import web_status_gui as wsg
+
+    base = _chrome_profile(tmp_path, network=True)
+    for mod in (ws, wsg):
+        found = dict(mod.find_chrome_profiles(str(base)))
+        assert found["Default"].endswith("Network" + os.sep + "Cookies"), mod.__name__
+
+
+def test_read_cookie_rows_reports_chrome_lock_clearly(tmp_path, monkeypatch):
+    """Chrome locks its DB (sharing violation): say what to do, never guess."""
+    base = _chrome_profile(tmp_path, network=True)
+    db = str(base / "Default" / "Network" / "Cookies")
+
+    def locked(*args, **kwargs):
+        raise PermissionError(32, "sharing violation")
+
+    monkeypatch.setattr(ws.shutil, "copyfile", locked)
+    with pytest.raises(ValueError) as exc:
+        ws.read_cookie_rows(db)
+    assert "Close Chrome" in str(exc.value)
+    assert "--cookies-file" in str(exc.value)
+
+
+def test_import_chrome_jar_surfaces_the_lock_message(tmp_path, monkeypatch):
+    def locked(*args, **kwargs):
+        raise PermissionError(32, "sharing violation")
+
+    monkeypatch.setattr(ws.shutil, "copyfile", locked)
+    with pytest.raises(ValueError) as exc:
+        ws.import_chrome_jar(str(_chrome_profile(tmp_path, network=True)))
+    assert "Close Chrome" in str(exc.value)
+
+
+def test_read_cookie_rows_prefers_the_snapshot_copy(tmp_path):
+    base = _chrome_profile(tmp_path, network=True)
+    rows = ws.read_cookie_rows(str(base / "Default" / "Network" / "Cookies"))
+    assert rows and rows[0][1] == "sess"
+
+
 def test_import_plain_values_and_redacts_summary(tmp_path):
     jar = ws.import_chrome_jar(str(_chrome_profile(tmp_path)))
     assert len(jar) == 1

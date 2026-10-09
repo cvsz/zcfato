@@ -203,7 +203,11 @@ def find_chrome_profiles(user_data=""):
     for name in names:
         if name != "Default" and not name.startswith("Profile "):
             continue
-        db = os.path.join(base, name, "Cookies")
+        # Chrome 127+ keeps the cookie DB under Network/; older builds (<127)
+        # used <profile>/Cookies. The Network file wins when both exist.
+        db = os.path.join(base, name, "Network", "Cookies")
+        if not os.path.isfile(db):
+            db = os.path.join(base, name, "Cookies")
         if os.path.isfile(db):
             found.append((name, db))
     return found
@@ -322,6 +326,36 @@ def _chrome_domain_match(host, domains=CHROME_DOMAINS):
                or host.endswith("." + dom.lstrip(".").lower()) for dom in domains)
 
 
+CHROME_LOCKED_MESSAGE = (
+    "Chrome is running and holds its cookie file closed to every other process "
+    "(sharing violation). Close Chrome and retry, export cookies with \"Get "
+    "cookies.txt LOCALLY\" and pass --cookies-file, or skip cookies entirely: "
+    "save your account in the GUI (Account / Save encrypted) and run without "
+    "--chrome.")
+
+
+def read_cookie_rows(db):
+    """All rows of a Chrome cookie DB via a temp snapshot copy.
+
+    Chrome opens its cookie DB exclusively (sharing violation, error 32), so the
+    copy only succeeds while Chrome is closed; the caller reports
+    CHROME_LOCKED_MESSAGE instead of guessing. Nothing is written next to the DB.
+    """
+    query = ("SELECT host_key, name, value, encrypted_value, path, "
+             "is_secure, expires_utc FROM cookies")
+    try:
+        with tempfile.TemporaryDirectory(prefix="camfrog-chrome-") as tmp:
+            snapshot = os.path.join(tmp, "Cookies")
+            shutil.copyfile(db, snapshot)
+            connection = sqlite3.connect(snapshot)
+            try:
+                return connection.execute(query).fetchall()
+            finally:
+                connection.close()
+    except PermissionError as exc:
+        raise ValueError(CHROME_LOCKED_MESSAGE) from exc
+
+
 def import_chrome_jar(user_data="", domains=CHROME_DOMAINS):
     """Build a CookieJar from Chrome's cookie store. Nothing is written to disk.
 
@@ -336,16 +370,10 @@ def import_chrome_jar(user_data="", domains=CHROME_DOMAINS):
     notes = []
     for profile, db in profiles:
         try:
-            with tempfile.TemporaryDirectory(prefix="camfrog-chrome-") as tmp:
-                snapshot = os.path.join(tmp, "Cookies")
-                shutil.copyfile(db, snapshot)
-                connection = sqlite3.connect(snapshot)
-                try:
-                    rows = connection.execute(
-                        "SELECT host_key, name, value, encrypted_value, path, "
-                        "is_secure, expires_utc FROM cookies").fetchall()
-                finally:
-                    connection.close()
+            rows = read_cookie_rows(db)
+        except ValueError as exc:
+            notes.append(str(exc))  # our own value-free guidance
+            continue
         except Exception as exc:
             notes.append("{0}: {1}".format(profile, type(exc).__name__))
             continue
