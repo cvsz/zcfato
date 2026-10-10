@@ -843,6 +843,8 @@ class WebStatusManager:
         self.chrome_mode = False
         self.cookie_paste = ""
         self.session_ready = False
+        self._pending = None
+        self._start_generation = 0
         load_dotenv(BASE / ".env")  # pick up the encrypted account, if saved
         self.root = self.tk.Tk()
         style = self.ttk.Style(self.root)
@@ -1072,6 +1074,7 @@ class WebStatusManager:
         changed = text != self.cookie_paste
         if changed:
             self.session_ready = False
+            self._invalidate_pending_start()
         try:
             cookie_from_paste(text)
         except ValueError:
@@ -1226,9 +1229,13 @@ class WebStatusManager:
                 return
         if live and not getattr(self, "session_ready", False):
             # Single login: verify the session first, then chain into rotation.
-            self._pending = (login, pool, interval, timeout)
-            self._verify_session(login, timeout, self._after_login)
+            generation = self._invalidate_pending_start()
+            self._pending = (login, pool, interval, timeout, generation)
+            self._verify_session(
+                login, timeout,
+                lambda: self._after_login(generation))
             return
+        self._invalidate_pending_start()
         if live and not getattr(self, "_live_confirmed", False):
             from tkinter import messagebox
             ok = messagebox.askyesno(
@@ -1242,15 +1249,22 @@ class WebStatusManager:
         self.switching = True
         self._cycle(login, pool, interval, timeout, live, 0)
 
-    def _after_login(self):
+    def _invalidate_pending_start(self):
+        """Invalidate queued login callbacks before Stop or another Start."""
+        self._start_generation = getattr(self, "_start_generation", 0) + 1
+        self._pending = None
+        return self._start_generation
+
+    def _after_login(self, generation):
         """Continue a pending live Start after the session verified."""
-        pending, self._pending = getattr(self, "_pending", None), None
-        if not pending:
+        pending = getattr(self, "_pending", None)
+        if not pending or pending[4] != generation:
             return
+        self._pending = None
         self.session_ready = True
         self.paste_state.configure(text="Logged in - automation armed.",
                                    foreground="#060")
-        login, pool, interval, timeout = pending
+        login, pool, interval, timeout = pending[:4]
         from tkinter import messagebox
         ok = messagebox.askyesno(
             "Send for real?",
@@ -1264,6 +1278,7 @@ class WebStatusManager:
         self._cycle(login, pool, interval, timeout, True, 0)
 
     def stop(self):
+        self._invalidate_pending_start()
         self.switching = False
         self.session_ready = False  # next Start re-verifies the session
         self.chrome_mode = False  # Stop also drops an imported Chrome session

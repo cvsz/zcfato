@@ -157,6 +157,7 @@ def _bare_manager(cookie_text="", cookie_paste="", live=True):
     manager.note = _Value()
     manager.paste_state = _Label()
     manager.switching = False
+    manager.rotate_job = None
     manager.chrome_mode = False
     manager.root = object()
     manager.pool_vars = [_Value("hello")] + [_Value("") for _ in range(9)]
@@ -213,6 +214,60 @@ def test_start_verifies_latest_php_sessid_and_continues_to_rotation(monkeypatch,
     assert manager.session_ready is True
     assert manager.switching is True
     assert rotations and rotations[0][0:2] == ("Seaza", ["hello"])
+
+
+def test_stop_cancels_pending_live_start_callback(monkeypatch, tmp_path):
+    import types
+
+    tkinter = types.ModuleType("tkinter")
+    tkinter.messagebox = types.SimpleNamespace(askyesno=lambda *a, **k: True)
+    monkeypatch.setitem(sys.modules, "tkinter", tkinter)
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager("PHPSESSID=abc1234567890123")
+    manager._save_web_texts = lambda notify=False: True
+    callbacks = []
+    rotations = []
+    manager._verify_session = lambda login, timeout, on_done: callbacks.append(on_done)
+    manager._cycle = lambda *args: rotations.append(args)
+
+    manager.start()
+    assert len(callbacks) == 1
+    manager.stop()
+    callbacks[0]()
+
+    assert manager.switching is False
+    assert manager.session_ready is False
+    assert rotations == []
+
+
+def test_stale_login_callback_does_not_consume_new_pending_start(monkeypatch, tmp_path):
+    import types
+
+    tkinter = types.ModuleType("tkinter")
+    tkinter.messagebox = types.SimpleNamespace(askyesno=lambda *a, **k: True)
+    monkeypatch.setitem(sys.modules, "tkinter", tkinter)
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager("PHPSESSID=abc1234567890123")
+    manager._save_web_texts = lambda notify=False: True
+    callbacks = []
+    rotations = []
+    manager._verify_session = lambda login, timeout, on_done: callbacks.append(on_done)
+    manager._cycle = lambda *args: rotations.append(args)
+
+    manager.start()
+    manager.stop()
+    manager.start()
+    assert len(callbacks) == 2
+
+    callbacks[0]()
+
+    assert manager.switching is False
+    assert manager._pending is not None
+    assert rotations == []
+
+    callbacks[1]()
+    assert manager.switching is True
+    assert len(rotations) == 1
 
 
 def test_start_without_session_reports_guidance_instead_of_crashing(monkeypatch, tmp_path):
