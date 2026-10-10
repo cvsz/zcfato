@@ -7,6 +7,11 @@ echo ============================================================
 echo FULL BUILD: Camfrog feature apps + line-status-changer
 echo ============================================================
 echo.
+echo Usage: full-build.bat [--release]
+echo   --release  publish the GitHub release after a green build
+echo              (version from APP_VERSION, needs: gh auth login).
+echo Without --release, no GitHub release is created.
+echo.
 
 rem --- Build Camfrog feature apps ---
 echo [1/3] Building Camfrog feature apps...
@@ -80,6 +85,25 @@ if not exist dist\SHA256SUMS.txt (
 echo All expected outputs found.
 echo.
 
+rem --- Publish the GitHub release (opt-in only) ---
+if /i "%~1"=="--release" (
+    echo [4/4] Publishing GitHub release...
+    if not exist ".venv\Scripts\python.exe" (
+        echo ERROR: .venv\Scripts\python.exe not found, cannot publish release
+        exit /b 1
+    )
+    ".venv\Scripts\python.exe" tools\release.py
+    if errorlevel 1 (
+        echo.
+        echo RELEASE FAILED: GitHub release was not published
+        exit /b 1
+    )
+    echo.
+) else (
+    echo Skipping GitHub release ^(pass --release to publish^).
+    echo.
+)
+
 echo.
 echo ============================================================
 echo FULL BUILD COMPLETE
@@ -99,4 +123,5 @@ echo   line\dist\line-status-changer.exe
 echo   line\dist\line_config.json
 echo.
 echo Build only: no Git staging, commit, or push is performed.
+echo Without --release, no GitHub release is created either.
 echo.
