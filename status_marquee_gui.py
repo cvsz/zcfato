@@ -3657,8 +3657,8 @@ def build_app():
             actions.columnconfigure(1, weight=1, uniform="action")
             for index, (title_en, title_th, command, colour, active) in enumerate((
                 ("1. Discovery", "1. ค้นหา Control", self.discover, "#1769c2", "#125397"),
-                ("2. Apply", "2. ใช้ทันที", self.apply_now, "#228b35", "#17682a"),
-                ("3. Start", "3. เริ่ม", lambda: self.set_enabled(self.mode, True), "#008f9c", "#006d78"),
+                ("2. Apply", "2. ใช้ทันที", self.apply_now, "#17682a", "#10521d"),
+                ("3. Start", "3. เริ่ม", lambda: self.set_enabled(self.mode, True), "#006d78", "#00535c"),
                 ("4. Stop", "4. หยุด", lambda: self.set_enabled(self.mode, False), "#d72d32", "#a81b22"),
             )):
                 button = tk.Button(
@@ -3666,7 +3666,8 @@ def build_app():
                     font=("Segoe UI", 10, "bold"), bg=colour, fg="#ffffff",
                     activebackground=active, activeforeground="#ffffff",
                     relief="flat", bd=0, padx=5, pady=10,
-                    cursor="hand2", highlightthickness=0, takefocus=True,
+                    cursor="hand2", highlightthickness=2, highlightbackground="#d5dbe0",
+                    highlightcolor="#102b45", takefocus=True,
                 )
                 button.grid(row=index // 2, column=index % 2,
                             padx=(0, 4) if index % 2 == 0 else (4, 0),
