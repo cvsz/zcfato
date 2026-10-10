@@ -1396,6 +1396,34 @@ RUN_VALUE = {
 }.get(APP_PROFILE, "CamfrogAuto")
 
 
+PROFILE_ASSETS = {
+    "room": "room-control.exe",
+    "im_reply": "im-autoreply.exe",
+    "status": "status-{mode}.exe",
+    "music": "music-dj.exe",
+    "chat_im_private": "chat-im-private.exe",
+    "full": "",
+}
+
+
+def cmd_update(args):
+    """Self-update this executable from the GitHub release (no config needed)."""
+    asset = getattr(args, "asset", None) or PROFILE_ASSETS.get(APP_PROFILE, "")
+    if "{mode}" in asset:
+        mode = os.environ.get("ZCFATO_STATUS_MODE", "").lower()
+        asset = asset.format(mode=mode if mode in ("random", "marquee") else "random")
+    if not asset:
+        print("no release asset for this app; pass one: update <asset-name>")
+        return 2
+    try:
+        state, message = self_update(asset)
+    except Exception as exc:
+        print("update check failed: {0}: {1}".format(type(exc).__name__, exc))
+        return 2
+    print(message)
+    return 0 if state in ("ready", "no-update") else 2
+
+
 def cmd_autostart(args, enable):
     if os.name != "nt":
         print(t("win_only"))
@@ -2635,21 +2663,25 @@ PROFILE_COMMANDS = {
         "check", "discover", "windows", "run", "start", "stop", "state",
         "autostart-on", "autostart-off", "chat-probe", "detect", "init",
         "test-rules",
+        "update",
     },
     "im_reply": {
         "check", "discover", "windows", "run", "start", "stop", "state",
         "autostart-on", "autostart-off", "im-probe", "detect", "init",
         "test-rules",
+        "update",
     },
     "status": {
         "check", "discover", "windows", "run", "start", "stop", "state",
         "status", "marquee", "history", "history-add", "history-import",
         "detect", "init",
+        "update",
     },
     "music": {
         "check", "discover", "windows", "run", "start", "stop", "state",
         "autostart-on", "autostart-off", "chat-probe", "detect", "init",
         "test-rules",
+        "update",
     },
 }
 
@@ -2681,6 +2713,9 @@ def build_parser():
     for name in ("check", "discover", "windows", "run", "start", "stop", "state",
                  "autostart-on", "autostart-off"):
         sub.add_parser(name, parents=[common])
+    up = sub.add_parser("update", parents=[common],
+                        help="self-update this executable from the GitHub release")
+    up.add_argument("asset", nargs="?", default=None)
     sub.add_parser("chat-probe", parents=[common])
     sub.add_parser("im-probe", parents=[common])
     dp = sub.add_parser("detect", parents=[common])
@@ -2718,6 +2753,8 @@ def cli_main(argv=None):
     if profile_error:
         print(profile_error)
         return 2
+    if a.cmd == "update":
+        return cmd_update(a)
     cfg_path = Path(a.config) if a.config else BASE / "config.json"
     if APP_PROFILE in ("room", "im_reply", "status"):
         if not cfg_path.is_absolute():

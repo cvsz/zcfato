@@ -151,6 +151,44 @@ def test_verify_accepts_flat_sums(tmp_path, monkeypatch):
     assert ca.verify_against_sums("https://x/sums", "room-control.exe", target) is True
 
 
+def test_cmd_update_dispatches_without_config(monkeypatch, capsys):
+    """`update` needs no config file and maps the profile to its asset."""
+    monkeypatch.setattr(ca, "APP_PROFILE", "room")
+    monkeypatch.setattr(ca, "self_update",
+                        lambda asset, **k: seen.append(asset) or ("ready", "done"))
+    seen = []
+    import argparse
+    assert ca.cmd_update(argparse.Namespace(asset=None)) == 0
+    assert seen == ["room-control.exe"]
+    assert "done" in capsys.readouterr().out
+
+
+def test_cmd_update_explicit_asset_wins(monkeypatch):
+    import argparse
+    monkeypatch.setattr(ca, "APP_PROFILE", "full")
+    monkeypatch.setattr(ca, "self_update", lambda asset, **k: ("no-update", "none"))
+    assert ca.cmd_update(argparse.Namespace(asset="web-status.exe")) == 0
+
+
+def test_cmd_update_full_profile_needs_an_asset(capsys):
+    import argparse
+    assert ca.cmd_update(argparse.Namespace(asset=None)) == 2
+    assert "pass one" in capsys.readouterr().out
+
+
+def test_update_allowed_in_every_profile():
+    import argparse
+    args = argparse.Namespace(cmd="update", config=None, lang=None)
+    for profile in ("room", "im_reply", "status", "music"):
+        assert ca.profile_command_error(profile, args) is None, profile
+
+
+def test_update_rejected_for_unknown_command():
+    import argparse
+    args = argparse.Namespace(cmd="marquee", config=None, lang=None)
+    assert ca.profile_command_error("music", args) is not None
+
+
 def test_sums_lookup_falls_back_to_prefixed_sums_file(monkeypatch):
     """v2.19.1 published the flat sums as release-SHA256SUMS.txt."""
     payload = dict(RELEASE, assets=[
