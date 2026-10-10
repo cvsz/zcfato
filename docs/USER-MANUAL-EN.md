@@ -51,8 +51,8 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 
 ## 7. Status Marquee
 
-- Long statuses scroll across a window of `width` characters: **Step** (seconds per frame, min 0.5), **Stride** (clusters per frame), **Loop** (repeat without settling). With **Scroll** off (default), each pool line is applied whole, one per tick, rotating 1..N and wrapping.
-- Every frame is a real status change on Camfrog, so keep frames slow and few. Start with dry-run.
+- Applies one whole pool line per tick, in order 1..N then wraps. No scrolling, no animation, no loop.
+- Every applied line is a real status change on Camfrog. Start with dry-run.
 - Thai-safe: never splits vowel/tone clusters, never emits a blank frame.
 
 ## 8. Status history, schedules, language

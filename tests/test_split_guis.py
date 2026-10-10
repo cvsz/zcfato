@@ -196,3 +196,26 @@ def test_status_gui_smoke_single_mode(name, tmp_path, monkeypatch):
     assert collected["status"]["messages"]  # pools seeded, not lost
     assert collected["status"]["random"] is (name == "status_random_gui")
     assert collected["status"]["marquee"]["enabled"] is (name == "status_marquee_gui")
+
+
+def test_marquee_build_frames_always_static():
+    """status-marquee never scrolls: one clipped line, even for legacy scroll configs."""
+    import status_marquee_gui as m
+
+    cfg = copy.deepcopy(m.DEFAULTS)
+    cfg["status"]["max_length"] = 10
+    cfg["status"]["marquee"]["enabled"] = True
+    cfg["status"]["marquee"]["scroll"] = True  # legacy: must be ignored
+    cfg["status"]["marquee"]["infinite_loop"] = True
+    runner = m.Runner(cfg)
+    assert runner.build_frames("a long status line here") == ["a long sta"]
+    assert runner.build_frames("short") == ["short"]
+
+
+def test_marquee_collect_disables_scroll_and_loop():
+    """Saving from the GUI normalizes legacy scroll/loop flags off."""
+    import status_marquee_gui as m
+
+    mq = {"scroll": True, "infinite_loop": True, "enabled": True}
+    assert m.normalize_marquee_static(mq) == {
+        "scroll": False, "infinite_loop": False, "enabled": True}

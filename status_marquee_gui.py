@@ -471,18 +471,8 @@ def _validate(cfg, errs, warns):
             errs.append(t("e_sel", k="status.edit"))
         if st.get("background_enter_target", "edit") not in ("edit", "combo"):
             errs.append("status.background_enter_target must be edit or combo")
-        mq, hs = st["marquee"], st["history"]
-        try:
-            inf = mq.get("infinite_loop", False)
-            scroll = mq.get("scroll", False)
-            if mq["enabled"] and scroll and not (8 <= mq["width"] <= 80 and mq["width"] <= st["max_length"]
-                                      and 1 <= mq["stride"] <= mq["width"]
-                                      and mq["step_seconds"] >= 0.3
-                                      and (inf or (1 <= mq["cycles"] <= 5))
-                                      and 5 <= mq["max_frames"] <= 300):
-                errs.append(t("e_marquee"))
-        except TypeError:
-            errs.append(t("e_marquee"))
+        hs = st["history"]
+        # Static text only: marquee shape needs no validation (scroll/loop removed).
         if any(x not in ("th", "en") for x in st["language_cycle"]):
             errs.append(t("e_cycle"))
         if hs["enabled"]:
@@ -1806,17 +1796,9 @@ class Runner:
         return raw
 
     def build_frames(self, text):
-        st, mq = self.cfg["status"], self.cfg["status"]["marquee"]
-        limit = st["max_length"]
-        final = clip(text, limit)
-        if not mq["enabled"] or not mq.get("scroll", False):
-            return [final]  # per-line rotation: one whole line per tick
-        inf = mq.get("infinite_loop", False)
-        frames = [clip(f, limit) for f in marquee_frames(
-            text, mq["width"], mq["stride"], mq["separator"], mq["cycles"], mq["max_frames"], inf)]
-        if not inf and (not frames or frames[-1] != final):
-            frames.append(final)  # settle on full text unless infinite loop
-        return frames
+        st = self.cfg["status"]
+        # Static text only: one whole line per tick, no scrolling frames.
+        return [clip(text, st["max_length"])]
 
     def do_status(self, now):
         st = self.cfg["status"]
@@ -2973,8 +2955,6 @@ DATA_DIR = Path(os.environ["ZCFATO_DATA_DIR"]) if os.environ.get("ZCFATO_DATA_DI
 
 
 RUNTIME_CONFIG = "camfrog-status-runtime.json"
-MARQUEE_STEP_MIN = 0.3
-MARQUEE_STRIDE_DEFAULT = 2
 RANDOM_INTERVAL_MIN = 0.3
 RANDOM_INTERVAL_DEFAULT = 600
 RANDOM_INTERVAL_MAX = 86400
@@ -3059,6 +3039,13 @@ def messages_from_slots(values):
         if message is not None:
             result.append(message)
     return result
+
+
+def normalize_marquee_static(mq):
+    """Force static text: scrolling and loop flags are legacy and always off."""
+    mq["scroll"] = False
+    mq["infinite_loop"] = False
+    return mq
 
 
 def runtime_config(config):
@@ -3480,14 +3467,6 @@ def build_app():
             LANG = resolve_lang(self.language_preference)
             self.pool_paths = {"marquee": DATA_DIR / "marquee.db"}
             self.marquee_fields = [tk.StringVar(value="") for _ in range(STATUS_SLOTS)]
-            self.step = tk.StringVar(value=str(max(
-                MARQUEE_STEP_MIN, self.config["status"]["marquee"]["step_seconds"])))
-            self.stride = tk.StringVar(value=str(self.config["status"]["marquee"].get(
-                "stride", MARQUEE_STRIDE_DEFAULT)))
-            self.infinite_loop = tk.BooleanVar(value=bool(
-                self.config["status"]["marquee"].get("infinite_loop", False)))
-            self.scroll_frames = tk.BooleanVar(value=bool(
-                self.config["status"]["marquee"].get("scroll", False)))
             self.combo_enter = tk.BooleanVar(value=(
                 self.config["status"].get("background_enter_target", "edit") == "combo"))
             self.live_send = tk.BooleanVar(value=not self.config.get("dry_run", True))
@@ -3497,7 +3476,7 @@ def build_app():
                 messagebox.showerror(f"Camfrog {self.app_name}", str(exc), parent=self.root)
                 self.root.destroy()
                 raise SystemExit(2)
-            for variable in (self.marquee_fields + [self.step, self.stride, self.live_send]):
+            for variable in (self.marquee_fields + [self.live_send]):
                 variable.trace_add("write", self.schedule_save)
             self._build()
             self.clipboard_controller = ClipboardController(
@@ -3634,27 +3613,10 @@ def build_app():
             ttk.Label(page, text=self._tr("Marquee status pool", "ชุดสถานะเลื่อน"),
                       font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 3))
             ttk.Label(page, text=self._tr(
-                "Marquee statuses and timing are kept separate from Random Status.",
-                "รายการและจังหวะข้อความเลื่อนแยกจากโหมดสุ่ม"),
+                "One whole line is applied per tick, in order, then wraps around. "
+                "No scrolling, no animation.",
+                "ส่งทีละ 1 บรรทัดเต็มตามลำดับ แล้ววนใหม่ ไม่เลื่อน ไม่วิ่ง"),
                 style="Hint.TLabel").pack(anchor="w", pady=(0, 6))
-            if True:
-                speed = ttk.Frame(page, style="Card.TFrame", padding=4)
-                speed.pack(fill="x", pady=(0, 4))
-                ttk.Label(speed, text=self._tr("Step", "จังหวะ"),
-                          background="#f4f7f7").pack(side="left", padx=(4, 0))
-                ttk.Spinbox(speed, textvariable=self.step, from_=MARQUEE_STEP_MIN,
-                            to=10, increment=0.1, width=4).pack(side="left", padx=(3, 5))
-                ttk.Label(speed, text="s", background="#f4f7f7").pack(side="left")
-                ttk.Label(speed, text=self._tr("Stride", "ก้าว"),
-                          background="#f4f7f7").pack(side="left", padx=(5, 2))
-                ttk.Spinbox(speed, textvariable=self.stride, from_=1, to=10,
-                            increment=1, width=2).pack(side="left")
-                ttk.Checkbutton(speed, text=self._tr("Loop", "วนลูป"),
-                                variable=self.infinite_loop,
-                                command=self.schedule_save).pack(side="left", padx=(8, 0))
-                ttk.Checkbutton(speed, text=self._tr("Scroll", "เลื่อน"),
-                                variable=self.scroll_frames,
-                                command=self.schedule_save).pack(side="left", padx=(8, 0))
 
             entries = ttk.Frame(page, style="Card.TFrame", padding=4)
             entries.pack(fill="both", expand=True, pady=(4, 0))
@@ -3757,15 +3719,7 @@ def build_app():
             config["language"] = self.language_preference
             st = config["status"]
             st["background_enter_target"] = "combo" if self.combo_enter.get() else "edit"
-            mq = st["marquee"]
-            try:
-                mq["step_seconds"] = max(MARQUEE_STEP_MIN, float(self.step.get()))
-                mq["stride"] = max(1, int(float(self.stride.get())))
-                mq["infinite_loop"] = bool(self.infinite_loop.get())
-                mq["scroll"] = bool(self.scroll_frames.get())
-            except ValueError as exc:
-                raise ValueError(self._tr("Enter valid marquee speed values.",
-                                          "กรอกค่าความเร็วข้อความเลื่อนให้ถูกต้อง")) from exc
+            mq = normalize_marquee_static(st["marquee"])
             st["messages"] = messages_from_slots(
                 var.get() for var in self._fields_for_mode())
             st["random"] = False

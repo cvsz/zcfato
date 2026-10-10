@@ -306,6 +306,12 @@ if not exist "dist\web-status\web-status.exe" goto :fail
 if not exist "dist\music-dj\music-dj.exe" goto :fail
 if not exist "dist\SHA256SUMS.txt" goto :fail
 if not exist "%FEATURE_NAME%-windows.zip" goto :fail
+if not exist "app.ico" goto :skip_icon_copy
+for %%D in (room-control chat-im-private status-random status-marquee im-autoreply music-dj web-status) do (
+    copy /y "app.ico" "dist\%%D\app.ico" >nul
+    if errorlevel 1 goto :fail
+)
+:skip_icon_copy
 
 echo.
 echo BUILD OK / สร้างสำเร็จ

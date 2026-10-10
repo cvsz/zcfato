@@ -63,7 +63,7 @@ def make_zip(dist, zip_path, executables_only=False):
     zip_path.unlink(missing_ok=True)
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(dist.rglob("*")):
-            include = (p.suffix.lower() == ".exe" or p.name == "SHA256SUMS.txt")
+            include = (p.suffix.lower() == ".exe" or p.name in ("SHA256SUMS.txt", "app.ico"))
             if p.is_file() and (not executables_only or include):
                 z.write(p, p.relative_to(dist).as_posix())
     return zip_path
