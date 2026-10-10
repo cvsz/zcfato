@@ -76,7 +76,6 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 Status: login flow mapped; the status-update endpoint was captured from a logged-in `profiles.camfrog.com/home.php` session (POST `{status, csrf}` to `/ajax/update_status.php`) and stays gated. CLI live sends need `--confirm-update`; GUI live Start asks for confirmation.
 
 - No args opens the GUI; any args use the CLI (`web-status.exe --login Seaza --status "..."`). Dry-run is default — no network at all.
-- Setup has ten single-line status fields. **Save to webtext.db** stores each numbered field in the local `webtext.db` beside the app; **Start** also saves the current fields before rotating through non-empty lines.
 - In Setup, enter up to ten statuses in the numbered single-line fields. **Save to webtext.db** saves each slot beside the app; **Start** also saves the current values and rotates through non-empty slots every N seconds.
 - In **Account & Session**, press **Open login page**, sign in in your browser, then copy `PHPSESSID=...` from the `profiles.camfrog.com/home.php` request in DevTools and paste it into the session field. Press **Login** to verify the current cookie; a signed-in result arms automation. The cookie stays in memory only.
 - With **Send live** enabled, **Start** verifies the current cookie if Login has not already armed the session, asks for confirmation, and begins rotation. **Stop** cancels the loop and disarms the session, so the next Start verifies again. Dry-run remains the default.

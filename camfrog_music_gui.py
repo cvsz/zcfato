@@ -2102,9 +2102,8 @@ class Runner:
         """Advance when the current local audio file finishes."""
         if queue.current is None:
             return False
-        if not self.dj_started or not self.dj_length:
-            if queue.current is not None and not self.dj_started \
-                    and not self.dry and dj.get("audio_backend", "chat") == "local":
+        if not self.dj_started:
+            if not self.dry and dj.get("audio_backend", "chat") == "local":
                 if time.monotonic() >= getattr(self, "dj_retry_at", 0.0):
                     self.dj_retry_at = time.monotonic() + 5.0
                     if self.dj_start_playback(queue, dj):  # resume after restart

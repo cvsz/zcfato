@@ -241,6 +241,29 @@ def test_dj_auto_advance_moves_on_after_duration(cfg, monkeypatch):
     assert any("Now playing: b" in s for s in sent2)
 
 
+def test_dj_auto_advance_uses_mci_mode_when_duration_is_unavailable(
+        cfg, monkeypatch, tmp_path):
+    cfg["dry_run"] = False
+    cfg["dj"]["audio_backend"] = "local"
+    runner, sent = _dj_runner(cfg, monkeypatch, [])
+    queue = c.DJQueue(tmp_path / "queue.json")
+    queue.current = {"title": "first", "user": "Ann"}
+    queue.queue = [{"title": "next", "user": "Bob"}]
+    runner.dj_started = time.monotonic() - 30
+    runner.dj_length = 0.0
+    runner.dj_start_playback = lambda *_args: True
+    mode = {"value": "playing"}
+    monkeypatch.setattr(c, "dj_audio_mode", lambda: mode["value"])
+
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is False
+    assert queue.current["title"] == "first"
+
+    mode["value"] = "stopped"
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is True
+    assert queue.current["title"] == "next"
+    assert any("Now playing: next" in line for line in sent)
+
+
 def test_dj_find_song_matching(tmp_path):
     music = tmp_path / "m"
     music.mkdir()
