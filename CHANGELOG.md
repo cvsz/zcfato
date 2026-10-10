@@ -5,6 +5,12 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+- Marquee `step_seconds` floor lowered 0.5 → 0.3 across the engine and all feature apps (validation, frame-wait floor, GUI spinbox minimum).
+- Random `status.interval_seconds` floor lowered 30 → 0.3 across the engine and all feature apps (validation, `RANDOM_INTERVAL_MIN`, GUI field now accepts decimals).
+
 ## [2.19.1] - 2026-10-10 (assets refreshed same day)
 
 ### Fixed

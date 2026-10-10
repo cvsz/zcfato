@@ -96,6 +96,22 @@ def next_rotation(pool, index):
     return pool[index % len(pool)], (index + 1) % len(pool)
 
 
+TIMEOUT_MIN = 5.0
+TIMEOUT_DEFAULT = 20.0
+TIMEOUT_MAX = 120.0
+
+
+def parse_timeout(raw):
+    """Network timeout in seconds, clamped to the allowed window."""
+    try:
+        value = float(str(raw).strip())
+    except (ValueError, TypeError, OverflowError) as exc:
+        raise ValueError("invalid timeout: {0!r}".format(raw)) from exc
+    if not (value == value and value not in (float("inf"), float("-inf"))):
+        raise ValueError("invalid timeout: {0!r}".format(raw))
+    return min(TIMEOUT_MAX, max(TIMEOUT_MIN, value))
+
+
 def perform_update(opener, status, timeout, confirm=False):
     """Single gated send point for one rotation tick. Returns (ok, message).
 
@@ -804,6 +820,10 @@ class WebStatusManager:
                          from_=ROTATE_INTERVAL_MIN, to=ROTATE_INTERVAL_MAX,
                          increment=30, width=6).pack(side="left")
         self.ttk.Label(timing, text="s (min 30)").pack(side="left", padx=(4, 0))
+        self.ttk.Label(timing, text="Timeout").pack(side="left", padx=(10, 0))
+        self.timeout = self.tk.StringVar(value=str(TIMEOUT_DEFAULT))
+        self.ttk.Entry(timing, textvariable=self.timeout, width=6).pack(side="left", padx=(3, 0))
+        self.ttk.Label(timing, text="s").pack(side="left")
         self.ttk.Label(form, text="Cookies file").grid(row=3, column=0, sticky="w", pady=(5, 0))
         self.cookies = self.tk.StringVar(value=cookies_default)
         self.ttk.Entry(form, textvariable=self.cookies).grid(row=3, column=1, sticky="ew", padx=6, pady=(5, 0))
@@ -1054,6 +1074,13 @@ class WebStatusManager:
                 if state == "ready" else "")
         self._run_bg(do)
 
+    def _timeout_value(self):
+        try:
+            return parse_timeout(self.timeout.get())
+        except ValueError as exc:
+            self.note.set(str(exc))
+            return None
+
     def probe(self):
         try:
             login = self._login_name()
@@ -1064,13 +1091,16 @@ class WebStatusManager:
             self.note.set("Paste a cookie (Browser login) or pick a cookies file "
                           "first (Browse...).")
             return
+        timeout = self._timeout_value()
+        if timeout is None:
+            return
 
         def do():
             import urllib.request
 
             jar = self._session_jar()
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-            html = fetch_profile(opener, login, 20.0)
+            html = fetch_profile(opener, login, timeout)
             _verdict, detail = summarize_session(html)
             return "loaded session: {0}. {1}".format(cookie_summary(jar), detail)
 
@@ -1086,13 +1116,16 @@ class WebStatusManager:
         if not password:
             self.note.set("Enter the password first (used once, cleared immediately).")
             return
+        timeout = self._timeout_value()
+        if timeout is None:
+            return
 
         def do():
             import urllib.request
             from http.cookiejar import CookieJar
 
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
-            reply = attempt_login(opener, login, password, 20.0)
+            reply = attempt_login(opener, login, password, timeout)
             _code, message = handle_login_reply(reply)
             return message
 
@@ -1109,6 +1142,7 @@ class WebStatusManager:
         try:
             login, pool = self._fields()
             interval = parse_rotate_interval(self.interval.get())
+            timeout = parse_timeout(self.timeout.get())
         except ValueError as exc:
             self.note.set(str(exc))
             return
@@ -1130,7 +1164,7 @@ class WebStatusManager:
                 return
             self._live_confirmed = True
         self.switching = True
-        self._cycle(login, pool, interval, live, 0)
+        self._cycle(login, pool, interval, timeout, live, 0)
 
     def stop(self):
         self.switching = False
@@ -1143,7 +1177,7 @@ class WebStatusManager:
             self.rotate_job = None
         self.note.set("Auto-switch stopped. Nothing further will be sent.")
 
-    def _cycle(self, login, pool, interval, live, index):
+    def _cycle(self, login, pool, interval, timeout, live, index):
         if not self.switching:
             return
         try:
@@ -1161,7 +1195,7 @@ class WebStatusManager:
             account = stored_account()
             if account is not None:
                 user, password = account
-                code, message = live_update(user, password, status, 20.0, confirm=True)
+                code, message = live_update(user, password, status, timeout, confirm=True)
                 return "cycle #{0}/{1}: {2}".format(index + 1, len(pool), message)
             import urllib.request
 
@@ -1170,13 +1204,13 @@ class WebStatusManager:
             except (OSError, ValueError) as exc:
                 return "cycle #{0}/{1} stopped: {2}".format(index + 1, len(pool), exc)
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-            ok, message = perform_update(opener, login, status, 20.0, confirm=True)
+            ok, message = perform_update(opener, login, status, timeout, confirm=True)
             return "cycle #{0}/{1}: {2}".format(index + 1, len(pool), message)
 
         self._run_bg(do, force=True)
         _, nxt = next_rotation(pool, index)
         self.rotate_job = self.root.after(max(1, interval) * 1000,
-                                          self._cycle, login, pool, interval, live, nxt)
+                                          self._cycle, login, pool, interval, timeout, live, nxt)
 
 
 # ---------- self-update from the GitHub release ----------

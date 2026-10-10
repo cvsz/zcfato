@@ -278,8 +278,9 @@ def test_parse_interval_seconds_passes_through_valid_values():
 
 
 def test_parse_interval_seconds_clamps_up_to_minimum():
-    assert gui.parse_interval_seconds("10") == gui.RANDOM_INTERVAL_MIN
+    assert gui.parse_interval_seconds("0.1") == gui.RANDOM_INTERVAL_MIN
     assert gui.parse_interval_seconds("-5") == gui.RANDOM_INTERVAL_MIN
+    assert gui.parse_interval_seconds("10") == 10
 
 
 def test_parse_interval_seconds_clamps_down_to_maximum():

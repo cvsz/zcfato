@@ -23,7 +23,7 @@ key ที่ไม่ใส่จะใช้ค่าเริ่มต้น 
 | `status.enabled` | `true` | หมุน status |
 | `status.edit` / `apply_button` | selectors / `null` | selector จาก `discover` ถ้าใส่ `apply_button` จะกดปุ่มแทน Enter |
 | `status.background_enter_target` | `edit` | ตัวเลือกทดลอง `combo`: เมื่อ `safety.require_foreground` เป็น `false` ให้ส่ง Enter ไปที่ ComboBox แม่ (`CComboBoxTS` ที่ยืนยันแล้ว) แทนช่อง Edit ลูก อาจเลี่ยงเสียง error ของ Windows แต่**ยังไม่ยืนยันว่าบันทึก status ได้** ไม่มีทางสำรองถ้าไม่เจอ parent ทดสอบด้วย Apply Now ตรวจสถานะใน Camfrog ถ้าไม่สำเร็จให้กลับเป็น `edit` ไม่มีผลเมื่อตั้ง apply button ไว้หรือเปิดโหมด foreground |
-| `status.interval_seconds` | `600` | ขั้นต่ำ 30 |
+| `status.interval_seconds` | `600` | ขั้นต่ำ 0.3 |
 | `status.retry_seconds` | `30` | รอก่อนลองส่งใหม่เมื่อล้มเหลว (1–3600) |
 | `status.set_on_start` | `true` | ตั้ง status แรกทันที |
 | `status.random` | `false` | สุ่มแทนเรียงลำดับ |
@@ -33,7 +33,7 @@ key ที่ไม่ใส่จะใช้ค่าเริ่มต้น 
 | `status.marquee.enabled` | `false` | เลื่อนข้อความยาวทีละเฟรม |
 | `status.marquee.scroll` | `false` | `false` = ส่งทีละ 1 บรรทัดเต็มต่อรอบ (วน 1..N) `true` = เลื่อนทีละเฟรมตามด้านล่าง |
 | `status.marquee.width` / `stride` | `28` / `2` | ความกว้างหน้าต่าง / จำนวนกลุ่มอักษรที่เลื่อนต่อเฟรม |
-| `status.marquee.step_seconds` | `0.5` | วินาทีต่อเฟรม (**ขั้นต่ำ 0.5**); ตัวรันจะตื่นตามกำหนดเฟรมเพื่อลดเวลารอเกิน |
+| `status.marquee.step_seconds` | `0.5` | วินาทีต่อเฟรม (**ขั้นต่ำ 0.3**); ตัวรันจะตื่นตามกำหนดเฟรมเพื่อลดเวลารอเกิน |
 | `status.marquee.cycles` / `max_frames` | `1` / `80` | จำนวนรอบ และเพดานเฟรมต่อการสลับ จากนั้นหยุดที่ข้อความเต็ม |
 | `status.marquee.infinite_loop` | `false` | `true` = เลื่อนวนลูปไม่หยุด (ไม่หยุดที่ข้อความเต็ม) เฟรมวนซ้ำถึง `max_frames` แล้วเริ่มใหม่ `cycles` จะถูกละเว้น |
 | `status.marquee.separator` | `   •   ` | ช่องว่างระหว่างท้ายข้อความกับจุดเริ่มใหม่ |

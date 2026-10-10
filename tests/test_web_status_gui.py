@@ -36,6 +36,24 @@ def test_load_pool_text_missing_file(tmp_path):
         wsg.load_pool_text(tmp_path / "missing.txt")
 
 
+@pytest.mark.parametrize("raw, expected", [
+    ("20", 20.0),
+    ("20.0", 20.0),
+    ("5", 5.0),
+    ("1", 5.0),      # clamped to the minimum
+    ("500", 120.0),  # clamped to the maximum
+    (20, 20.0),
+])
+def test_parse_timeout_accepts_and_clamps(raw, expected):
+    assert wsg.parse_timeout(raw) == expected
+
+
+@pytest.mark.parametrize("bad", ["", "abc", "nan", "inf", None])
+def test_parse_timeout_rejects_garbage(bad):
+    with pytest.raises(ValueError):
+        wsg.parse_timeout(bad)
+
+
 def test_cli_passthrough_calls_tool(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(wsg, "cli_main", lambda argv: calls.append(list(argv)) or 0)

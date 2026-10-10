@@ -72,7 +72,7 @@ S = {
     "e_regex": ("window_title_regex invalid: {e}", "window_title_regex ไม่ถูกต้อง: {e}"),
     "e_hours": ("active_hours start/end must be HH:MM", "active_hours start/end ต้องเป็นรูปแบบ HH:MM"),
     "e_msgs": ("status.messages is empty", "status.messages ว่างเปล่า"),
-    "e_interval": ("status.interval_seconds must be >= 30", "status.interval_seconds ต้องไม่น้อยกว่า 30"),
+    "e_interval": ("status.interval_seconds must be >= 0.3", "status.interval_seconds ต้องไม่น้อยกว่า 0.3"),
     "e_sel": ("{k} must be a selector object", "{k} ต้องเป็น object ของ selector"),
     "e_delay": ("autoreply.delay_range_seconds must be [min, max] with 0 <= min <= max",
                 "autoreply.delay_range_seconds ต้องเป็น [min, max] โดย 0 <= min <= max"),
@@ -168,8 +168,8 @@ S = {
     "why_sender": ("sender filtered", "กรองผู้ส่ง"),
     "why_link": ("contains a link", "มีลิงก์"),
     "why_pattern": ("matches skip_patterns", "ตรงกับ skip_patterns"),
-    "e_marquee": ("status.marquee invalid: width 8-80 (and <= status.max_length), stride 1..width, step_seconds >= 0.5, cycles 1-5, max_frames 5-300",
-                  "status.marquee ไม่ถูกต้อง: width 8-80 (และไม่เกิน status.max_length), stride 1..width, step_seconds >= 0.5, cycles 1-5, max_frames 5-300"),
+    "e_marquee": ("status.marquee invalid: width 8-80 (and <= status.max_length), stride 1..width, step_seconds >= 0.3, cycles 1-5, max_frames 5-300",
+                  "status.marquee ไม่ถูกต้อง: width 8-80 (และไม่เกิน status.max_length), stride 1..width, step_seconds >= 0.3, cycles 1-5, max_frames 5-300"),
     "e_cycle": ("status.language_cycle items must be th or en", "status.language_cycle ต้องเป็น th หรือ en เท่านั้น"),
     "e_hmode": ("status.history.mode must be rotate, random or most_used", "status.history.mode ต้องเป็น rotate, random หรือ most_used"),
     "e_hmax": ("status.history.max_items must be 5-500 and file must be set", "status.history.max_items ต้อง 5-500 และต้องตั้ง file"),
@@ -463,7 +463,7 @@ def _validate(cfg, errs, warns):
     if st["enabled"]:
         if not st["messages"]:
             errs.append(t("e_msgs"))
-        if st["interval_seconds"] < 30:
+        if st["interval_seconds"] < 0.3:
             errs.append(t("e_interval"))
         if st["language_mode"] not in ("th", "en", "both", "alternate"):
             errs.append(t("e_mode"))
@@ -477,7 +477,7 @@ def _validate(cfg, errs, warns):
             scroll = mq.get("scroll", False)
             if mq["enabled"] and scroll and not (8 <= mq["width"] <= 80 and mq["width"] <= st["max_length"]
                                       and 1 <= mq["stride"] <= mq["width"]
-                                      and mq["step_seconds"] >= 0.5
+                                      and mq["step_seconds"] >= 0.3
                                       and (inf or (1 <= mq["cycles"] <= 5))
                                       and 5 <= mq["max_frames"] <= 300):
                 errs.append(t("e_marquee"))
@@ -1859,7 +1859,7 @@ class Runner:
             # writes can be slow; using `now` here could make delayed sends run
             # back-to-back and destabilize the ticker.
             m["next"] = time.monotonic() + max(
-                0.5, float(st["marquee"]["step_seconds"]))
+                0.3, float(st["marquee"]["step_seconds"]))
             log.debug(t("status_set", text=shown(frame)))
 
     def do_chat(self, can_reply):
@@ -2972,9 +2972,9 @@ DATA_DIR = Path(os.environ["ZCFATO_DATA_DIR"]) if os.environ.get("ZCFATO_DATA_DI
 
 
 RUNTIME_CONFIG = "camfrog-status-runtime.json"
-MARQUEE_STEP_MIN = 0.5
+MARQUEE_STEP_MIN = 0.3
 MARQUEE_STRIDE_DEFAULT = 2
-RANDOM_INTERVAL_MIN = 30
+RANDOM_INTERVAL_MIN = 0.3
 RANDOM_INTERVAL_DEFAULT = 600
 RANDOM_INTERVAL_MAX = 86400
 STATUS_SLOTS = 10

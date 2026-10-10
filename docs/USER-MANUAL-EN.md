@@ -46,7 +46,7 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 ## 6. Status Random
 
 - Ten message slots. The active status is picked from these entries.
-- **Switch every** (seconds, minimum 30): how long each status stays before switching. Saved to `status.interval_seconds`.
+- **Switch every** (seconds, minimum 0.3): how long each status stays before switching. Saved to `status.interval_seconds`.
 - **Start** rotates immediately (first status goes out at once), **Stop** ends rotation. Pools live in `random-data\`, separate from Marquee.
 
 ## 7. Status Marquee

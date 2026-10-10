@@ -23,7 +23,7 @@ Missing keys use built-in defaults. This reference covers the source CLI configu
 | `status.enabled` | `true` | Rotate status |
 | `status.edit` / `apply_button` | selectors / `null` | UIA selectors from `discover`; `apply_button` is invoked instead of Enter |
 | `status.background_enter_target` | `edit` | Experimental `combo`: when `safety.require_foreground` is `false`, post Enter to the verified `CComboBoxTS` parent instead of its Edit child. May avoid a Windows error sound, but **not confirmed to save status**. No fallback if the parent is missing. Test with Apply Now, confirm the status in Camfrog, and set back to `edit` if it fails. No effect when an apply button is configured or foreground mode is on. |
-| `status.interval_seconds` | `600` | Minimum 30 |
+| `status.interval_seconds` | `600` | Minimum 0.3 |
 | `status.retry_seconds` | `30` | Wait after a failed send before retrying (1–3600) |
 | `status.set_on_start` | `true` | Set first status immediately |
 | `status.random` | `false` | Random instead of sequential |
@@ -33,7 +33,7 @@ Missing keys use built-in defaults. This reference covers the source CLI configu
 | `status.marquee.enabled` | `false` | Scroll long statuses frame by frame |
 | `status.marquee.scroll` | `false` | `false` = one whole pool line per tick (lines rotate 1..N and wrap); `true` = frame scrolling below |
 | `status.marquee.width` / `stride` | `28` / `2` | Window size (8–80, ≤ `max_length`) / Thai-safe clusters advanced per frame |
-| `status.marquee.step_seconds` | `0.5` | Seconds between frames (**min 0.5**); the runner wakes at the frame deadline to avoid extra poll delay |
+| `status.marquee.step_seconds` | `0.5` | Seconds between frames (**min 0.3**); the runner wakes at the frame deadline to avoid extra poll delay |
 | `status.marquee.cycles` / `max_frames` | `1` / `80` | Loops (1–5) and hard cap on frames per switch (5–300); then settles on the full text |
 | `status.marquee.infinite_loop` | `false` | `true` = continuous loop (no settle), frames cycle up to `max_frames` then repeat; `cycles` ignored |
 | `status.marquee.separator` | `   •   ` | Gap shown between end and restart of the ticker |

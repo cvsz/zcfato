@@ -46,7 +46,7 @@ English version: `USER-MANUAL-EN.md`.
 ## 6. สถานะสุ่ม
 
 - สิบช่องข้อความ ระบบสุ่มสถานะจากรายการนี้
-- **Switch every** (วินาที อย่างน้อย 30) ระยะเวลาก่อนเปลี่ยนสถานะ บันทึกลง `status.interval_seconds`
+- **Switch every** (วินาที อย่างน้อย 0.3) ระยะเวลาก่อนเปลี่ยนสถานะ บันทึกลง `status.interval_seconds`
 - **Start** เริ่มสลับทันที **Stop** หยุด ข้อมูลอยู่ใน `random-data\` แยกจาก Marquee
 
 ## 7. สถานะเลื่อน
