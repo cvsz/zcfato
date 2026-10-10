@@ -15,8 +15,8 @@ Each executable is built into its own folder and creates its own config and runt
 | `status-random\status-random.exe` | Random status rotation with its own ten-slot pool under `random-data\`. |
 | `status-marquee\status-marquee.exe` | Marquee status rotation with its own ten-slot pool and Loop control under `marquee-data\`. |
 | `im-autoreply\im-autoreply.exe` | Private IM auto-reply only. Room auto-reply and status changes are disabled. |
-| `music-dj\music-dj.exe` | Room music DJ: answers `!request` / `!queue` / `!current` / `!skip` / `!help` in chat, keeps a persistent queue, and can play `.wav` files locally into Camfrog. Status changes and private IM reply are disabled. |
-| `web-status\web-status.exe` | GUI + console prototype: update status via profiles.camfrog.com (dry-run by default, interactive password or Chrome cookie session, no stored secrets). No args opens the GUI; any args use the CLI. One-click **Start** auto-switches a multi-line status pool every N seconds (same gates). |
+| `music-dj\music-dj.exe` | Room music DJ: answers `!request` / `!queue` / `!current` / `!skip` / `!help` in chat, keeps a persistent queue, and can play Windows MCI-supported audio files locally into Camfrog. Choose the music folder with Browse. Status changes and private IM reply are disabled. |
+| `web-status\web-status.exe` | GUI + console prototype: update status via profiles.camfrog.com (dry-run by default; the GUI verifies a browser `PHPSESSID` session before live rotation). No args opens the GUI; any args use the CLI. The GUI has ten one-line status fields saved in `webtext.db`; **Start** rotates through the non-empty lines every N seconds. |
 
 Room Control and IM Auto-reply use separate `config.json` files; Chat IM Private uses `private-chat-config.json`; Random and Marquee each use `camfrog-status-config.json` in their own data folder. Random and Marquee also keep their pools, logs, history, and worker files separate. Status **Start** saves settings and starts that app's bundled worker.
 

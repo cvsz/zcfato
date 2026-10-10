@@ -1,15 +1,15 @@
 """Offline DJ tests: queue engine, commands, validation, music profile."""
 import copy
 import json
+import os
 import sys
 import time
-import wave
 from pathlib import Path
 
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-import camfrog_auto as c  # noqa: E402
+import camfrog_music_gui as c  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -139,30 +139,202 @@ def test_do_chat_yields_dj_lines_to_dj(cfg, monkeypatch):
     assert "ROOM" not in sent
 
 
-def test_dj_local_backend_needs_wav_file(cfg, monkeypatch, tmp_path):
+def test_dj_local_backend_needs_mp3_file(cfg, monkeypatch, tmp_path):
     cfg["dj"]["audio_backend"] = "local"
     music = tmp_path / "music"
     music.mkdir()
-    (music / "mysong.wav").write_bytes(b"fake")
+    (music / "mysong.mp3").write_bytes(b"id3")
     cfg["dj"]["music_dir"] = str(music)
     r, sent = _dj_runner(cfg, monkeypatch, ["Ann: !request nosuch"])
     r.do_dj(True)
-    assert any("not found as .wav" in s for s in sent)
+    assert any("no supported audio file found" in s for s in sent)
     r2, sent2 = _dj_runner(cfg, monkeypatch, ["Ann: !request mysong"])
     r2.dj_prev = []
     r2.do_dj(True)
     assert any("Now playing: mysong" in s for s in sent2)
 
 
-def test_dj_wav_duration_reads_real_header(tmp_path):
-    wav = tmp_path / "t.wav"
-    with wave.open(str(wav), "wb") as handle:
-        handle.setnchannels(1)
-        handle.setsampwidth(2)
-        handle.setframerate(8000)
-        handle.writeframes(b"\x00\x00" * 8000)
-    assert c.dj_wav_duration(wav) == 1.0
-    assert c.dj_wav_duration(tmp_path / "missing.wav") is None
+def test_dj_audio_duration_reads_mci_length(tmp_path, monkeypatch):
+    commands = []
+
+    def fake_mci(command):
+        commands.append(command)
+        return "1250" if command.endswith("length") else ""
+
+    monkeypatch.setattr(c, "_dj_windows_audio", lambda: True)
+    monkeypatch.setattr(c, "_dj_mci_command", fake_mci)
+    path = tmp_path / "My Song.mp3"
+
+    assert c.dj_audio_duration(path) == 1.25
+    assert any(command.startswith('open "') and " alias " in command
+               and " type " not in command for command in commands)
+    assert any("time format milliseconds" in command for command in commands)
+    assert commands[-1].startswith("close ")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="needs Windows MCI audio")
+def test_dj_windows_mci_reads_wav_duration(tmp_path):
+    import wave
+
+    song = tmp_path / "MCI audio test.wav"
+    with wave.open(str(song), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(8000)
+        wav.writeframes(b"\0\0" * 800)
+
+    duration = c.dj_audio_duration(song)
+    if duration is None:
+        pytest.skip("Windows MCI audio backend is unavailable on this runner")
+    assert duration == pytest.approx(0.1, abs=0.02)
+
+
+@pytest.mark.parametrize("extension", ["wav", "mp3", "flac", "mid"])
+def test_dj_playback_uses_mci_auto_type_and_closes_previous_track(
+        extension, tmp_path, monkeypatch):
+    commands = []
+    monkeypatch.setattr(c, "_dj_windows_audio", lambda: True)
+    monkeypatch.setattr(c, "_dj_mci_command", lambda command: commands.append(command) or "")
+    path = tmp_path / "Music Folder" / f"My Song.{extension}"
+
+    assert c.dj_play(path) is True
+    assert any(command.startswith("close ") for command in commands)
+    assert any(command.startswith('open "') and f"My Song.{extension}" in command
+               and " alias " in command and " type " not in command
+               for command in commands)
+    assert any(command.startswith("play ") for command in commands)
+    c.dj_stop()
+    assert commands[-2].startswith("stop ")
+    assert commands[-1].startswith("close ")
+
+
+def test_dj_local_request_plays_matching_mp3(cfg, monkeypatch, tmp_path):
+    cfg["dry_run"] = False
+    cfg["dj"]["audio_backend"] = "local"
+    music = tmp_path / "music"
+    music.mkdir()
+    song = music / "requested song.mp3"
+    song.write_bytes(b"id3")
+    cfg["dj"]["music_dir"] = str(music)
+    played = []
+    monkeypatch.setattr(c, "dj_audio_duration", lambda path: 42.0)
+    monkeypatch.setattr(c, "dj_play", lambda path: played.append(path) or True)
+    runner, sent = _dj_runner(cfg, monkeypatch, ["Ann: !request requested song"])
+
+    runner.do_dj(True)
+
+    assert played == [song]
+    assert runner.dj_length == 42.0
+    assert any("Now playing: requested song" in line for line in sent)
+
+
+def test_dj_failed_initial_playback_does_not_block_later_request(cfg, monkeypatch, tmp_path):
+    cfg["dry_run"] = False
+    cfg["dj"]["audio_backend"] = "local"
+    music = tmp_path / "music"
+    music.mkdir()
+    broken, good = music / "broken.mp3", music / "good.mp3"
+    broken.write_bytes(b"broken")
+    good.write_bytes(b"good")
+    cfg["dj"]["music_dir"] = str(music)
+    monkeypatch.setattr(c, "dj_find_song",
+                        lambda _directory, title: music / (title + ".mp3"))
+    played = []
+
+    def play(path):
+        played.append(path)
+        return path == good
+
+    monkeypatch.setattr(c, "dj_play", play)
+    monkeypatch.setattr(c, "dj_audio_duration", lambda _path: 60.0)
+    runner, sent = _dj_runner(cfg, monkeypatch, [
+        "Ann: !request broken", "Bob: !request good"])
+
+    runner.do_dj(True)
+
+    saved = json.loads((tmp_path / "dj_queue.json").read_text(encoding="utf-8"))
+    assert played == [broken, good]
+    assert saved["current"] == {"title": "good", "user": "Bob"}
+    assert saved["queue"] == []
+    assert any("could not start local audio" in line for line in sent)
+    assert any("Now playing: good" in line for line in sent)
+
+
+def test_dj_auto_advance_discards_failed_queue_entry_and_tries_next(cfg, monkeypatch, tmp_path):
+    cfg["dry_run"] = False
+    cfg["dj"]["audio_backend"] = "local"
+    music = tmp_path / "music"
+    music.mkdir()
+    broken, queued = music / "broken.mp3", music / "queued.mp3"
+    broken.write_bytes(b"broken")
+    queued.write_bytes(b"queued")
+    cfg["dj"]["music_dir"] = str(music)
+    monkeypatch.setattr(c, "dj_find_song",
+                        lambda _directory, title: music / (title + ".mp3"))
+    played = []
+
+    def play(path):
+        played.append(path)
+        return path == queued
+
+    monkeypatch.setattr(c, "dj_play", play)
+    monkeypatch.setattr(c, "dj_audio_duration", lambda _path: 60.0)
+    runner, sent = _dj_runner(cfg, monkeypatch, [])
+    queue = c.DJQueue(tmp_path / "dj_queue.json")
+    queue.queue = [
+        {"title": "broken", "user": "Ann"},
+        {"title": "queued", "user": "Bob"},
+    ]
+
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is True
+    assert queue.current is None
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is True
+
+    assert played == [broken, queued]
+    assert queue.current == {"title": "queued", "user": "Bob"}
+    assert queue.queue == []
+    assert any("could not start local audio" in line for line in sent)
+    assert any("Now playing: queued" in line for line in sent)
+
+
+def test_dj_finished_track_skips_unplayable_next_entry(cfg, monkeypatch, tmp_path):
+    cfg["dry_run"] = False
+    cfg["dj"]["audio_backend"] = "local"
+    music = tmp_path / "music"
+    music.mkdir()
+    broken, queued = music / "broken.mp3", music / "queued.mp3"
+    broken.write_bytes(b"broken")
+    queued.write_bytes(b"queued")
+    cfg["dj"]["music_dir"] = str(music)
+    monkeypatch.setattr(c, "dj_find_song",
+                        lambda _directory, title: music / (title + ".mp3"))
+    played = []
+
+    def play(path):
+        played.append(path)
+        return path == queued
+
+    monkeypatch.setattr(c, "dj_play", play)
+    monkeypatch.setattr(c, "dj_audio_duration", lambda _path: 60.0)
+    runner, sent = _dj_runner(cfg, monkeypatch, [])
+    runner.dj_started = time.monotonic() - 120
+    runner.dj_length = 60.0
+    queue = c.DJQueue(tmp_path / "dj_queue.json")
+    queue.current = {"title": "finished", "user": "Ada"}
+    queue.queue = [
+        {"title": "broken", "user": "Ann"},
+        {"title": "queued", "user": "Bob"},
+    ]
+
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is True
+    assert queue.current is None
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is True
+
+    assert played == [broken, queued]
+    assert queue.current == {"title": "queued", "user": "Bob"}
+    assert queue.queue == []
+    assert any("could not start local audio" in line for line in sent)
+    assert any("Now playing: queued" in line for line in sent)
 
 
 def test_dj_auto_advance_moves_on_after_duration(cfg, monkeypatch):
@@ -178,14 +350,68 @@ def test_dj_auto_advance_moves_on_after_duration(cfg, monkeypatch):
     assert any("Now playing: b" in s for s in sent2)
 
 
+def test_dj_auto_advance_uses_mci_mode_when_duration_is_unavailable(
+        cfg, monkeypatch, tmp_path):
+    cfg["dry_run"] = False
+    cfg["dj"]["audio_backend"] = "local"
+    runner, sent = _dj_runner(cfg, monkeypatch, [])
+    queue = c.DJQueue(tmp_path / "queue.json")
+    queue.current = {"title": "first", "user": "Ann"}
+    queue.queue = [{"title": "next", "user": "Bob"}]
+    runner.dj_started = time.monotonic() - 30
+    runner.dj_length = 0.0
+    runner.dj_start_playback = lambda *_args: True
+    mode = {"value": "playing"}
+    monkeypatch.setattr(c, "dj_audio_mode", lambda: mode["value"])
+
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is False
+    assert queue.current["title"] == "first"
+
+    mode["value"] = "stopped"
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is True
+    assert queue.current["title"] == "next"
+    assert any("Now playing: next" in line for line in sent)
+
+
 def test_dj_find_song_matching(tmp_path):
     music = tmp_path / "m"
     music.mkdir()
-    (music / "Hello World.wav").write_bytes(b"x")
-    (music / "other.wav").write_bytes(b"x")
-    assert c.dj_find_song(music, "hello").name == "Hello World.wav"
+    (music / "Hello World.MP3").write_bytes(b"id3")
+    (music / "other.mp3").write_bytes(b"id3")
+    assert c.dj_find_song(music, "hello").name == "Hello World.MP3"
     assert c.dj_find_song(music, "missing") is None
     assert c.dj_find_song(tmp_path / "nodir", "x") is None
+
+
+def test_dj_find_song_matches_supported_audio_files(tmp_path):
+    music = tmp_path / "audio"
+    music.mkdir()
+    (music / "not audio.txt").write_text("not audio", encoding="utf-8")
+
+    for extension in c.DJ_AUDIO_EXTENSIONS:
+        for old_file in music.glob("Hello World.*"):
+            old_file.unlink()
+        expected = music / f"Hello World{extension}"
+        expected.write_bytes(b"audio")
+        assert c.dj_find_song(music, "hello") == expected
+    assert c.dj_find_song(music, "not audio") is None
+
+
+def test_dj_local_play_failure_does_not_announce_now_playing(cfg, monkeypatch, tmp_path):
+    cfg["dry_run"] = False
+    cfg["dj"]["audio_backend"] = "local"
+    music = tmp_path / "music"
+    music.mkdir()
+    (music / "silent failure.mp3").write_bytes(b"audio")
+    cfg["dj"]["music_dir"] = str(music)
+    monkeypatch.setattr(c, "dj_audio_duration", lambda _path: None)
+    monkeypatch.setattr(c, "dj_play", lambda _path: False)
+    runner, sent = _dj_runner(cfg, monkeypatch, ["Ann: !request silent failure"])
+
+    runner.do_dj(True)
+
+    assert any("could not start local audio" in line for line in sent)
+    assert not any("Now playing" in line for line in sent)
 
 
 def test_dj_validation(cfg):

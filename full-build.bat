@@ -13,6 +13,12 @@ echo              (version from APP_VERSION, needs: gh auth login).
 echo Without --release, no GitHub release is created.
 echo.
 
+rem --- Capture the source used for this build; release.py checks this marker ---
+set "BUILD_SOURCE_COMMIT=unknown"
+set "BUILD_SOURCE_CLEAN=true"
+for /f "delims=" %%i in ('git rev-parse HEAD 2^>nul') do set "BUILD_SOURCE_COMMIT=%%i"
+for /f "delims=" %%i in ('git status --porcelain --untracked-files=normal 2^>nul') do set "BUILD_SOURCE_CLEAN=false"
+
 rem --- Build Camfrog feature apps ---
 echo [1/3] Building Camfrog feature apps...
 call build.bat
@@ -82,6 +88,14 @@ if not exist dist\SHA256SUMS.txt (
     echo ERROR: dist\SHA256SUMS.txt not found
     exit /b 1
 )
+(
+    echo commit=%BUILD_SOURCE_COMMIT%
+    echo clean=%BUILD_SOURCE_CLEAN%
+) > dist\BUILD_SOURCE.txt
+if errorlevel 1 (
+    echo ERROR: could not write dist\BUILD_SOURCE.txt
+    exit /b 1
+)
 echo All expected outputs found.
 echo.
 
@@ -119,6 +133,7 @@ echo   dist\web-status\web-status.exe
 echo   dist\music-dj\music-dj.exe
 echo   camfrog-features-windows.zip
 echo   dist\SHA256SUMS.txt
+echo   dist\BUILD_SOURCE.txt
 echo   line\dist\line-status-changer.exe
 echo   line\dist\line_config.json
 echo.

@@ -326,9 +326,9 @@ DEFAULTS = {
     },
     # Room music DJ: chat commands (!request/!queue/!current/!skip/!help) with a
     # persistent queue. Needs autoreply.enabled for chat plumbing. Audio backends:
-    # "chat" announces only; "local" also plays .wav files on this machine
+    # "chat" announces only; "local" plays Windows-supported audio files on this machine
     # (route them into Camfrog with a virtual cable / stereo mix for the room
-    # to hear; MP3 needs converting to WAV first).
+    # to hear).
     "dj": {
         "enabled": False, "prefix": "!", "queue_file": "dj_queue.json",
         "max_per_user": 3, "music_dir": "music", "audio_backend": "chat",
@@ -1444,6 +1444,15 @@ def cmd_autostart(args, enable):
 
 
 # ---------- runner ----------
+DJ_AUDIO_EXTENSIONS = frozenset({
+    ".aac", ".adts", ".aif", ".aifc", ".aiff", ".au", ".flac", ".m4a",
+    ".mid", ".midi", ".mp2", ".mp3", ".mpa", ".ogg", ".opus", ".rmi",
+    ".snd", ".wav", ".wma",
+})
+_DJ_MCI_PLAY_ALIAS = "camfrog_music_dj"
+_DJ_MCI_DURATION_ALIAS = "camfrog_music_duration"
+
+
 class DJError(ValueError):
     """A refused DJ request with a user-facing reason."""
 
@@ -1508,51 +1517,104 @@ class DJQueue:
 
 
 def dj_find_song(music_dir, title):
-    """Match a request against .wav files in music_dir. Returns Path or None."""
+    """Match a request against supported audio files in music_dir."""
     want = str(title).strip().lower()
     if not want:
         return None
     try:
-        wavs = sorted(Path(music_dir).glob("*.wav"))
+        songs = sorted(path for path in Path(music_dir).iterdir()
+                       if path.is_file() and path.suffix.lower() in DJ_AUDIO_EXTENSIONS)
     except OSError:
         return None
-    for wav in wavs:
-        if want in wav.stem.lower():
-            return wav
+    for song in songs:
+        if want in song.stem.lower():
+            return song
     return None
 
 
-def dj_wav_duration(path):
-    """Seconds of a WAV file, or None when unreadable."""
+def _dj_windows_audio():
+    return os.name == "nt"
+
+
+def _dj_mci_command(command):
+    """Send one Unicode MCI command; raise OSError when Windows rejects it."""
+    if not _dj_windows_audio():
+        raise OSError("Windows audio playback is unavailable")
+    winmm = ctypes.WinDLL("winmm", use_last_error=True)
+    send = winmm.mciSendStringW
+    send.argtypes = (ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_wchar),
+                     ctypes.c_uint, ctypes.c_void_p)
+    send.restype = ctypes.c_uint
+    result = ctypes.create_unicode_buffer(1024)
+    code = send(command, result, len(result), None)
+    if code:
+        raise OSError(f"MCI command failed ({code})")
+    return result.value
+
+
+def _dj_mci_close(alias):
+    for action in ("stop", "close"):
+        try:
+            _dj_mci_command(f"{action} {alias}")
+        except Exception:
+            pass
+
+
+def dj_audio_duration(path):
+    """Seconds of an MCI-readable audio file, or None when unavailable."""
+    if not _dj_windows_audio():
+        return None
+    alias = _DJ_MCI_DURATION_ALIAS
+    opened = False
     try:
-        import wave
-        with wave.open(str(path), "rb") as wav:
-            rate = wav.getframerate()
-            return wav.getnframes() / rate if rate else None
+        # Let MCI select the device from the extension registry. This supports
+        # the formats installed on the user's Windows system without guessing
+        # that every file is a WAV or MPEG device.
+        _dj_mci_command(f'open "{Path(path).resolve()}" alias {alias}')
+        opened = True
+        _dj_mci_command(f"set {alias} time format milliseconds")
+        raw = _dj_mci_command(f"status {alias} length").strip()
+        milliseconds = int(raw)
+        return milliseconds / 1000 if milliseconds > 0 else None
+    except Exception as exc:
+        log.debug("dj audio duration unavailable: %s", exc)
+        return None
+    finally:
+        if opened:
+            try:
+                _dj_mci_command(f"close {alias}")
+            except Exception:
+                pass
+
+
+def dj_audio_mode():
+    """Return the current MCI playback mode, or None when it cannot be read."""
+    if not _dj_windows_audio():
+        return None
+    try:
+        return _dj_mci_command(f"status {_DJ_MCI_PLAY_ALIAS} mode").strip().lower()
     except Exception:
         return None
 
 
 def dj_play(path):
-    """Play a WAV file async on Windows (winsound). Returns True when started."""
-    if os.name != "nt":
+    """Start an MCI-readable audio file asynchronously on Windows."""
+    if not _dj_windows_audio():
         return False
     try:
-        import winsound
-        winsound.PlaySound(str(path), winsound.SND_FILENAME | winsound.SND_ASYNC)
+        _dj_mci_close(_DJ_MCI_PLAY_ALIAS)
+        _dj_mci_command(f'open "{Path(path).resolve()}" alias {_DJ_MCI_PLAY_ALIAS}')
+        _dj_mci_command(f"play {_DJ_MCI_PLAY_ALIAS}")
         return True
-    except Exception as e:
-        log.debug("dj play failed: %s", e)
+    except Exception as exc:
+        _dj_mci_close(_DJ_MCI_PLAY_ALIAS)
+        log.debug("dj play failed: %s", exc)
         return False
 
 
 def dj_stop():
-    try:
-        if os.name == "nt":
-            import winsound
-            winsound.PlaySound(None, 0)
-    except Exception:
-        pass
+    if _dj_windows_audio():
+        _dj_mci_close(_DJ_MCI_PLAY_ALIAS)
 
 
 class Runner:
@@ -1981,7 +2043,7 @@ class Runner:
             if dj.get("audio_backend", "chat") == "local":
                 song = dj_find_song(BASE / dj.get("music_dir", "music"), arg)
                 if song is None:
-                    raise DJError(f'not found as .wav in music/: "{arg}"')
+                    raise DJError(f'no supported audio file found in music/: "{arg}"')
                 title = song.stem
             if queue.current is not None \
                     and queue.current["title"].lower() == title.lower():
@@ -1989,7 +2051,10 @@ class Runner:
             pos = queue.add(title, nick, dj.get("max_per_user", 3))
             if queue.current is None:
                 queue.current = queue.queue.pop(0)
-                self.dj_start_playback(queue, dj)
+                if not self.dj_start_playback(queue, dj):
+                    queue.current = None
+                    raise DJError(bi("could not start local audio; check the file and Windows audio support|"
+                                     "เริ่มเล่นเสียงในเครื่องไม่ได้ โปรดตรวจสอบไฟล์และ codec ของ Windows"))
                 return dj["announce_now"].format(title=queue.current["title"],
                                                 user=queue.current["user"])
             return dj["announce_queued"].format(pos=pos, title=title)
@@ -2006,7 +2071,9 @@ class Runner:
                                                    queue.current["user"])
         if cmd == "skip":
             nxt = queue.skip(nick, owner)
-            self.dj_start_playback(queue, dj)
+            if not self.dj_start_playback(queue, dj):
+                queue.current = None
+                raise DJError(bi("skipped, but could not start local audio|ข้ามเพลงแล้ว แต่เริ่มเล่นเสียงในเครื่องไม่ได้"))
             if nxt is None:
                 return "[dj] skipped, queue is empty"
             return dj["announce_now"].format(title=nxt["title"], user=nxt["user"])
@@ -2019,30 +2086,57 @@ class Runner:
         self.dj_started, self.dj_length = 0.0, 0.0
         if queue.current is None or self.dry:
             dj_stop()
-            return
+            return True
         if dj.get("audio_backend", "chat") != "local":
-            return
+            return True
+        dj_stop()
         song = dj_find_song(BASE / dj.get("music_dir", "music"), queue.current["title"])
         if song is None:
-            return
+            return False
+        length = dj_audio_duration(song)
         if dj_play(song):
             self.dj_started = time.monotonic()
-            self.dj_length = dj_wav_duration(song) or 0.0
+            self.dj_length = length or 0.0
+            return True
+        return False
 
     def dj_auto_advance(self, queue, dj):
-        """Move to the next song when the WAV finished. Returns True if changed."""
-        if queue.current is None or not self.dj_started or not self.dj_length:
-            if queue.current is not None and not self.dj_started \
-                    and not self.dry and dj.get("audio_backend", "chat") == "local":
-                self.dj_start_playback(queue, dj)  # resume after restart
-                return True
+        """Advance finished tracks and recover queued work when none is current."""
+        if queue.current is None:
+            if not queue.queue:
+                return False
+            queue.current = queue.queue.pop(0)
+            started = self.dj_start_playback(queue, dj)
+            if not started:
+                queue.current = None
+                self.say_now(bi("could not start local audio; check the file and Windows audio support|"
+                                 "เริ่มเล่นเสียงในเครื่องไม่ได้ โปรดตรวจสอบไฟล์และ codec ของ Windows"))
+            else:
+                self.say_now(dj["announce_now"].format(
+                    title=queue.current["title"], user=queue.current["user"]))
+            return True
+        if not self.dj_started:
+            if not self.dry and dj.get("audio_backend", "chat") == "local":
+                if time.monotonic() >= getattr(self, "dj_retry_at", 0.0):
+                    self.dj_retry_at = time.monotonic() + 5.0
+                    if self.dj_start_playback(queue, dj):  # resume after restart
+                        self.dj_retry_at = 0.0
+                        return True
             return False
-        if time.monotonic() - self.dj_started < self.dj_length:
+        elapsed = time.monotonic() - self.dj_started
+        if self.dj_length:
+            if elapsed < self.dj_length:
+                return False
+        elif dj_audio_mode() in (None, "playing"):
             return False
         nxt = queue.advance()
-        self.dj_start_playback(queue, dj)
+        started = self.dj_start_playback(queue, dj)
         if nxt is None:
             self.say_now("[dj] queue finished")
+        elif not started:
+            queue.current = None
+            self.say_now(bi("could not start local audio; check the file and Windows audio support|"
+                             "เริ่มเล่นเสียงในเครื่องไม่ได้ โปรดตรวจสอบไฟล์และ codec ของ Windows"))
         else:
             self.say_now(dj["announce_now"].format(title=nxt["title"], user=nxt["user"]))
         return True
@@ -3666,6 +3760,21 @@ def build_app():
             for i, item in enumerate(q.queue[:50], 1):
                 self.dj_tree.insert("", "end", iid=f"q{i}", values=(i, item["title"], item["user"]))
 
+        def dj_browse_music_folder(self):
+            from tkinter import filedialog
+            current = Path(self.dj_music_dir_var.get().strip() or "music")
+            if not current.is_absolute():
+                current = BASE / current
+            initialdir = current if current.is_dir() else BASE
+            selected = filedialog.askdirectory(
+                parent=self.root,
+                title=bi("Choose music folder|เลือกโฟลเดอร์เพลง"),
+                initialdir=str(initialdir),
+                mustexist=True,
+            )
+            if selected:
+                self.dj_music_dir_var.set(str(Path(selected)))
+
         def tab_music(self, f):
             g = ttk.Frame(f)
             g.pack(fill="x")
@@ -3674,10 +3783,15 @@ def build_app():
                        hint="e.g. ! !request !queue !current !skip !help")
             self.field(g, "Queue file|ไฟล์คิว", ("dj", "queue_file"), width=24)
             self.field(g, "Max songs per user|เพลงสูงสุดต่อคน", ("dj", "max_per_user"), "int", width=6)
-            self.field(g, "Music folder|โฟลเดอร์เพลง", ("dj", "music_dir"), width=24,
-                       hint=".wav files|ไฟล์ .wav")
+            self.dj_music_dir_var = self.field(g, "Music folder|โฟลเดอร์เพลง", ("dj", "music_dir"), width=24)
+            music_row = g.grid_size()[1] - 1
+            self.btn_dj_browse_music = ttk.Button(
+                g, text=bi("Browse...|เลือก..."), command=self.dj_browse_music_folder)
+            self.btn_dj_browse_music.grid(row=music_row, column=2, sticky="w", padx=4, pady=2)
+            ttk.Label(g, text=bi("Windows-supported audio files|ไฟล์เสียงที่ Windows รองรับ"),
+                      foreground="#666").grid(row=music_row, column=3, sticky="w")
             self.field(g, "Audio backend|เสียง", ("dj", "audio_backend"), "choice", ("chat", "local"), 10,
-                       hint="chat = announce in chat, local = play .wav on this PC|chat = ประกาศในแชท local = เล่นไฟล์ .wav")
+                       hint="chat = announce in chat, local = play audio on this PC|chat = ประกาศในแชท local = เล่นเสียงบนเครื่องนี้")
             self.field(g, "Now playing template|แม่แบบกำลังเล่น", ("dj", "announce_now"), width=44,
                        hint="placeholders {title} {user}")
             self.field(g, "Queued template|แม่แบบคิว", ("dj", "announce_queued"), width=44,
@@ -4195,7 +4309,7 @@ def main(argv=None):
 # Read-only GitHub API (no token needed for public repos, stdlib only). Each
 # packaged app checks the same repo's latest release and downloads only its
 # own executable asset, verified against the release's SHA256SUMS.txt.
-APP_VERSION = "2.19.1"
+APP_VERSION = "2.19.2"
 GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
 UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
 

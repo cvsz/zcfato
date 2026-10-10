@@ -16,6 +16,7 @@ status_history.json
 camfrog_status_changer_history.json
 random.db
 marquee.db
+webtext.db
 private-chat-config.json
 room-control-data/
 im-autoreply-data/

@@ -15,8 +15,8 @@
 | `status-random\status-random.exe` | สลับสถานะแบบสุ่ม มี pool สิบช่องของตัวเองใน `random-data\` |
 | `status-marquee\status-marquee.exe` | สลับสถานะแบบเลื่อน มี pool สิบช่องของตัวเอง ตัวควบคุม Loop ใน `marquee-data\` |
 | `im-autoreply\im-autoreply.exe` | ตอบ IM ส่วนตัวอย่างเดียว ไม่ตอบในห้อง ไม่เปลี่ยนสถานะ |
-| `music-dj\music-dj.exe` | ดีเจเพลงในห้อง: รับคำสั่ง `!request` / `!queue` / `!current` / `!skip` / `!help` จากแชท เก็บคิวลงไฟล์ และเล่นไฟล์ `.wav` บนเครื่องส่งเข้า Camfrog ได้ ปิดการเปลี่ยนสถานะและการตอบ IM ส่วนตัว |
-| `web-status\web-status.exe` | รุ่นทดลองแบบ GUI + console: เปลี่ยนสถานะผ่าน profiles.camfrog.com (ค่าเริ่มต้นโหมดทดลอง รหัสผ่านถามตอนรันหรือใช้ session cookie จาก Chrome ไม่เก็บความลับ) ไม่ใส่ argument เปิด GUI ใส่ argument ใช้ CLI ปุ่ม **Start** สลับ pool หลายบรรทัดอัตโนมัติทุก N วินาที (gate เดียวกัน) |
+| `music-dj\music-dj.exe` | ดีเจเพลงในห้อง: รับคำสั่ง `!request` / `!queue` / `!current` / `!skip` / `!help` จากแชท เก็บคิวลงไฟล์ และเล่นไฟล์เสียงที่ Windows MCI รองรับบนเครื่องส่งเข้า Camfrog ได้ เลือกโฟลเดอร์เพลงด้วย Browse ปิดการเปลี่ยนสถานะและการตอบ IM ส่วนตัว |
+| `web-status\web-status.exe` | รุ่นทดลองแบบ GUI + console: เปลี่ยนสถานะผ่าน profiles.camfrog.com (ค่าเริ่มต้นโหมดทดลอง; GUI ตรวจสอบ session `PHPSESSID` จากเบราว์เซอร์ก่อนเริ่มเปลี่ยนสถานะจริง) ไม่ใส่ argument เปิด GUI ใส่ argument ใช้ CLI ใน GUI มีช่องข้อความบรรทัดเดียว 10 ช่อง บันทึกใน `webtext.db`; ปุ่ม **Start** วนเฉพาะบรรทัดที่ไม่ว่างทุก N วินาที |
 
 Room Control และ IM Auto-reply ใช้ `config.json` แยกกัน ส่วน Chat IM Private ใช้ `private-chat-config.json` และ Random/Marquee ใช้ `camfrog-status-config.json` ในโฟลเดอร์ข้อมูลคนละชุด แต่ละแอปแยก pool, log, ประวัติ และ worker ปุ่ม **Start** จะบันทึกค่าและเริ่ม worker ของแอปนั้น
 

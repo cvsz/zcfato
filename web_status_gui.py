@@ -61,11 +61,6 @@ ROTATE_INTERVAL_DEFAULT = 300
 ROTATE_INTERVAL_MAX = 86400
 
 
-def parse_pool(text):
-    """Multi-line pool box -> [status, ...], blanks dropped."""
-    return [line.strip() for line in str(text).splitlines() if line.strip()]
-
-
 def parse_rotate_interval(raw):
     """Auto-switch interval in seconds. Clamped to the allowed window."""
     try:
@@ -75,22 +70,72 @@ def parse_rotate_interval(raw):
     return min(ROTATE_INTERVAL_MAX, max(ROTATE_INTERVAL_MIN, value))
 
 
-POOL_TEXT_NAME = "web_status_pool.txt"
+def parse_pool(text):
+    """Parse legacy multi-line pool text; the GUI uses ten numbered slots."""
+    return [line.strip() for line in str(text).splitlines() if line.strip()]
 
 
-def default_pool_path():
-    return BASE / POOL_TEXT_NAME
+WEB_TEXT_DB_NAME = "webtext.db"
+WEB_TEXT_SLOT_COUNT = 10
 
 
-def save_pool_text(path, text):
-    """Save the status pool text (statuses only, never secrets)."""
-    Path(path).write_text(str(text), encoding="utf-8")
-    return len(str(text))
+def web_text_db_path():
+    return BASE / WEB_TEXT_DB_NAME
 
 
-def load_pool_text(path):
-    """Load status pool text saved by save_pool_text."""
-    return Path(path).read_text(encoding="utf-8-sig")
+def _web_text_lines(lines):
+    values = [str(value) for value in list(lines)[:WEB_TEXT_SLOT_COUNT]]
+    return values + [""] * (WEB_TEXT_SLOT_COUNT - len(values))
+
+
+def load_web_text_lines(path=None):
+    """Load the ten GUI status slots from the local webtext database."""
+    database = Path(path) if path is not None else web_text_db_path()
+    values = [""] * WEB_TEXT_SLOT_COUNT
+    connection = sqlite3.connect(str(database), timeout=5.0)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS webtext ("
+            "line_no INTEGER PRIMARY KEY CHECK(line_no BETWEEN 1 AND 10), "
+            "text TEXT NOT NULL)")
+        rows = connection.execute(
+            "SELECT line_no, text FROM webtext ORDER BY line_no").fetchall()
+        connection.commit()
+    finally:
+        connection.close()
+    for line_no, text in rows:
+        if 1 <= line_no <= WEB_TEXT_SLOT_COUNT:
+            values[line_no - 1] = text
+    return values
+
+
+def load_web_text_slots(path=None):
+    """Load GUI status slots, falling back without modifying an unreadable DB."""
+    try:
+        return load_web_text_lines(path), ""
+    except (OSError, sqlite3.Error) as exc:
+        return ([""] * WEB_TEXT_SLOT_COUNT,
+                "Could not load webtext.db ({0}); status fields are empty. "
+                "The existing database was left unchanged.".format(type(exc).__name__))
+
+
+def save_web_text_lines(lines, path=None):
+    """Save exactly ten single-line status slots to the local database."""
+    database = Path(path) if path is not None else web_text_db_path()
+    values = _web_text_lines(lines)
+    connection = sqlite3.connect(str(database), timeout=5.0)
+    try:
+        connection.execute(
+            "CREATE TABLE IF NOT EXISTS webtext ("
+            "line_no INTEGER PRIMARY KEY CHECK(line_no BETWEEN 1 AND 10), "
+            "text TEXT NOT NULL)")
+        with connection:
+            connection.executemany(
+                "INSERT OR REPLACE INTO webtext (line_no, text) VALUES (?, ?)",
+                [(line_no, text) for line_no, text in enumerate(values, 1)])
+    finally:
+        connection.close()
+    return WEB_TEXT_SLOT_COUNT
 
 
 def next_rotation(pool, index):
@@ -807,6 +852,10 @@ class WebStatusManager:
         self.rotate_job = None
         self.chrome_mode = False
         self.cookie_paste = ""
+        self._cookie_from_browser = False
+        self.session_ready = False
+        self._pending = None
+        self._start_generation = 0
         load_dotenv(BASE / ".env")  # pick up the encrypted account, if saved
         self.root = self.tk.Tk()
         style = self.ttk.Style(self.root)
@@ -831,8 +880,8 @@ class WebStatusManager:
         style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
                   foreground=[("selected", "#096c7b")])
         self.root.title("Camfrog Web Status (prototype)")
-        self.root.geometry("480x510")
-        self.root.minsize(440, 490)
+        self.root.geometry("500x560")
+        self.root.minsize(480, 540)
 
         self.ttk.Label(self.root, text=(
             "Update status via profiles.camfrog.com. Dry-run is the default; "
@@ -846,22 +895,37 @@ class WebStatusManager:
         session_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
         self.nb.add(setup_tab, text="Setup")
         self.nb.add(session_tab, text="Account & Session")
+        pool_lines, pool_load_warning = load_web_text_slots()
 
         form = self.ttk.Frame(setup_tab)
         form.pack(fill="x")
+        form.columnconfigure(1, weight=1)
         self.ttk.Label(form, text="Nickname").grid(row=0, column=0, sticky="w")
         self.login = self.tk.StringVar(value="Seaza")
         self.ttk.Entry(form, textvariable=self.login).grid(row=0, column=1, sticky="ew", padx=6)
-        self.ttk.Label(form, text="Pool").grid(
+        self.ttk.Label(form, text="Status lines").grid(
             row=1, column=0, sticky="nw", pady=(5, 0))
-        self.pool_box = self.tk.Text(form, height=4, width=40, undo=True)
-        self.pool_box.grid(row=1, column=1, sticky="ew", padx=6, pady=(5, 0))
+        pool_frame = self.ttk.Frame(form)
+        pool_frame.grid(row=1, column=1, sticky="ew", padx=6, pady=(5, 0))
+        self.pool_vars = []
+        self.pool_entries = []
+        for column in range(2):
+            pool_frame.columnconfigure(column, weight=1)
+        for slot in range(WEB_TEXT_SLOT_COUNT):
+            cell = self.ttk.Frame(pool_frame)
+            cell.grid(row=slot % 5, column=slot // 5, sticky="ew",
+                      padx=(0, 8), pady=2)
+            self.ttk.Label(cell, text="{0}.".format(slot + 1), width=3).pack(side="left")
+            variable = self.tk.StringVar(value=pool_lines[slot])
+            entry = self.ttk.Entry(cell, textvariable=variable, width=18)
+            entry.pack(side="left", fill="x", expand=True)
+            self.pool_vars.append(variable)
+            self.pool_entries.append(entry)
         pool_btns = self.ttk.Frame(form)
         pool_btns.grid(row=1, column=2, sticky="n", pady=(5, 0))
-        self.ttk.Button(pool_btns, text="Save text...",
-                        command=self.save_pool_text).pack(fill="x")
-        self.ttk.Button(pool_btns, text="Load...",
-                        command=self.load_pool_text).pack(fill="x", pady=(4, 0))
+        self.btn_save_web_text = self.ttk.Button(
+            pool_btns, text="Save to webtext.db", command=self.save_web_texts)
+        self.btn_save_web_text.pack(fill="x")
         self.ttk.Label(form, text="Switch every").grid(row=2, column=0, sticky="w", pady=(5, 0))
         timing = self.ttk.Frame(form)
         timing.grid(row=2, column=1, sticky="w", padx=6, pady=(5, 0))
@@ -892,10 +956,13 @@ class WebStatusManager:
                         command=self.open_login_page).pack(side="left")
         self.cookie_paste_var = self.tk.StringVar(value="")
         self.ttk.Entry(row2, textvariable=self.cookie_paste_var,
-                       width=18).pack(side="left", padx=6)
-        self.ttk.Button(row2, text="Use PHPSESSID",
-                        command=self.use_pasted_cookie).pack(side="left")
-        self.ttk.Button(row2, text="Login in browser",
+                       width=18).pack(side="left", padx=6, fill="x", expand=True)
+        session_actions = self.ttk.Frame(browser)
+        session_actions.pack(fill="x", pady=(4, 0))
+        self.btn_login = self.ttk.Button(
+            session_actions, text="Login", command=self.login_session)
+        self.btn_login.pack(side="left")
+        self.ttk.Button(session_actions, text="Login in browser",
                         command=self.login_via_browser).pack(side="left", padx=(6, 0))
         self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
         self.paste_state.pack(anchor="w", pady=(4, 0))
@@ -913,53 +980,13 @@ class WebStatusManager:
         self.btn_stop.pack(side="left", padx=5)
         self.ttk.Button(actions2, text="How to capture", command=self.capture).pack(side="right")
         self.note = self.tk.StringVar(value="Dry-run is on. Nothing has been sent.")
+        if pool_load_warning:
+            self.note.set(pool_load_warning)
         self.ttk.Label(self.root, textvariable=self.note, anchor="w",
                        padding=(10, 0, 10, 8), wraplength=450).pack(fill="x")
         self.root.after(120, self._poll)
 
     # ---- helpers
-    def browse(self):
-        from tkinter import filedialog
-
-        path = filedialog.askopenfilename(title="Select Chrome cookies export (cookies.txt)")
-        if path:
-            self.cookies.set(path)
-            self.chrome_mode = False
-
-    def save_pool_text(self):
-        from tkinter import filedialog
-
-        path = filedialog.asksaveasfilename(
-            title="Save status pool text",
-            initialfile=POOL_TEXT_NAME,
-            defaultextension=".txt",
-            filetypes=[("Text", "*.txt"), ("All", "*.*")])
-        if not path:
-            return
-        try:
-            save_pool_text(path, self.pool_box.get("1.0", "end-1c"))
-        except OSError as exc:
-            self.note.set("Save text failed: {0}".format(exc))
-            return
-        self.note.set("Saved pool text to {0}.".format(path))
-
-    def load_pool_text(self):
-        from tkinter import filedialog
-
-        path = filedialog.askopenfilename(
-            title="Load status pool text",
-            filetypes=[("Text", "*.txt"), ("All", "*.*")])
-        if not path:
-            return
-        try:
-            text = load_pool_text(path)
-        except OSError as exc:
-            self.note.set("Load text failed: {0}".format(exc))
-            return
-        self.pool_box.delete("1.0", "end")
-        self.pool_box.insert("1.0", text)
-        self.note.set("Loaded pool text from {0}.".format(path))
-
     def chrome_import(self):
         """Auto-import the session from Chrome's store (nothing saved to disk)."""
         def do():
@@ -1007,10 +1034,28 @@ class WebStatusManager:
         return login
 
     def _pool(self):
-        pool = parse_pool(self.pool_box.get("1.0", "end"))
+        pool = self._pool_values()
         if not pool:
-            raise ValueError("Enter at least one status line in the pool.")
+            raise ValueError("Enter at least one status line.")
         return pool
+
+    def _pool_values(self):
+        return [value for variable in self.pool_vars
+                if (value := variable.get().strip())]
+
+    def _save_web_texts(self, notify=True):
+        try:
+            save_web_text_lines([variable.get() for variable in self.pool_vars])
+        except (OSError, sqlite3.Error) as exc:
+            self.note.set("Could not save status lines to webtext.db: {0}".format(
+                type(exc).__name__))
+            return False
+        if notify:
+            self.note.set("Saved status lines to webtext.db.")
+        return True
+
+    def save_web_texts(self):
+        self._save_web_texts()
 
     def _fields(self):
         return self._login_name(), self._pool()
@@ -1021,18 +1066,44 @@ class WebStatusManager:
         webbrowser.open(LOGIN_PAGE_URL)
         self.paste_state.configure(
             text="Login page opened. After signing in, capture PHPSESSID on "
-                 "https://profiles.camfrog.com/home.php and press Use cookie/PHPSESSID.")
+                 "https://profiles.camfrog.com/home.php, paste it, then press Login.")
 
     def use_pasted_cookie(self):
-        text = self.cookie_paste_var.get().strip()
         try:
-            cookie_from_paste(text)
+            self._sync_pasted_cookie()
         except ValueError as exc:
             self.paste_state.configure(text=str(exc), foreground="#a00")
             return
-        self.cookie_paste = text
         self.paste_state.configure(
-            text="Cookie/PHPSESSID ready in memory. Click Login to verify.", foreground="#555")
+            text="PHPSESSID ready in memory. Click Login to verify.", foreground="#555")
+
+    def _sync_pasted_cookie(self):
+        """Validate the current entry and use it instead of any stale cached paste."""
+        text = self.cookie_paste_var.get().strip()
+        if not text:
+            if self.cookie_paste and self._cookie_from_browser:
+                return self.cookie_paste
+            if self.cookie_paste or self.session_ready:
+                self.cookie_paste = ""
+                self._cookie_from_browser = False
+                self.session_ready = False
+                self._invalidate_pending_start()
+            raise ValueError("Enter or paste PHPSESSID first (Session tab).")
+        changed = text != self.cookie_paste
+        if changed:
+            self.session_ready = False
+            self._invalidate_pending_start()
+        self._cookie_from_browser = False
+        try:
+            cookie_from_paste(text)
+        except ValueError:
+            if changed:
+                self.cookie_paste = ""
+                self._cookie_from_browser = False
+            raise
+        self.cookie_paste = text
+        self._cookie_from_browser = False
+        return text
 
     def _session_jar(self):
         """The cookie jar for probe/rotation: single flow using pasted PHPSESSID."""
@@ -1080,6 +1151,10 @@ class WebStatusManager:
             self.note.set(str(exc))
             return
         self.cookie_paste = cookies
+        self._cookie_from_browser = True
+        self.cookie_paste_var.set("")
+        self.session_ready = False
+        self._invalidate_pending_start()
         self.paste_state.configure(text="Session captured from browser.",
                                    foreground="#555")
         self._verify_session(self._login_name(),
@@ -1089,15 +1164,15 @@ class WebStatusManager:
         """Verify the captured session live, arm automation on success."""
         try:
             login = self._login_name()
+            self._sync_pasted_cookie()
         except ValueError as exc:
             self.note.set(str(exc))
-            return
-        if not self.cookie_paste:
-            self.note.set("Use Login in browser or paste a cookie first.")
             return
         timeout = self._timeout_value()
         if timeout is None:
             return
+        self.session_ready = False
+        self.paste_state.configure(text="Verifying PHPSESSID...", foreground="#555")
         self._verify_session(login, timeout, self._on_logged_in)
 
     def _on_logged_in(self):
@@ -1133,14 +1208,10 @@ class WebStatusManager:
     def probe(self):
         try:
             login = self._login_name()
+            self._sync_pasted_cookie()
         except ValueError as exc:
             self.note.set(str(exc))
             return
-        if not (self.cookie_paste or self.cookie_paste_var.get().strip()):
-            self.note.set("Paste PHPSESSID in the Session tab first.")
-            return
-        if not self.cookie_paste:
-            self.cookie_paste = self.cookie_paste_var.get().strip()
         timeout = self._timeout_value()
         if timeout is None:
             return
@@ -1170,18 +1241,24 @@ class WebStatusManager:
         except ValueError as exc:
             self.note.set(str(exc))
             return
-        live = self.live.get()
-        if live and not self.cookie_paste:
-            self.cookie_paste = self.cookie_paste_var.get().strip()
-        if live and not (self.cookie_paste or self.cookies.get().strip() or self.chrome_mode):
-            self.note.set("Live needs a session: use Login in browser, paste a "
-                          "cookie, pick a cookies file, or press Chrome.")
+        if not self._save_web_texts(notify=False):
             return
+        live = self.live.get()
+        if live:
+            try:
+                self._sync_pasted_cookie()
+            except ValueError as exc:
+                self.note.set(str(exc))
+                return
         if live and not getattr(self, "session_ready", False):
             # Single login: verify the session first, then chain into rotation.
-            self._pending = (login, pool, interval, timeout)
-            self._verify_session(login, timeout, self._after_login)
+            generation = self._invalidate_pending_start()
+            self._pending = (login, pool, interval, timeout, generation)
+            self._verify_session(
+                login, timeout,
+                lambda: self._after_login(generation))
             return
+        self._invalidate_pending_start()
         if live and not getattr(self, "_live_confirmed", False):
             from tkinter import messagebox
             ok = messagebox.askyesno(
@@ -1195,15 +1272,22 @@ class WebStatusManager:
         self.switching = True
         self._cycle(login, pool, interval, timeout, live, 0)
 
-    def _after_login(self):
+    def _invalidate_pending_start(self):
+        """Invalidate queued login callbacks before Stop or another Start."""
+        self._start_generation = getattr(self, "_start_generation", 0) + 1
+        self._pending = None
+        return self._start_generation
+
+    def _after_login(self, generation):
         """Continue a pending live Start after the session verified."""
-        pending, self._pending = getattr(self, "_pending", None), None
-        if not pending:
+        pending = getattr(self, "_pending", None)
+        if not pending or pending[4] != generation:
             return
+        self._pending = None
         self.session_ready = True
         self.paste_state.configure(text="Logged in - automation armed.",
                                    foreground="#060")
-        login, pool, interval, timeout = pending
+        login, pool, interval, timeout = pending[:4]
         from tkinter import messagebox
         ok = messagebox.askyesno(
             "Send for real?",
@@ -1217,6 +1301,7 @@ class WebStatusManager:
         self._cycle(login, pool, interval, timeout, True, 0)
 
     def stop(self):
+        self._invalidate_pending_start()
         self.switching = False
         self.session_ready = False  # next Start re-verifies the session
         self.chrome_mode = False  # Stop also drops an imported Chrome session
@@ -1232,7 +1317,7 @@ class WebStatusManager:
         if not self.switching:
             return
         try:
-            pool = parse_pool(self.pool_box.get("1.0", "end")) or pool
+            pool = self._pool_values() or pool
             status, _ = next_rotation(pool, index)
         except ValueError as exc:
             self.note.set(str(exc))
@@ -1250,7 +1335,7 @@ class WebStatusManager:
             except (OSError, ValueError) as exc:
                 return "cycle #{0}/{1} stopped: {2}".format(index + 1, len(pool), exc)
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-            ok, message = perform_update(opener, login, status, timeout, confirm=True)
+            ok, message = perform_update(opener, status, timeout, confirm=True)
             return "cycle #{0}/{1}: {2}".format(index + 1, len(pool), message)
 
         self._run_bg(do, force=True)
@@ -1489,7 +1574,7 @@ def _cookies_to_string(cookies):
 # Read-only GitHub API (no token needed for public repos, stdlib only). Each
 # packaged app checks the same repo's latest release and downloads only its
 # own executable asset, verified against the release's SHA256SUMS.txt.
-APP_VERSION = "2.19.1"
+APP_VERSION = "2.19.2"
 GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
 UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
 

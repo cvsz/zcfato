@@ -94,6 +94,45 @@ def test_gui_smoke(tmp_path, monkeypatch):
     app.tick()  # the shared root is left alive for later smoke tests
 
 
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
+def test_music_folder_picker_sets_folder_used_by_chat_requests(tmp_path, monkeypatch):
+    import tkinter
+    from tkinter import filedialog
+
+    config = json.loads((ROOT / "config.example.json").read_text("utf-8"))
+    config["autoreply"]["own_nickname"] = "DJBot"
+    config["dj"]["music_dir"] = "music"
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps(config, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(g, "BASE", tmp_path)
+    root = tk_root()
+    root.deiconify()
+    monkeypatch.setattr(tkinter, "Tk", lambda: root)
+    app = g.build_app()(config_path)
+    app.root.update()
+
+    selected = tmp_path / "picked-music"
+    selected.mkdir()
+    choices = [str(selected), ""]
+    calls = []
+
+    def askdirectory(**kwargs):
+        calls.append(kwargs)
+        return choices.pop(0)
+
+    monkeypatch.setattr(filedialog, "askdirectory", askdirectory)
+    app.btn_dj_browse_music.invoke()
+    assert app.dj_music_dir_var.get() == str(selected)
+    app.btn_dj_browse_music.invoke()  # cancel must preserve the selected folder
+    assert app.dj_music_dir_var.get() == str(selected)
+    assert calls[0]["mustexist"] is True
+    assert Path(calls[0]["initialdir"]).is_dir()
+    cfg, errors = app.collect()
+    assert errors == []
+    assert cfg["dj"]["music_dir"] == str(selected)
+    app.root.destroy()
+
+
 def test_config_must_stay_inside_base(tmp_path, monkeypatch):
     monkeypatch.setattr(g, "BASE", tmp_path / "app")
     (tmp_path / "app").mkdir()
