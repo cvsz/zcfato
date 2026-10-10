@@ -110,10 +110,15 @@ def perform_update(opener, status, timeout, confirm=False):
     except ValueError:
         return False, "update refused: unrecognized server reply ({0}).".format(
             reply[:60])
+    if not isinstance(data, dict):
+        return False, "update refused: invalid server response format."
     if data.get("error"):
-        return False, "update refused by the server: {0}".format(
-            str(data.get("response"))[:80])
-    return True, "status updated ({0}).".format(str(data.get("response"))[:60])
+        return False, "update refused by the server (error response)."
+    # The observed API success acknowledgement is {"response": "ok"}.
+    # No missing, empty, or unrecognized response may be treated as success.
+    if data.get("response") != "ok":
+        return False, "update unconfirmed: server did not acknowledge success."
+    return True, "status update acknowledged by server."
 
 
 def extract_csrf(html):
@@ -533,7 +538,11 @@ def live_update(login, password, status, timeout, confirm=False):
     except Exception as exc:
         return EXIT_USAGE, "profile page failed: {0}: {1}".format(
             type(exc).__name__, exc)
-    _verdict, detail = summarize_session(html)
+    verdict, detail = summarize_session(html)
+    if verdict != "signed-in":
+        guidance = (" Use --confirm-update for live changes; a verified signed-in "
+                    "session is also required.") if not confirm else ""
+        return EXIT_BLOCKED, "status update blocked: session not confirmed signed in." + guidance
     ok, update_message = perform_update(opener, status, timeout, confirm=confirm)
     return (EXIT_OK if ok else EXIT_BLOCKED), "{0}\n{1}".format(detail, update_message)
 
