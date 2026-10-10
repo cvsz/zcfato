@@ -102,7 +102,7 @@ def test_live_login_success_still_gated(monkeypatch, capsys):
     monkeypatch.setattr(ws.getpass, "getpass", lambda *a: "pw")
     _patch_opener_sequence(monkeypatch, [
         b"https://profiles.camfrog.com/en/",               # login reply
-        b"<title>Camfrog - home</title>var nick = 'Seaza';",  # profile page
+        b"<title>Camfrog - home</title>var _user_id = '1'; var nick = 'Seaza';",  # signed-in profile page
     ])
     assert ws.main(["--login", "Seaza", "--status", "hi", "--live"]) == 3
     out = capsys.readouterr().out
