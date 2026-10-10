@@ -151,27 +151,20 @@ def extract_csrf(html):
     return match.group(1) if match else ""
 
 CAPTURE_STEPS = """\
-To capture the real status-update endpoint:
-1. Log in at https://profiles.camfrog.com/ in your browser.
-2. Open devtools (F12) -> Network tab, then change your status once.
-3. Find the POST/XHR request that carries the new status text.
-4. Record its full URL, parameters, and which cookies it needs.
-5. Hand the (redacted, password-free) request details to the maintainer so
-   WEB_UPDATE_URL/WEB_UPDATE_VERIFIED above can be confirmed. Never paste
-   your password or full session cookies into chat, issues, or files.
+To capture PHPSESSID from https://profiles.camfrog.com/home.php:
+1. Log in at https://profiles.camfrog.com/ or https://www.camfrog.com/th/login.php.
+2. Open devtools (F12) -> Network tab (preserve log / filter for "home.php").
+3. Navigate to https://profiles.camfrog.com/home.php.
+4. Click the 'home.php' request -> Headers -> Request Headers (Cookie) or Response Headers (set-cookie).
+5. Copy the PHPSESSID value (e.g. PHPSESSID=xxxx... or just the token).
+6. Paste into the Cookie/PHPSESSID box below and press 'Login' to arm automation.
 """
 
 COOKIE_STEPS = """\
-To reuse your Chrome session (no password needed):
-1. In Chrome, log in at https://profiles.camfrog.com/ as usual.
-2. Export cookies with an extension such as "Get cookies.txt LOCALLY"
-   (localhost-only export, nothing uploaded) for camfrog.com.
-3. Save the file OUTSIDE this repository, e.g. Documents/camfrog-cookies.txt.
-   (*cookies*.txt is git-ignored so it can never be committed.)
-4. Run: python tools/web_status.py --login Seaza --status "..." \\
-           --cookies-file <path> --probe
-   Only the cookie count and domains are printed, never cookie values.
-5. Do not paste cookie values into chat, issues, or files.
+To capture the real status-update endpoint:
+1. On https://profiles.camfrog.com/home.php, change your status once.
+2. In devtools Network tab, find POST /ajax/update_status.php with {status, csrf}.
+3. The session uses your authenticated PHPSESSID cookie.
 """
 
 # Markers seen on the logged-out login wall (fetched 2026-10-09).
@@ -216,23 +209,39 @@ def build_plan(login, status):
 
 
 def cookie_from_paste(text):
-    """Build a jar from a pasted `name=value` browser cookie. Value stays in memory.
+    """Build a jar from a pasted `name=value` browser cookie or PHPSESSID. Value stays in memory.
 
-    This is the "log in in your browser" path: the real browser solves the
-    CAPTCHA, the user copies the profile cookie from devtools, and the tool
-    probes it (a wrong cookie simply reports a logged-out session).
+    This supports copying either the full cookie, name=value pairs, or capturing
+    PHPSESSID from network inspection (e.g. headers or request/response on
+    https://profiles.camfrog.com/home.php).
     """
+    raw = str(text).strip()
+    if not raw:
+        raise ValueError(
+            "paste a cookie as name=value or PHPSESSID=... (copy it from the "
+            "network capture on profiles.camfrog.com/home.php or browser devtools).")
+
     pairs = []
-    for chunk in str(text).replace(";", " ").split():
+    # If the user pasted something like 'PHPSESSID=xyz' directly or in cookie string
+    for chunk in raw.replace(";", " ").split():
         if "=" in chunk:
             key, _, value = chunk.partition("=")
             key, value = key.strip(), value.strip()
             if key and value:
                 pairs.append((key, value))
+
+    # Also handle if user pasted just the raw PHPSESSID hash or 'PHPSESSID: xyz'
+    if not pairs:
+        m = re.search(r"PHPSESSID\s*[:=]\s*([a-zA-Z0-9_-]+)", raw, re.IGNORECASE)
+        if m:
+            pairs.append(("PHPSESSID", m.group(1)))
+        elif re.fullmatch(r"[a-zA-Z0-9_-]{16,64}", raw):
+            pairs.append(("PHPSESSID", raw))
+
     if not pairs:
         raise ValueError(
-            "paste a cookie as name=value (copy it from the browser's "
-            "devtools: Application -> Cookies -> profiles.camfrog.com).")
+            "paste a cookie as name=value (copy PHPSESSID from devtools: "
+            "Network -> home.php -> Headers/Cookies or Application -> Cookies).")
     jar = CookieJar()
     for key, value in pairs:
         jar.set_cookie(Cookie(
@@ -860,58 +869,18 @@ class WebStatusManager:
         self.ttk.Label(timing, text="Timeout").pack(side="left", padx=(10, 0))
         self.timeout = self.tk.StringVar(value=str(TIMEOUT_DEFAULT))
         self.ttk.Entry(timing, textvariable=self.timeout, width=6).pack(side="left", padx=(3, 0))
-        self.ttk.Label(timing, text="s").pack(side="left")
-        self.ttk.Label(form, text="Cookies file").grid(row=3, column=0, sticky="w", pady=(5, 0))
-        self.cookies = self.tk.StringVar(value=cookies_default)
-        self.ttk.Entry(form, textvariable=self.cookies).grid(row=3, column=1, columnspan=2,
-                                                             sticky="ew", padx=6, pady=(5, 0))
-        cookie_btns = self.ttk.Frame(form)
-        cookie_btns.grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
-        self.ttk.Button(cookie_btns, text="Browse...", command=self.browse).pack(side="left")
-        self.ttk.Button(cookie_btns, text="Chrome", command=self.chrome_import).pack(side="left", padx=(6, 0))
-        self.ttk.Label(form, text="Password").grid(
-            row=5, column=0, sticky="w", pady=(5, 0))
-        self.password = self.tk.StringVar(value="")
-        self.pw_entry = self.ttk.Entry(form, textvariable=self.password, show="\u2022")
-        self.pw_entry.grid(row=5, column=1, columnspan=2, sticky="ew", padx=6, pady=(5, 0))
-        form.columnconfigure(1, weight=1)
-
         self.live = self.tk.BooleanVar(value=False)
         self.ttk.Checkbutton(form, text="Send live (otherwise dry-run preview only)",
-                             variable=self.live).grid(row=6, column=0, columnspan=3,
+                             variable=self.live).grid(row=3, column=0, columnspan=3,
                                                       sticky="w", pady=(6, 0))
 
-        account = self.ttk.LabelFrame(session_tab, padding=(10, 6, 10, 6),
-                                      text="Account (stored encrypted)")
-        account.pack(fill="x", pady=(0, 6))
-        self.ttk.Label(account, text=(
-            "Saved with Windows DPAPI: the file only decrypts under your Windows "
-            "user, so a copy is useless elsewhere. The password is never written "
-            "in plain text, logged, or shown."
-        ), wraplength=440, foreground="#555").pack(anchor="w", pady=(0, 4))
-        row = self.ttk.Frame(account)
-        row.pack(fill="x")
-        self.ttk.Label(row, text="Nickname").pack(side="left")
-        self.acct_user = self.tk.StringVar(value=(os.environ.get("CAMFROG_USER") or "").strip())
-        self.ttk.Entry(row, textvariable=self.acct_user, width=12).pack(side="left", padx=4)
-        self.ttk.Label(row, text="Password").pack(side="left", padx=(4, 0))
-        self.acct_pw = self.tk.StringVar(value="")
-        self.acct_pw_entry = self.ttk.Entry(row, textvariable=self.acct_pw,
-                                            show="\u2022", width=12)
-        self.acct_pw_entry.pack(side="left", padx=4)
-        self.ttk.Button(row, text="Save encrypted", command=self.save_account).pack(side="left")
-        self.acct_state = self.ttk.Label(account, text="", foreground="#555")
-        self.acct_state.pack(anchor="w", pady=(4, 0))
-        self.refresh_account_state()
-
         browser = self.ttk.LabelFrame(session_tab, padding=(10, 6, 10, 6),
-                                      text="Browser login (no closing, no export)")
+                                      text="Session (PHPSESSID via iframe / web login)")
         browser.pack(fill="x")
         self.ttk.Label(browser, text=(
-            "Log in in your browser as usual (it solves the CAPTCHA for you), then "
-            "copy the profile cookie from devtools: F12 -> Application -> Cookies "
-            "-> profiles.camfrog.com, and paste it below. It is used in memory "
-            "only and probed live."
+            "Log in in your browser (via iframe/web login). In devtools Network tab, "
+            "inspect https://profiles.camfrog.com/home.php to get PHPSESSID=..., "
+            "paste below, then press 'Login' to verify and arm automation."
         ), wraplength=440, foreground="#555").pack(anchor="w", pady=(0, 4))
         row2 = self.ttk.Frame(browser)
         row2.pack(fill="x")
@@ -920,7 +889,7 @@ class WebStatusManager:
         self.cookie_paste_var = self.tk.StringVar(value="")
         self.ttk.Entry(row2, textvariable=self.cookie_paste_var,
                        width=18).pack(side="left", padx=6)
-        self.ttk.Button(row2, text="Use pasted cookie",
+        self.ttk.Button(row2, text="Use PHPSESSID",
                         command=self.use_pasted_cookie).pack(side="left")
         self.ttk.Button(row2, text="Login",
                         command=self.login_session).pack(side="left", padx=(6, 0))
@@ -931,7 +900,6 @@ class WebStatusManager:
         actions.pack(fill="x")
         self.ttk.Button(actions, text="Preview plan", command=self.preview).pack(side="left", padx=5)
         self.ttk.Button(actions, text="Probe session", command=self.probe).pack(side="left")
-        self.ttk.Button(actions, text="Login attempt", command=self.login_attempt).pack(side="left", padx=5)
         self.ttk.Button(actions, text="Update", command=self.check_update).pack(side="left", padx=5)
         actions2 = self.ttk.Frame(self.root, padding=(10, 0, 10, 6))
         actions2.pack(fill="x")
@@ -1044,40 +1012,12 @@ class WebStatusManager:
         return self._login_name(), self._pool()
 
     # ---- actions (network runs in worker threads; secrets never leave memory)
-    def refresh_account_state(self):
-        """Show what is stored without ever revealing any value."""
-        user = (os.environ.get("CAMFROG_USER") or "").strip()
-        if env_enc_path().is_file():
-            stored = "encrypted account on disk"
-            if user:
-                stored += " for {0!r}".format(user)
-            self.acct_state.configure(text=stored + " (this Windows user only).")
-        else:
-            self.acct_state.configure(
-                text="No stored account: enter one and press Save encrypted. "
-                     "A saved account is all live rotation needs.")
-        if user and not self.login.get().strip():
-            self.login.set(user)
-
-    def save_account(self):
-        ok, message = save_credentials(self.acct_user.get(), self.acct_pw.get())
-        if ok:
-            self.acct_pw.set("")
-            # make the new account visible to this session without re-reading it
-            os.environ["CAMFROG_USER"] = self.acct_user.get().strip()
-        from tkinter import messagebox
-        if ok:
-            messagebox.showinfo("Account", message, parent=self.root)
-        else:
-            messagebox.showerror("Account", message, parent=self.root)
-        self.refresh_account_state()
-
     def open_login_page(self):
         import webbrowser
         webbrowser.open(LOGIN_PAGE_URL)
         self.paste_state.configure(
-            text="Login page opened in your browser. After signing in, copy the "
-                 "profile cookie and press Use pasted cookie.")
+            text="Login page opened. After signing in, capture PHPSESSID on "
+                 "https://profiles.camfrog.com/home.php and press Use cookie/PHPSESSID.")
 
     def use_pasted_cookie(self):
         text = self.cookie_paste_var.get().strip()
@@ -1088,18 +1028,16 @@ class WebStatusManager:
             return
         self.cookie_paste = text
         self.paste_state.configure(
-            text="Pasted cookie ready (used in memory only).", foreground="#555")
+            text="Cookie/PHPSESSID ready in memory. Click Login to verify.", foreground="#555")
 
     def _session_jar(self):
-        """The cookie jar for probe/rotation: pasted cookie, Chrome, or a file."""
-        if self.cookie_paste:
-            return cookie_from_paste(self.cookie_paste)
-        if self.chrome_mode:
-            return import_chrome_jar()
-        return load_cookie_jar(self.cookies.get().strip())
+        """The cookie jar for probe/rotation: single flow using pasted PHPSESSID."""
+        if not self.cookie_paste:
+            raise ValueError("Enter or paste PHPSESSID first (Session tab).")
+        return cookie_from_paste(self.cookie_paste)
 
     def _verify_session(self, login, timeout, on_done):
-        """Probe paste/Chrome/file session in a worker; on_done runs on success."""
+        """Probe PHPSESSID session in a worker; on_done runs on success."""
 
         def do():
             import urllib.request
@@ -1112,19 +1050,27 @@ class WebStatusManager:
                 raise ValueError(detail)
             return detail
 
-        self._run_bg(do, on_done=on_done)
+        self._run_bg(do, force=True, on_done=on_done)
 
     def login_session(self):
-        """Single login: verify the session live, arm automation on success."""
+        """Single login: verify the PHPSESSID session live, arm automation on success."""
         try:
             login = self._login_name()
         except ValueError as exc:
             self.note.set(str(exc))
             return
-        if not (self.cookies.get().strip() or self.cookie_paste or self.chrome_mode):
-            self.note.set("Paste a cookie, pick a cookies file, or press Chrome "
-                          "first - then Login.")
-            return
+        if not self.cookie_paste:
+            text = self.cookie_paste_var.get().strip()
+            if text:
+                try:
+                    cookie_from_paste(text)
+                    self.cookie_paste = text
+                except ValueError as exc:
+                    self.note.set(str(exc))
+                    return
+            else:
+                self.note.set("Paste PHPSESSID first (Session tab) - then Login.")
+                return
         timeout = self._timeout_value()
         if timeout is None:
             return
@@ -1132,7 +1078,7 @@ class WebStatusManager:
 
     def _on_logged_in(self):
         self.session_ready = True
-        self.paste_state.configure(text="Logged in - automation armed.",
+        self.paste_state.configure(text="Logged in via PHPSESSID - automation armed.",
                                    foreground="#060")
 
     def preview(self):
@@ -1166,10 +1112,11 @@ class WebStatusManager:
         except ValueError as exc:
             self.note.set(str(exc))
             return
-        if not (self.cookies.get().strip() or self.cookie_paste):
-            self.note.set("Paste a cookie (Browser login) or pick a cookies file "
-                          "first (Browse...).")
+        if not (self.cookie_paste or self.cookie_paste_var.get().strip()):
+            self.note.set("Paste PHPSESSID in the Session tab first.")
             return
+        if not self.cookie_paste:
+            self.cookie_paste = self.cookie_paste_var.get().strip()
         timeout = self._timeout_value()
         if timeout is None:
             return
@@ -1183,32 +1130,6 @@ class WebStatusManager:
             _verdict, detail = summarize_session(html)
             return "loaded session: {0}. {1}".format(cookie_summary(jar), detail)
 
-        self._run_bg(do)
-
-    def login_attempt(self):
-        try:
-            login = self._login_name()
-        except ValueError as exc:
-            self.note.set(str(exc))
-            return
-        password = self.password.get()
-        if not password:
-            self.note.set("Enter the password first (used once, cleared immediately).")
-            return
-        timeout = self._timeout_value()
-        if timeout is None:
-            return
-
-        def do():
-            import urllib.request
-            from http.cookiejar import CookieJar
-
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(CookieJar()))
-            reply = attempt_login(opener, login, password, timeout)
-            _code, message = handle_login_reply(reply)
-            return message
-
-        self.pw_entry.delete(0, "end")  # main thread: widget cleared before spawn
         self._run_bg(do)
 
     def capture(self):
@@ -1226,15 +1147,12 @@ class WebStatusManager:
             self.note.set(str(exc))
             return
         live = self.live.get()
-        has_source = bool(self.cookies.get().strip() or self.cookie_paste
-                          or self.chrome_mode)
-        if live and not (has_source or stored_account()):
-            self.note.set("Live needs a cookies file, the Chrome button (Chrome "
-                          "closed), a pasted cookie with Login, or a saved account "
-                          "- save one in the Account section above.")
+        if live and not (self.cookie_paste or self.cookie_paste_var.get().strip()):
+            self.note.set("Live needs PHPSESSID - paste it in Session tab and press Login.")
             return
-        if live and has_source and stored_account() is None \
-                and not getattr(self, "session_ready", False):
+        if live and not self.cookie_paste:
+            self.cookie_paste = self.cookie_paste_var.get().strip()
+        if live and not getattr(self, "session_ready", False):
             # Single login: verify the session first, then chain into rotation.
             self._pending = (login, pool, interval, timeout)
             self._verify_session(login, timeout, self._after_login)
@@ -1300,11 +1218,6 @@ class WebStatusManager:
         def do():
             if not live:
                 return "cycle #{0}/{1} (dry-run): {2}".format(index + 1, len(pool), status)
-            account = stored_account()
-            if account is not None:
-                user, password = account
-                code, message = live_update(user, password, status, timeout, confirm=True)
-                return "cycle #{0}/{1}: {2}".format(index + 1, len(pool), message)
             import urllib.request
 
             try:
@@ -1319,6 +1232,232 @@ class WebStatusManager:
         _, nxt = next_rotation(pool, index)
         self.rotate_job = self.root.after(max(1, interval) * 1000,
                                           self._cycle, login, pool, interval, timeout, live, nxt)
+
+
+# ============================================================
+# Inlined browser login (tools/browser_login.py): real-browser login +
+# DevTools cookie harvest. tools/browser_login.py stays the tested copy.
+# ============================================================
+
+BROWSER_CANDIDATES = (
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+)
+LOGIN_PAGE = "https://www.camfrog.com/th/login.php"
+SESSION_COOKIE = "PHPSESSID"
+WAIT_TIMEOUT = 300.0  # seconds the user gets to finish logging in
+
+
+def find_browser():
+    for path in BROWSER_CANDIDATES:
+        if Path(path).is_file():
+            return path
+    return None
+
+
+def _free_port():
+    for _ in range(40):
+        port = random.randint(49152, 59999)
+        with socket.socket() as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                sock.bind(("127.0.0.1", port))
+                return port
+            except OSError:
+                continue
+    return 0
+
+
+# ---------------------------------------------------------------- devtools ws
+class _WebSocket:
+    """Minimal RFC 6455 client: one connection, text frames, no extensions."""
+
+    def __init__(self, url):
+        if not url.startswith("ws://"):
+            raise ValueError("only ws:// devtools URLs are supported")
+        hostport, _, path = url[5:].partition("/")
+        host, _, port = hostport.partition(":")
+        self.sock = socket.create_connection((host, int(port or 80)), timeout=10)
+        key = base64.b64encode(bytes(random.getrandbits(8) for _ in range(16)))
+        handshake = (
+            "GET /{path} HTTP/1.1\r\n"
+            "Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).format(path=path, host=host, port=port or 80, key=key.decode())
+        self.sock.sendall(handshake.encode())
+        self._read_http_headers()
+        self.buf = b""
+
+    def _read_http_headers(self):
+        data = b""
+        while b"\r\n\r\n" not in data:
+            block = self.sock.recv(4096)
+            if not block:
+                raise OSError("devtools websocket closed during handshake")
+            data += block
+        head, self.buf = data.split(b"\r\n\r\n", 1)
+        if b" 101 " not in head.split(b"\r\n")[0]:
+            raise OSError("devtools websocket handshake refused")
+
+    def send_text(self, text):
+        payload = text.encode("utf-8")
+        header = bytearray([0x81])  # FIN + text
+        mask = bytes(random.getrandbits(8) for _ in range(4))
+        n = len(payload)
+        if n < 126:
+            header.append(0x80 | n)
+        elif n < 1 << 16:
+            header.append(0x80 | 126)
+            header += n.to_bytes(2, "big")
+        else:
+            header.append(0x80 | 127)
+            header += n.to_bytes(8, "big")
+        self.sock.sendall(bytes(header) + mask
+                          + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+    def _recv_frame(self):
+        while True:
+            if len(self.buf) >= 2:
+                fin_op, length = self.buf[0], self.buf[1] & 0x7F
+                pos = 2
+                if length == 126:
+                    if len(self.buf) < 4:
+                        break
+                    length = int.from_bytes(self.buf[2:4], "big")
+                    pos = 4
+                elif length == 127:
+                    if len(self.buf) < 10:
+                        break
+                    length = int.from_bytes(self.buf[2:10], "big")
+                    pos = 10
+                if len(self.buf) >= pos + length:
+                    payload = self.buf[pos:pos + length]
+                    self.buf = self.buf[pos + length:]
+                    return fin_op & 0x0F, payload
+            block = self.sock.recv(65536)
+            if not block:
+                raise OSError("devtools websocket closed")
+            self.buf += block
+
+    def read_json(self):
+        """Next data frame decoded as JSON; pings answered with pongs."""
+        while True:
+            opcode, payload = self._recv_frame()
+            if opcode == 0x9:  # ping -> pong
+                self._send_frame(0xA, payload)
+                continue
+            if opcode == 0xA:
+                continue
+            return json.loads(payload.decode("utf-8", "replace"))
+
+    def _send_frame(self, opcode, payload):
+        mask = bytes(random.getrandbits(8) for _ in range(4))
+        header = bytearray([0x80 | opcode, 0x80 | len(payload)])
+        self.sock.sendall(bytes(header) + mask
+                          + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
+
+    def close(self):
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+
+
+def _http_json(url):
+    with urllib.request.urlopen(url, timeout=5) as response:
+        return json.loads(response.read().decode("utf-8", "replace"))
+
+
+def _find_page_target(port):
+    targets = _http_json("http://127.0.0.1:{0}/json/list".format(port))
+    for target in targets:
+        if target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
+            return target["webSocketDebuggerUrl"]
+    raise OSError("no browser page target found")
+
+
+def _cdp_call(ws, method, params=None):
+    request = {"id": 1, "method": method}
+    if params:
+        request["params"] = params
+    ws.send_text(json.dumps(request))
+    while True:
+        message = ws.read_json()
+        if message.get("id") == 1:
+            return message
+        # browser events that arrive while we work are ignored
+
+
+# ---------------------------------------------------------------- the flow
+def browser_login(timeout=WAIT_TIMEOUT, on_status=None, browser=None,
+                  profile_dir=None, keep_browser=False):
+    """Open the login page in a private browser session and harvest cookies.
+
+    Returns (cookie_string, profile_dir). cookie_string is `name=value; ...`
+    for cookie_from_paste(). Raises OSError/RuntimeError on failure.
+    """
+    browser = browser or find_browser()
+    if not browser:
+        raise OSError("no Chrome or Edge found on this computer")
+    port = _free_port()
+    tmp = Path(profile_dir) if profile_dir else Path(
+        tempfile.mkdtemp(prefix="camfrog-login-"))
+    tmp.mkdir(parents=True, exist_ok=True)
+    subprocess.Popen(
+        [browser, "--remote-debugging-port={0}".format(port),
+         "--user-data-dir={0}".format(tmp), "--no-first-run",
+         "--no-default-browser-check", "--new-window", LOGIN_PAGE],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        creationflags=0x08000000, close_fds=True)
+    if on_status:
+        on_status("browser opened")
+    ws = None
+    try:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                if ws is None:
+                    ws = _WebSocket(_find_page_target(port))
+                cookies = _cdp_call(ws, "Network.getAllCookies").get(
+                    "result", {}).get("cookies", [])
+                if any(c.get("name") == SESSION_COOKIE and "camfrog" in (c.get("domain") or "")
+                       for c in cookies):
+                    return _cookies_to_string(cookies), str(tmp)
+                time.sleep(1.5)
+            except (OSError, ValueError, TimeoutError):
+                try:
+                    ws.close()
+                except Exception:
+                    pass
+                ws = None
+                time.sleep(1.5)  # browser still starting
+        raise RuntimeError("login was not completed in time")
+    finally:
+        try:
+            ws.close()
+        except Exception:
+            pass
+
+
+def _cookies_to_string(cookies):
+    seen, parts = set(), []
+    for cookie in cookies:
+        domain = (cookie.get("domain") or "").lstrip(".").lower()
+        if not domain.endswith("camfrog.com"):
+            continue
+        name, value = cookie.get("name") or "", cookie.get("value") or ""
+        if not name or not value or name in seen:
+            continue
+        seen.add(name)
+        parts.append("{0}={1}".format(name, value))
+    if not parts:
+        raise ValueError("no camfrog.com cookies in this browser session")
+    return "; ".join(parts)
 
 
 # ---------- self-update from the GitHub release ----------

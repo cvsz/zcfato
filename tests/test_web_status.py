@@ -327,11 +327,26 @@ def test_cookie_from_paste_accepts_several_pairs():
     assert sorted(c.name for c in jar) == ["cf_session", "other"]
 
 
+def test_cookie_from_paste_accepts_phpsessid():
+    jar = ws.cookie_from_paste("PHPSESSID=v6trce6eq3ff6lirkdvt0b3sac")
+    cookies = list(jar)
+    assert len(cookies) == 1
+    assert cookies[0].name == "PHPSESSID"
+    assert cookies[0].value == "v6trce6eq3ff6lirkdvt0b3sac"
+
+    # raw hash captured from home.php network
+    jar2 = ws.cookie_from_paste("v6trce6eq3ff6lirkdvt0b3sac")
+    cookies2 = list(jar2)
+    assert len(cookies2) == 1
+    assert cookies2[0].name == "PHPSESSID"
+    assert cookies2[0].value == "v6trce6eq3ff6lirkdvt0b3sac"
+
+
 @pytest.mark.parametrize("bad", ["", "   ", "no-equals-sign", "=value", "name="])
 def test_cookie_from_paste_rejects_garbage(bad):
     with pytest.raises(ValueError) as exc:
         ws.cookie_from_paste(bad)
-    assert "devtools" in str(exc.value)
+    assert "devtools" in str(exc.value) or "home.php" in str(exc.value)
 
 
 def test_stored_account_reads_the_environment(monkeypatch):

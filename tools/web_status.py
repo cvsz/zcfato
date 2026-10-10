@@ -192,23 +192,37 @@ def build_plan(login, status):
 
 
 def cookie_from_paste(text):
-    """Build a jar from a pasted `name=value` browser cookie. Value stays in memory.
+    """Build a jar from a pasted `name=value` browser cookie or PHPSESSID. Value stays in memory.
 
-    This is the "log in in your browser" path: the real browser solves the
-    CAPTCHA, the user copies the profile cookie from devtools, and the tool
-    probes it (a wrong cookie simply reports a logged-out session).
+    This supports copying either the full cookie, name=value pairs, or capturing
+    PHPSESSID from network inspection (e.g. headers or request/response on
+    https://profiles.camfrog.com/home.php).
     """
+    raw = str(text).strip()
+    if not raw:
+        raise ValueError(
+            "paste a cookie as name=value or PHPSESSID=... (copy it from the "
+            "network capture on profiles.camfrog.com/home.php or browser devtools).")
+
     pairs = []
-    for chunk in str(text).replace(";", " ").split():
+    for chunk in raw.replace(";", " ").split():
         if "=" in chunk:
             key, _, value = chunk.partition("=")
             key, value = key.strip(), value.strip()
             if key and value:
                 pairs.append((key, value))
+
+    if not pairs:
+        m = re.search(r"PHPSESSID\s*[:=]\s*([a-zA-Z0-9_-]+)", raw, re.IGNORECASE)
+        if m:
+            pairs.append(("PHPSESSID", m.group(1)))
+        elif re.fullmatch(r"[a-zA-Z0-9_-]{16,64}", raw):
+            pairs.append(("PHPSESSID", raw))
+
     if not pairs:
         raise ValueError(
-            "paste a cookie as name=value (copy it from the browser's "
-            "devtools: Application -> Cookies -> profiles.camfrog.com).")
+            "paste a cookie as name=value (copy PHPSESSID from devtools: "
+            "Network -> home.php -> Headers/Cookies or Application -> Cookies).")
     jar = CookieJar()
     for key, value in pairs:
         jar.set_cookie(Cookie(
