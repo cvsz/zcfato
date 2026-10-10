@@ -230,3 +230,42 @@ def test_marquee_runner_scrolls_frames_and_rotates_lines(monkeypatch):
     assert len(sent) > 10, "frames never advanced"
     assert len({s[:3] for s in sent}) > 1, "lines never rotated"
     assert r.stats.get("statuses", 0) >= 2
+
+
+def test_apply_sends_frames_immediately_when_scroll_on(monkeypatch):
+    """Apply scrolls at once: ordered frames with step delays between sends."""
+    import status_marquee_gui as m
+
+    cfg = copy.deepcopy(m.DEFAULTS)
+    cfg["dry_run"] = True
+    cfg["status"]["enabled"] = True
+    cfg["status"]["max_length"] = 120
+    cfg["status"]["marquee"].update(enabled=True, scroll=True, width=10, stride=2,
+                                    step_seconds=0.3, cycles=1, max_frames=80)
+    monkeypatch.setattr(m, "get_window", lambda config: object())
+    monkeypatch.setattr(m, "find", lambda win, spec: object())
+    seen, sleeps = [], []
+    monkeypatch.setattr(m, "commit", lambda *a: seen.append(a[2]) or True)
+    monkeypatch.setattr(m.time, "sleep", lambda s: sleeps.append(s))
+    monkeypatch.setattr(m, "load_cfg", lambda path: cfg)
+    assert m.apply_status_scrolling("dummy.json", "status message that scrolls on") == 0
+    assert len(seen) > 1, "expected several frames sent in order"
+    assert seen == sorted(seen, key=lambda t: seen.index(t)) and len(set(seen)) > 1
+    assert sleeps and all(s >= 0.3 for s in sleeps)
+
+
+def test_apply_falls_back_to_single_shot_when_scroll_off(monkeypatch):
+    """Apply with scroll off sends exactly once via the static path."""
+    import status_marquee_gui as m
+
+    cfg = copy.deepcopy(m.DEFAULTS)
+    cfg["dry_run"] = True
+    cfg["status"]["enabled"] = True
+    cfg["status"]["marquee"].update(enabled=True, scroll=False)
+    monkeypatch.setattr(m, "get_window", lambda config: object())
+    monkeypatch.setattr(m, "find", lambda win, spec: object())
+    seen = []
+    monkeypatch.setattr(m, "commit", lambda *a: seen.append(a[2]) or True)
+    monkeypatch.setattr(m, "load_cfg", lambda path: cfg)
+    assert m.apply_status_scrolling("dummy.json", "hello") == 0
+    assert seen == ["hello"]

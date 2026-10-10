@@ -3108,6 +3108,55 @@ def apply_status_text(config_path, text):
             "ไม่พบ control ของ status เปิดห้องแชทใน Camfrog แล้วลองใหม่"))
 
 
+def _commit_frames(config, frames):
+    """Send prebuilt frames one by one with the configured step delay."""
+    st, sf = config["status"], config["safety"]
+    mq = st["marquee"]
+    win = get_window(config)
+    ctrl = find(win, st["edit"])
+    btn = find(win, st["apply_button"]) if st["apply_button"] else None
+    try:
+        step = max(0.3, float(mq.get("step_seconds", 0.3)))
+    except (TypeError, ValueError):
+        step = 0.3
+    for i, frame in enumerate(frames):
+        ok = commit(win, ctrl, frame, config["dry_run"], sf["require_foreground"], btn,
+                    sf["restore_previous_window"], st.get("background_enter_target", "edit"))
+        if not ok:
+            print(t("failed"))
+            return 1
+        if i < len(frames) - 1:
+            time.sleep(step)
+    print(t("ok"))
+    return 0
+
+
+def apply_status_scrolling(config_path, text):
+    """Apply one status, scrolling it immediately when scroll is enabled.
+
+    Static configs fall back to the single-shot path (with control discovery).
+    """
+    config = load_cfg(config_path)
+    frames = Runner(config).build_frames(
+        expand(text, own=config["autoreply"]["own_nickname"]))
+    if len(frames) <= 1:
+        return apply_status_text(config_path, text)
+    try:
+        return _commit_frames(config, frames)
+    except (LookupError, RuntimeError):
+        try:
+            detected = cmd_detect(config, config_path, apply=True)
+        except RuntimeError as exc:
+            raise RuntimeError(t(
+                "Cannot find Camfrog window. Is Camfrog running?",
+                "ไม่พบหน้าต่าง Camfrog เปิดแล้วหรือยัง")) from exc
+        if detected == 0:
+            return _commit_frames(load_cfg(config_path), frames)
+        raise RuntimeError(t(
+            "Could not find status controls. Open a chat room in Camfrog and retry.",
+            "ไม่พบ control ของ status เปิดห้องแชทใน Camfrog แล้วลองใหม่"))
+
+
 def cmd_start(cfg, args):
     pid = running_pid(cfg)
     if pid:
@@ -3848,7 +3897,7 @@ def build_app():
                 status_str = str(chosen)
 
             def do_apply():
-                return apply_status_text(self.config_path, status_str)
+                return apply_status_scrolling(self.config_path, status_str)
 
             display_preview = status_str[:22] + "…" if len(status_str) > 22 else status_str
             self.run_task(do_apply, self._tr(f"Applied: {display_preview}",
