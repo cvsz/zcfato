@@ -366,7 +366,7 @@ def test_live_update_signs_in_then_updates(monkeypatch):
 def test_live_update_gated_without_confirmation(monkeypatch):
     monkeypatch.setattr(ws, "attempt_login",
                         lambda *a: "https://profiles.camfrog.com/en/")
-    monkeypatch.setattr(ws, "fetch_profile", lambda *a: "var nick = 'Seaza';")
+    monkeypatch.setattr(ws, "fetch_profile", lambda *a: "var _user_id = '1'; var nick = 'Seaza';")
     monkeypatch.setattr(ws, "perform_update",
                         lambda *a, **k: (False, "update refused: not confirmed"))
     code, message = ws.live_update("Seaza", "pw", "hello", 1.0)
@@ -607,3 +607,24 @@ def test_chrome_aes_key_malformed_local_state(tmp_path, content):
 def test_chrome_aes_key_missing_file(tmp_path):
     with pytest.raises(ValueError):
         ws.chrome_aes_key(str(tmp_path / "nothing"))
+
+
+@pytest.mark.parametrize("reply", ['{}', '[]', 'null', '{"response":""}', '{"response":"unknown"}', '{"error":true,"response":"denied"}'])
+def test_perform_update_refuses_unacknowledged_server_reply(monkeypatch, reply):
+    monkeypatch.setattr(ws, "fetch_profile",
+                        lambda *a: "var csrf = '90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0';")
+    monkeypatch.setattr(ws, "_post", lambda *a: reply)
+    ok, message = ws.perform_update(object(), "new status", 1.0, confirm=True)
+    assert not ok
+    assert "refused" in message or "unconfirmed" in message
+
+
+def test_live_update_requires_verified_session_before_post(monkeypatch):
+    monkeypatch.setattr(ws, "attempt_login", lambda *a: "https://profiles.camfrog.com/en/")
+    monkeypatch.setattr(ws, "fetch_profile", lambda *a: "var nick = 'Seaza';")
+    def unexpected_update(*args, **kwargs):
+        raise AssertionError("No POST before confirming signed-in session")
+    monkeypatch.setattr(ws, "perform_update", unexpected_update)
+    code, message = ws.live_update("Seaza", "password", "hello", 1.0, confirm=True)
+    assert code == ws.EXIT_BLOCKED
+    assert "not confirmed signed in" in message
