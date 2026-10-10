@@ -17,7 +17,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import os
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -88,14 +87,14 @@ def verify_feature_hashes():
     manifest = DIST / "SHA256SUMS.txt"
     if not manifest.is_file():
         raise SystemExit("missing dist/SHA256SUMS.txt; run a full build first")
-    expected = {str(path.relative_to(DIST)).replace("\\\\", "/"): path
+    expected = {str(path.relative_to(DIST)).replace("\\", "/"): path
                 for path in FEATURE_EXES.values()}
     found = {}
     for line in manifest.read_text(encoding="utf-8").splitlines():
         parts = line.split(maxsplit=1)
         if len(parts) != 2 or not re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
             raise SystemExit("invalid SHA256SUMS.txt entry")
-        name = parts[1].lstrip("*").replace("\\\\", "/")
+        name = parts[1].lstrip("*").replace("\\", "/")
         if name in found or name not in expected:
             raise SystemExit("unexpected or duplicate SHA256SUMS entry: " + name)
         found[name] = parts[0].lower()
