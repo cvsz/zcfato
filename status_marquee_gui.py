@@ -3681,8 +3681,15 @@ def build_app():
                                 foreground="#53636d")
 
             def work():
-                state, message = self_update("status-marquee.exe")
-                self.root.after(0, lambda: self._update_done(state, message))
+                try:
+                    state, message = self_update("status-marquee.exe")
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+                    logging.warning("Manual update check unavailable: %s", type(exc).__name__)
+                    state, message = "failed", "Update check unavailable (network or metadata error)."
+                try:
+                    self.root.after(0, lambda: self._update_done(state, message))
+                except RuntimeError:
+                    pass  # Window closed before the worker finished
 
             threading.Thread(target=work, daemon=True).start()
 
@@ -3699,7 +3706,7 @@ def build_app():
                     found = check_for_update("status-marquee.exe")
                     if found:
                         self.root.after(0, self.check_update)
-                except (OSError, ValueError, KeyError, TypeError) as exc:
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
                     # GitHub 403/rate limits, offline mode and invalid metadata
                     # must not crash an unattended GUI background thread.
                     logging.warning("Automatic update check unavailable: %s", type(exc).__name__)
@@ -4170,11 +4177,18 @@ def github_latest_release(timeout=15.0):
                  "User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         data = json.loads(response.read().decode("utf-8", "replace"))
+    if not isinstance(data, dict):
+        raise ValueError("unexpected GitHub release response shape")
     tag = str(data.get("tag_name") or "").lstrip("v")
     if not tag:
         return None
     assets = {}
-    for asset in data.get("assets") or []:
+    entries = data.get("assets") or []
+    if not isinstance(entries, list):
+        raise ValueError("invalid GitHub release assets")
+    for asset in entries:
+        if not isinstance(asset, dict):
+            raise ValueError("invalid GitHub release asset entry")
         name = str(asset.get("name") or "")
         url = str(asset.get("browser_download_url") or "")
         if name and url:
