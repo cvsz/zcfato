@@ -18,6 +18,12 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Encrypted account store for web-status: the GUI's **Account (stored encrypted)** section seals the nickname/password with Windows DPAPI into `.env.enc` (git-ignored, decrypts only under the same Windows user); the CLI then needs no `--login` and no password prompt. Plaintext `.env` still works as a legacy fallback.
 - The saved account now also drives the GUI's **live rotation** (no cookies, no Chrome): tick **Send live**, press **Start** (one confirmation), and each tick signs in and posts. Picking `.env.enc` in the cookies field, or any non-cookies file, now explains the mix-up instead of failing cryptically.
 
+### Fixed
+- web-status requests now present a browser User-Agent: camfrog's edge answered `HTTP 403` to the default `Python-urllib` identity, which broke every network path (login, probe, rotation). Behind the edge the server replies `captcha` to scripted password logins - surfaced honestly, never bypassed.
+- **Stop** now also drops an imported Chrome session, so a later Start cannot silently reuse it.
+
+### Added
+- **Browser login** in the web-status GUI: **Open login page** + paste the profile cookie from devtools -> **Use pasted cookie**. No closing Chrome, no export; the paste is used in memory only and probed live. This is the working live path while the server demands a CAPTCHA for password logins.
 ### Changed
 - **GUI split: one self-contained module per feature exe.** `room_control_gui.py`, `im_autoreply_gui.py`, `camfrog_music_gui.py`, `status_random_gui.py`, `status_marquee_gui.py`, `chat_im_private_gui.py` (renamed from `camfrog_private_chat_gui.py`), and `web_status_gui.py` (now includes the former `tools/web_status.py` logic) each inline the engine and clipboard helpers they need; no module imports another project module. Entry points no longer switch profiles/modes through environment variables. See `docs/gui-split.md`.
 

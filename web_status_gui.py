@@ -28,6 +28,17 @@ BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
 
 LOGIN_URL = "https://www.camfrog.com/en/login/check.php"
 
+# camfrog's edge blocks the default Python-urllib User-Agent with HTTP 403;
+# every request therefore presents a plain browser identity. No cookies or
+# credentials are added here.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+LOGIN_PAGE_URL = "https://www.camfrog.com/en/login/"
+
 # Captured 2026-10-09 from a logged-in https://profiles.camfrog.com/home.php
 # session: the profile page's hopping box POSTs {status, csrf} here, and the
 # csrf token is embedded in that same page. The path is implemented but stays
@@ -161,6 +172,34 @@ def build_plan(login, status):
             "session CSRF token, and set the status to {n} chars.".format(
                 login=login, url=LOGIN_URL, home=HOME_URL,
                 n=len(status)))
+
+
+def cookie_from_paste(text):
+    """Build a jar from a pasted `name=value` browser cookie. Value stays in memory.
+
+    This is the "log in in your browser" path: the real browser solves the
+    CAPTCHA, the user copies the profile cookie from devtools, and the tool
+    probes it (a wrong cookie simply reports a logged-out session).
+    """
+    pairs = []
+    for chunk in str(text).replace(";", " ").split():
+        if "=" in chunk:
+            key, _, value = chunk.partition("=")
+            key, value = key.strip(), value.strip()
+            if key and value:
+                pairs.append((key, value))
+    if not pairs:
+        raise ValueError(
+            "paste a cookie as name=value (copy it from the browser's "
+            "devtools: Application -> Cookies -> profiles.camfrog.com).")
+    jar = CookieJar()
+    for key, value in pairs:
+        jar.set_cookie(Cookie(
+            version=0, name=key, value=value, port=None, port_specified=False,
+            domain=".camfrog.com", domain_specified=True, domain_initial_dot=True,
+            path="/", path_specified=True, secure=True, expires=None,
+            discard=False, comment=None, comment_url=None, rest={}, rfc2109=False))
+    return jar
 
 
 def load_cookie_jar(path):
@@ -410,7 +449,8 @@ def import_chrome_jar(user_data="", domains=CHROME_DOMAINS):
 
 def fetch_profile(opener, login, timeout):
     """The signed-in landing page: session markers plus the CSRF token."""
-    request = urllib.request.Request(HOME_URL)
+    request = urllib.request.Request(HOME_URL, headers=dict(
+        BROWSER_HEADERS, Referer=HOME_URL))
     with opener.open(request, timeout=timeout) as response:
         return response.read().decode("utf-8", "replace")
 
@@ -436,7 +476,8 @@ def summarize_session(html):
 
 def _post(opener, url, fields, timeout):
     data = urllib.parse.urlencode(fields).encode("utf-8")
-    request = urllib.request.Request(url, data=data)
+    request = urllib.request.Request(url, data=data, headers=dict(
+        BROWSER_HEADERS, Referer=LOGIN_PAGE_URL))
     with opener.open(request, timeout=timeout) as response:
         return response.read().decode("utf-8", "replace").strip()
 
@@ -707,6 +748,7 @@ class WebStatusManager:
         self.switching = False
         self.rotate_job = None
         self.chrome_mode = False
+        self.cookie_paste = ""
         load_dotenv(BASE / ".env")  # pick up the encrypted account, if saved
         self.root = self.tk.Tk()
         self.root.title("Camfrog Web Status (prototype)")
@@ -777,6 +819,27 @@ class WebStatusManager:
         self.acct_state = self.ttk.Label(account, text="", foreground="#555")
         self.acct_state.pack(anchor="w", pady=(6, 0))
         self.refresh_account_state()
+
+        browser = self.ttk.LabelFrame(self.root, padding=(12, 8, 12, 8),
+                                      text="Browser login (no closing, no export)")
+        browser.pack(fill="x", padx=12, pady=(8, 0))
+        self.ttk.Label(browser, text=(
+            "Log in in your browser as usual (it solves the CAPTCHA for you), then "
+            "copy the profile cookie from devtools: F12 -> Application -> Cookies "
+            "-> profiles.camfrog.com, and paste it below. It is used in memory "
+            "only and probed live."
+        ), wraplength=520, foreground="#555").pack(anchor="w", pady=(0, 6))
+        row2 = self.ttk.Frame(browser)
+        row2.pack(fill="x")
+        self.ttk.Button(row2, text="Open login page",
+                        command=self.open_login_page).pack(side="left")
+        self.cookie_paste_var = self.tk.StringVar(value="")
+        self.ttk.Entry(row2, textvariable=self.cookie_paste_var,
+                       width=34).pack(side="left", padx=6)
+        self.ttk.Button(row2, text="Use pasted cookie",
+                        command=self.use_pasted_cookie).pack(side="left")
+        self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
+        self.paste_state.pack(anchor="w", pady=(6, 0))
 
         actions = self.ttk.Frame(self.root, padding=(12, 0, 12, 8))
         actions.pack(fill="x")
@@ -886,6 +949,32 @@ class WebStatusManager:
             messagebox.showerror("Account", message, parent=self.root)
         self.refresh_account_state()
 
+    def open_login_page(self):
+        import webbrowser
+        webbrowser.open(LOGIN_PAGE_URL)
+        self.paste_state.configure(
+            text="Login page opened in your browser. After signing in, copy the "
+                 "profile cookie and press Use pasted cookie.")
+
+    def use_pasted_cookie(self):
+        text = self.cookie_paste_var.get().strip()
+        try:
+            cookie_from_paste(text)
+        except ValueError as exc:
+            self.paste_state.configure(text=str(exc), foreground="#a00")
+            return
+        self.cookie_paste = text
+        self.paste_state.configure(
+            text="Pasted cookie ready (used in memory only).", foreground="#555")
+
+    def _session_jar(self):
+        """The cookie jar for probe/rotation: pasted cookie, Chrome, or a file."""
+        if self.cookie_paste:
+            return cookie_from_paste(self.cookie_paste)
+        if self.chrome_mode:
+            return import_chrome_jar()
+        return load_cookie_jar(self.cookies.get().strip())
+
     def preview(self):
         try:
             login, pool = self._fields()
@@ -902,15 +991,15 @@ class WebStatusManager:
         except ValueError as exc:
             self.note.set(str(exc))
             return
-        path = self.cookies.get().strip()
-        if not path:
-            self.note.set("Pick a Chrome cookies export first (Browse...).")
+        if not (self.cookies.get().strip() or self.cookie_paste):
+            self.note.set("Paste a cookie (Browser login) or pick a cookies file "
+                          "first (Browse...).")
             return
 
         def do():
             import urllib.request
 
-            jar = load_cookie_jar(path)
+            jar = self._session_jar()
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
             html = fetch_profile(opener, login, 20.0)
             _verdict, detail = summarize_session(html)
@@ -955,8 +1044,8 @@ class WebStatusManager:
             self.note.set(str(exc))
             return
         live = self.live.get()
-        if live and not (self.cookies.get().strip() or self.chrome_mode
-                         or stored_account()):
+        if live and not (self.cookies.get().strip() or self.cookie_paste
+                         or self.chrome_mode or stored_account()):
             self.note.set("Live needs a cookies file, the Chrome button (Chrome "
                           "closed), or a saved account - save one in the Account "
                           "section above.")
@@ -976,6 +1065,7 @@ class WebStatusManager:
 
     def stop(self):
         self.switching = False
+        self.chrome_mode = False  # Stop also drops an imported Chrome session
         if self.rotate_job is not None:
             try:
                 self.root.after_cancel(self.rotate_job)
@@ -994,8 +1084,7 @@ class WebStatusManager:
             self.note.set(str(exc))
             self.stop()
             return
-        cookies_path = self.cookies.get().strip()  # main thread: no Tk calls in worker
-        chrome_mode = self.chrome_mode
+        # main thread: no Tk calls in the worker; the jar is built there
 
         def do():
             if not live:
@@ -1008,7 +1097,7 @@ class WebStatusManager:
             import urllib.request
 
             try:
-                jar = import_chrome_jar() if chrome_mode else load_cookie_jar(cookies_path)
+                jar = self._session_jar()
             except (OSError, ValueError) as exc:
                 return "cycle #{0}/{1} stopped: {2}".format(index + 1, len(pool), exc)
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))

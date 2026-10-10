@@ -145,3 +145,34 @@ def test_live_rotation_uses_the_saved_account(tmp_path, monkeypatch):
     assert calls and calls[0][0] == "Seaza" and calls[0][2] == "hello world"
     assert calls[0][3] is True  # an armed live start is the confirmation
     manager.stop()
+
+
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
+def test_pasted_cookie_is_the_session_source(tmp_path, monkeypatch):
+    """The Browser-login paste feeds probe and rotation instead of a file."""
+    import tkinter
+
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    root = tk_root()
+    root.deiconify()
+    monkeypatch.setattr(tkinter, "Tk", lambda: root)
+    manager = wsg.WebStatusManager()
+    manager.root.update()
+
+    manager.cookie_paste_var.set("nonsense")
+    manager.use_pasted_cookie()
+    assert "devtools" in manager.paste_state.cget("text")
+    assert manager.cookie_paste == ""
+
+    manager.cookie_paste_var.set("cf_session=abc123")
+    manager.use_pasted_cookie()
+    assert manager.cookie_paste == "cf_session=abc123"
+    jar = manager._session_jar()
+    assert [c.name for c in jar] == ["cf_session"]
+
+    opened = []
+    monkeypatch.setattr("webbrowser.open",
+                        lambda url: opened.append(url) or True)
+    manager.open_login_page()
+    assert opened == [wsg.LOGIN_PAGE_URL]
+    assert "copy the profile cookie" in manager.paste_state.cget("text")

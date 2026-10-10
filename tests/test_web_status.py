@@ -238,6 +238,24 @@ def test_perform_update_confirmed_posts_status(monkeypatch):
                                 "csrf": "90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0"}
 
 
+def test_requests_carry_a_browser_user_agent(monkeypatch):
+    """The edge blocks Python-urllib with 403; every request must look like a browser."""
+    seen = {}
+
+    class RecordingOpener:
+        def open(self, request, timeout=None):
+            seen["headers"] = dict(request.headers)
+            return FakeResponse(b"ok")
+
+    monkeypatch.setattr(ws.urllib.request, "build_opener",
+                        lambda *a: RecordingOpener())
+    ws._post(RecordingOpener(), ws.LOGIN_URL, {"a": "b"}, 1.0)
+    ws.fetch_profile(RecordingOpener(), "Seaza", 1.0)
+    joined = " ".join(seen["headers"])  # urllib capitalizes header names
+    assert "Mozilla/5.0" in seen["headers"].get("User-agent", "") or \
+        "Mozilla/5.0" in joined
+
+
 def test_extract_csrf_from_logged_in_page():
     page = ("<html>var csrf = '90d230418b54c662c347d84f32f663e0a94fc5ab';"
             "var nick = 'Seaza';</html>")
@@ -294,6 +312,26 @@ def test_load_cookie_jar_names_the_extension_on_bad_files(tmp_path):
     with pytest.raises(ValueError) as exc:
         ws.load_cookie_jar(str(path))
     assert "Get cookies.txt LOCALLY" in str(exc.value)
+
+
+def test_cookie_from_paste_builds_a_jar():
+    jar = ws.cookie_from_paste("cf_session=abc123")
+    cookies = list(jar)
+    assert len(cookies) == 1 and cookies[0].name == "cf_session"
+    assert cookies[0].value == "abc123"
+    assert cookies[0].domain == ".camfrog.com"
+
+
+def test_cookie_from_paste_accepts_several_pairs():
+    jar = ws.cookie_from_paste("cf_session=abc; other=xyz")
+    assert sorted(c.name for c in jar) == ["cf_session", "other"]
+
+
+@pytest.mark.parametrize("bad", ["", "   ", "no-equals-sign", "=value", "name="])
+def test_cookie_from_paste_rejects_garbage(bad):
+    with pytest.raises(ValueError) as exc:
+        ws.cookie_from_paste(bad)
+    assert "devtools" in str(exc.value)
 
 
 def test_stored_account_reads_the_environment(monkeypatch):

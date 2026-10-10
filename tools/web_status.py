@@ -39,6 +39,17 @@ BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
 
 LOGIN_URL = "https://www.camfrog.com/en/login/check.php"
 
+# camfrog's edge blocks the default Python-urllib User-Agent with HTTP 403;
+# every request therefore presents a plain browser identity. No cookies or
+# credentials are added here.
+BROWSER_HEADERS = {
+    "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                   "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"),
+    "Accept": "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+}
+LOGIN_PAGE_URL = "https://www.camfrog.com/en/login/"
+
 
 # Captured 2026-10-09 from a logged-in https://profiles.camfrog.com/home.php
 # session: the profile page's hopping box POSTs {status, csrf} here, and the
@@ -173,6 +184,34 @@ def build_plan(login, status):
             "session CSRF token, and set the status to {n} chars.".format(
                 login=login, url=LOGIN_URL, home=HOME_URL,
                 n=len(status)))
+
+
+def cookie_from_paste(text):
+    """Build a jar from a pasted `name=value` browser cookie. Value stays in memory.
+
+    This is the "log in in your browser" path: the real browser solves the
+    CAPTCHA, the user copies the profile cookie from devtools, and the tool
+    probes it (a wrong cookie simply reports a logged-out session).
+    """
+    pairs = []
+    for chunk in str(text).replace(";", " ").split():
+        if "=" in chunk:
+            key, _, value = chunk.partition("=")
+            key, value = key.strip(), value.strip()
+            if key and value:
+                pairs.append((key, value))
+    if not pairs:
+        raise ValueError(
+            "paste a cookie as name=value (copy it from the browser's "
+            "devtools: Application -> Cookies -> profiles.camfrog.com).")
+    jar = CookieJar()
+    for key, value in pairs:
+        jar.set_cookie(Cookie(
+            version=0, name=key, value=value, port=None, port_specified=False,
+            domain=".camfrog.com", domain_specified=True, domain_initial_dot=True,
+            path="/", path_specified=True, secure=True, expires=None,
+            discard=False, comment=None, comment_url=None, rest={}, rfc2109=False))
+    return jar
 
 
 def load_cookie_jar(path):
@@ -422,7 +461,8 @@ def import_chrome_jar(user_data="", domains=CHROME_DOMAINS):
 
 def fetch_profile(opener, login, timeout):
     """The signed-in landing page: session markers plus the CSRF token."""
-    request = urllib.request.Request(HOME_URL)
+    request = urllib.request.Request(HOME_URL, headers=dict(
+        BROWSER_HEADERS, Referer=HOME_URL))
     with opener.open(request, timeout=timeout) as response:
         return response.read().decode("utf-8", "replace")
 
@@ -448,7 +488,8 @@ def summarize_session(html):
 
 def _post(opener, url, fields, timeout):
     data = urllib.parse.urlencode(fields).encode("utf-8")
-    request = urllib.request.Request(url, data=data)
+    request = urllib.request.Request(url, data=data, headers=dict(
+        BROWSER_HEADERS, Referer=LOGIN_PAGE_URL))
     with opener.open(request, timeout=timeout) as response:
         return response.read().decode("utf-8", "replace").strip()
 
