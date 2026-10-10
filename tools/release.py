@@ -211,7 +211,7 @@ def main(argv=None):
         pairs = (list(FEATURE_EXES.items())
                  + list(OTHER_ASSETS.items())
                  + [("line_config.json", public_config)])
-        sums_path = DIST / "release-SHA256SUMS.txt"
+        sums_path = Path(temp_dir) / "SHA256SUMS.txt"
         sums_path.write_text(flat_sums(pairs), encoding="utf-8", newline="\n")
         pairs.append(("SHA256SUMS.txt", sums_path))
         assets = [str(path) for _name, path in pairs]

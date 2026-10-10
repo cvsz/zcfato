@@ -1,6 +1,7 @@
 """Release-integrity regression tests."""
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from tools import release
@@ -98,6 +99,12 @@ def test_release_pins_tag_to_verified_commit(monkeypatch, tmp_path):
     create = next(command for command in calls if command[:3] == ["gh", "release", "create"])
     target_index = create.index("--target")
     assert create[target_index + 1] == target
+    checksum_assets = [
+        Path(asset.split("#", 1)[0]).name
+        for asset in create[4:target_index]
+        if Path(asset.split("#", 1)[0]).name.endswith("SHA256SUMS.txt")
+    ]
+    assert checksum_assets == ["SHA256SUMS.txt"]
 
 
 def test_verify_build_source_requires_clean_matching_commit(tmp_path, monkeypatch):
