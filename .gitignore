@@ -13,6 +13,7 @@ stats.json
 *.spec
 *.mp4
 status_history.json
+camfrog_status_changer_history.json
 random.db
 marquee.db
 private-chat-config.json
