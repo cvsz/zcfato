@@ -3453,7 +3453,8 @@ def build_app():
             self.root = tk.Tk()
             self.app_name = "Marquee Status"
             self.root.title(f"Camfrog {self.app_name}")
-            self.root.geometry("430x600")
+            self.root.geometry("430x650")
+            self.root.minsize(430, 650)
             self.root.resizable(True, True)
             try:
                 self.root.iconbitmap(str(BASE / "app.ico"))

@@ -818,8 +818,8 @@ class WebStatusManager:
         style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
                   foreground=[("selected", "#096c7b")])
         self.root.title("Camfrog Web Status (prototype)")
-        self.root.geometry("480x540")
-        self.root.minsize(400, 340)
+        self.root.geometry("480x680")
+        self.root.minsize(460, 660)
 
         self.ttk.Label(self.root, text=(
             "Update status via profiles.camfrog.com. Dry-run is the default; "
@@ -885,11 +885,11 @@ class WebStatusManager:
         row.pack(fill="x")
         self.ttk.Label(row, text="Nickname").pack(side="left")
         self.acct_user = self.tk.StringVar(value=(os.environ.get("CAMFROG_USER") or "").strip())
-        self.ttk.Entry(row, textvariable=self.acct_user, width=14).pack(side="left", padx=4)
+        self.ttk.Entry(row, textvariable=self.acct_user, width=12).pack(side="left", padx=4)
         self.ttk.Label(row, text="Password").pack(side="left", padx=(4, 0))
         self.acct_pw = self.tk.StringVar(value="")
         self.acct_pw_entry = self.ttk.Entry(row, textvariable=self.acct_pw,
-                                            show="\u2022", width=14)
+                                            show="\u2022", width=12)
         self.acct_pw_entry.pack(side="left", padx=4)
         self.ttk.Button(row, text="Save encrypted", command=self.save_account).pack(side="left")
         self.acct_state = self.ttk.Label(account, text="", foreground="#555")
@@ -911,7 +911,7 @@ class WebStatusManager:
                         command=self.open_login_page).pack(side="left")
         self.cookie_paste_var = self.tk.StringVar(value="")
         self.ttk.Entry(row2, textvariable=self.cookie_paste_var,
-                       width=28).pack(side="left", padx=6)
+                       width=26).pack(side="left", padx=6)
         self.ttk.Button(row2, text="Use pasted cookie",
                         command=self.use_pasted_cookie).pack(side="left")
         self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
