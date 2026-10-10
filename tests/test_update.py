@@ -7,6 +7,7 @@ import pytest
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 import camfrog_auto as ca  # noqa: E402
 
 
@@ -119,6 +120,37 @@ def test_verify_against_sums_matches_the_release_list(tmp_path, monkeypatch):
                                   target) is False
 
 
+def test_verify_accepts_dist_relative_sums(tmp_path, monkeypatch):
+    """Real releases write paths like 'room-control/room-control.exe'."""
+    import hashlib
+
+    target = tmp_path / "room-control.exe"
+    target.write_bytes(b"payload")
+    digest = hashlib.sha256(b"payload").hexdigest()
+    sums = ("{0}  im-autoreply/im-autoreply.exe\n"
+            "{0}  room-control/room-control.exe\n".format(digest)).encode()
+
+    def fake_urlopen(request, timeout=None):
+        return FakeResponse(sums)
+
+    monkeypatch.setattr(ca.urllib.request, "urlopen", fake_urlopen)
+    assert ca.verify_against_sums("https://x/sums", "room-control.exe", target) is True
+
+
+def test_verify_accepts_flat_sums(tmp_path, monkeypatch):
+    import hashlib
+
+    target = tmp_path / "room-control.exe"
+    target.write_bytes(b"payload")
+    digest = hashlib.sha256(b"payload").hexdigest()
+
+    def fake_urlopen(request, timeout=None):
+        return FakeResponse(("{0}  room-control.exe\n".format(digest)).encode())
+
+    monkeypatch.setattr(ca.urllib.request, "urlopen", fake_urlopen)
+    assert ca.verify_against_sums("https://x/sums", "room-control.exe", target) is True
+
+
 def test_download_update_streams_bytes(tmp_path, monkeypatch):
     body = b"0123456789" * 1024
 
@@ -194,3 +226,24 @@ def test_self_update_refuses_a_checksum_mismatch(tmp_path, monkeypatch):
     assert state == "failed"
     assert "checksum mismatch" in message
     assert not (exe_dir / "room-control.exe.new").exists()
+
+
+def test_run_remote_tests_targets_windows_host(monkeypatch):
+    """Windows-only tests run on 192.168.1.85 via tools/run_remote_tests.py."""
+    import run_remote_tests as rrt
+
+    assert rrt.HOST == "192.168.1.85"
+    cmd = rrt.build_command(["tests/test_web_status_gui.py", "-q"])
+    joined = " ".join(cmd)
+    assert "cvsz@192.168.1.85" in joined
+    assert "-m pytest tests/test_web_status_gui.py -q" in joined
+
+
+def test_run_remote_tests_default_is_the_gui_suite(monkeypatch):
+    import run_remote_tests as rrt
+
+    seen = []
+    monkeypatch.setattr(rrt.subprocess, "run",
+                        lambda cmd: seen.append(cmd) or type("R", (), {"returncode": 0})())
+    assert rrt.main([]) == 0
+    assert any("tests/test_web_status_gui.py" in str(c) for c in seen)

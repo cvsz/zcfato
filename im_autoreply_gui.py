@@ -4081,7 +4081,7 @@ def main(argv=None):
 # Read-only GitHub API (no token needed for public repos, stdlib only). Each
 # packaged app checks the same repo's latest release and downloads only its
 # own executable asset, verified against the release's SHA256SUMS.txt.
-APP_VERSION = "2.19.0"
+APP_VERSION = "2.19.1"
 GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
 UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
 
@@ -4186,8 +4186,14 @@ def verify_against_sums(sums_url, asset_name, local_path, timeout=30.0):
     want = ""
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) == 2 and parts[1].lstrip("*") == asset_name:
+        if len(parts) != 2:
+            continue
+        name = parts[1].lstrip("*")
+        # release sums may be flat ("room-control.exe") or dist-relative
+        # ("room-control/room-control.exe"); match either, first hit wins.
+        if name == asset_name or name.endswith("/" + asset_name):
             want = parts[0].lower()
+            break
     return bool(want) and want == _sha256_file(local_path)
 
 

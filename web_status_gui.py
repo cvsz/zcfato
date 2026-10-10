@@ -28,7 +28,7 @@ import threading
 BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
     else Path(__file__).resolve().parent.parent
 
-LOGIN_URL = "https://www.camfrog.com/en/login/check.php"
+LOGIN_URL = "https://www.camfrog.com/th/login/check.php"
 
 # camfrog's edge blocks the default Python-urllib User-Agent with HTTP 403;
 # every request therefore presents a plain browser identity. No cookies or
@@ -39,7 +39,7 @@ BROWSER_HEADERS = {
     "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.9",
 }
-LOGIN_PAGE_URL = "https://www.camfrog.com/en/login/"
+LOGIN_PAGE_URL = "https://www.camfrog.com/th/login.php"
 
 # Captured 2026-10-09 from a logged-in https://profiles.camfrog.com/home.php
 # session: the profile page's hopping box POSTs {status, csrf} here, and the
@@ -69,6 +69,24 @@ def parse_rotate_interval(raw):
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError("invalid interval: {0!r}".format(raw)) from exc
     return min(ROTATE_INTERVAL_MAX, max(ROTATE_INTERVAL_MIN, value))
+
+
+POOL_TEXT_NAME = "web_status_pool.txt"
+
+
+def default_pool_path():
+    return BASE / POOL_TEXT_NAME
+
+
+def save_pool_text(path, text):
+    """Save the status pool text (statuses only, never secrets)."""
+    Path(path).write_text(str(text), encoding="utf-8")
+    return len(str(text))
+
+
+def load_pool_text(path):
+    """Load status pool text saved by save_pool_text."""
+    return Path(path).read_text(encoding="utf-8-sig")
 
 
 def next_rotation(pool, index):
@@ -772,6 +790,12 @@ class WebStatusManager:
             row=1, column=0, sticky="nw", pady=(5, 0))
         self.pool_box = self.tk.Text(form, height=5, width=40, undo=True)
         self.pool_box.grid(row=1, column=1, sticky="ew", padx=6, pady=(5, 0))
+        pool_btns = self.ttk.Frame(form)
+        pool_btns.grid(row=1, column=2, sticky="n", pady=(5, 0))
+        self.ttk.Button(pool_btns, text="Save text...",
+                        command=self.save_pool_text).pack(fill="x")
+        self.ttk.Button(pool_btns, text="Load...",
+                        command=self.load_pool_text).pack(fill="x", pady=(4, 0))
         self.ttk.Label(form, text="Switch every").grid(row=2, column=0, sticky="w", pady=(5, 0))
         timing = self.ttk.Frame(form)
         timing.grid(row=2, column=1, sticky="w", padx=6, pady=(5, 0))
@@ -867,6 +891,40 @@ class WebStatusManager:
         if path:
             self.cookies.set(path)
             self.chrome_mode = False
+
+    def save_pool_text(self):
+        from tkinter import filedialog
+
+        path = filedialog.asksaveasfilename(
+            title="Save status pool text",
+            initialfile=POOL_TEXT_NAME,
+            defaultextension=".txt",
+            filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            save_pool_text(path, self.pool_box.get("1.0", "end-1c"))
+        except OSError as exc:
+            self.note.set("Save text failed: {0}".format(exc))
+            return
+        self.note.set("Saved pool text to {0}.".format(path))
+
+    def load_pool_text(self):
+        from tkinter import filedialog
+
+        path = filedialog.askopenfilename(
+            title="Load status pool text",
+            filetypes=[("Text", "*.txt"), ("All", "*.*")])
+        if not path:
+            return
+        try:
+            text = load_pool_text(path)
+        except OSError as exc:
+            self.note.set("Load text failed: {0}".format(exc))
+            return
+        self.pool_box.delete("1.0", "end")
+        self.pool_box.insert("1.0", text)
+        self.note.set("Loaded pool text from {0}.".format(path))
 
     def chrome_import(self):
         """Auto-import the session from Chrome's store (nothing saved to disk)."""
@@ -1125,7 +1183,7 @@ class WebStatusManager:
 # Read-only GitHub API (no token needed for public repos, stdlib only). Each
 # packaged app checks the same repo's latest release and downloads only its
 # own executable asset, verified against the release's SHA256SUMS.txt.
-APP_VERSION = "2.19.0"
+APP_VERSION = "2.19.1"
 GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
 UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
 
@@ -1230,8 +1288,14 @@ def verify_against_sums(sums_url, asset_name, local_path, timeout=30.0):
     want = ""
     for line in text.splitlines():
         parts = line.split()
-        if len(parts) == 2 and parts[1].lstrip("*") == asset_name:
+        if len(parts) != 2:
+            continue
+        name = parts[1].lstrip("*")
+        # release sums may be flat ("room-control.exe") or dist-relative
+        # ("room-control/room-control.exe"); match either, first hit wins.
+        if name == asset_name or name.endswith("/" + asset_name):
             want = parts[0].lower()
+            break
     return bool(want) and want == _sha256_file(local_path)
 
 

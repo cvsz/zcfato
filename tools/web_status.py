@@ -37,7 +37,7 @@ from pathlib import Path
 BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
     else Path(__file__).resolve().parent.parent
 
-LOGIN_URL = "https://www.camfrog.com/en/login/check.php"
+LOGIN_URL = "https://www.camfrog.com/th/login/check.php"
 
 # camfrog's edge blocks the default Python-urllib User-Agent with HTTP 403;
 # every request therefore presents a plain browser identity. No cookies or
@@ -48,7 +48,7 @@ BROWSER_HEADERS = {
     "Accept": "*/*",
     "Accept-Language": "en-US,en;q=0.9",
 }
-LOGIN_PAGE_URL = "https://www.camfrog.com/en/login/"
+LOGIN_PAGE_URL = "https://www.camfrog.com/th/login.php"
 
 
 # Captured 2026-10-09 from a logged-in https://profiles.camfrog.com/home.php

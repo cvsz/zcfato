@@ -34,7 +34,6 @@ OTHER_ASSETS = {
     "line-status-changer.exe": ROOT / "line" / "dist" / "line-status-changer.exe",
     "line_config.json": ROOT / "line" / "dist" / "line_config.json",
     "camfrog-features-windows.zip": ROOT / "camfrog-features-windows.zip",
-    "SHA256SUMS.txt": DIST / "SHA256SUMS.txt",
 }
 
 
@@ -44,6 +43,22 @@ def app_version():
     if not match:
         raise SystemExit("APP_VERSION not found in camfrog_auto.py")
     return match.group(1)
+
+
+def flat_sums(assets):
+    """SHA256SUMS.txt with flat basenames.
+
+    The dist-relative sums (room-control/room-control.exe) do not match the
+    flat asset names, and v2.19.0 clients only accept exact names, so the
+    release carries this basename form: both old and new clients verify it.
+    """
+    import hashlib
+
+    lines = []
+    for name, path in assets:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+        lines.append("{0}  {1}".format(digest, name))
+    return "\n".join(lines) + "\n"
 
 
 def release_notes(version):
@@ -80,13 +95,18 @@ def main(argv=None):
     version = app_version()
     tag = args.tag or "v{0}".format(version)
     check_assets()
-    assets = [str(path) for path in list(FEATURE_EXES.values()) + list(OTHER_ASSETS.values())]
+    pairs = list(FEATURE_EXES.items()) + list(OTHER_ASSETS.items())
+    sums_path = DIST / "release-SHA256SUMS.txt"
+    sums_path.write_text(flat_sums(pairs), encoding="utf-8", newline="\n")
+    pairs.append(("SHA256SUMS.txt", sums_path))
+    assets = [str(path) for _name, path in pairs]
+    asset_names = [name for name, _path in pairs]
     notes = release_notes(version)
 
     print("release : {0}".format(tag))
     print("title   : Camfrog feature apps {0}".format(version))
     print("notes   : {0} chars from CHANGELOG.md".format(len(notes)))
-    for name in list(FEATURE_EXES) + list(OTHER_ASSETS):
+    for name in asset_names:
         print("  asset : {0}".format(name))
     if args.dry_run:
         print("dry-run: nothing was created.")

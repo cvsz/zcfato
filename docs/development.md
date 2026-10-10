@@ -14,6 +14,13 @@
 
 6. Run project-specific formatting, linting, type checks, tests, build, and security checks before opening a pull request.
 
+Windows-only tests (tkinter GUI, DPAPI, Chrome store) skip on Linux; run them
+on the Windows host instead (default `192.168.1.85`, SSH auth required):
+
+   ```bash
+   python3 tools/run_remote_tests.py tests/test_web_status_gui.py -v
+   ```
+
 ## Quality expectations
 
 - Keep changes small and reviewable.

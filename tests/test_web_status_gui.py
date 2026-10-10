@@ -17,6 +17,25 @@ def test_any_args_mean_cli():
     assert wsg.wants_gui(["--how-to-capture"]) is False
 
 
+def test_pool_text_roundtrip(tmp_path):
+    path = tmp_path / "pool.txt"
+    text = "hello\nworld\n"
+    assert wsg.save_pool_text(path, text) == len(text)
+    assert wsg.load_pool_text(path) == text
+
+
+def test_pool_text_unicode_roundtrip(tmp_path):
+    path = tmp_path / "pool.txt"
+    text = "สวัสดี\nhello\n"
+    wsg.save_pool_text(path, text)
+    assert wsg.load_pool_text(path) == text
+
+
+def test_load_pool_text_missing_file(tmp_path):
+    with pytest.raises(OSError):
+        wsg.load_pool_text(tmp_path / "missing.txt")
+
+
 def test_cli_passthrough_calls_tool(monkeypatch, capsys):
     calls = []
     monkeypatch.setattr(wsg, "cli_main", lambda argv: calls.append(list(argv)) or 0)
