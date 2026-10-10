@@ -1843,7 +1843,7 @@ def build_app():
             self.app_name = {"random": "Random Status", "marquee": "Marquee Status"}.get(
                 STATUS_MODE, "Status Changer")
             self.root.title(f"Camfrog {self.app_name}")
-            self.root.geometry("460x650")
+            self.root.geometry("430x600")
             self.root.resizable(True, True)
             try:
                 self.root.iconbitmap(str(BASE / "app.ico"))

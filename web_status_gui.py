@@ -808,7 +808,7 @@ class WebStatusManager:
         style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
         style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
                         font=("Segoe UI", 9, "bold"))
-        style.configure("TButton", padding=(9, 6), font=("Segoe UI", 9),
+        style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
                         background="#d9e8f0", foreground="#1a3a52")
         style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
         style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
@@ -818,23 +818,23 @@ class WebStatusManager:
         style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
                   foreground=[("selected", "#096c7b")])
         self.root.title("Camfrog Web Status (prototype)")
-        self.root.geometry("560x600")
-        self.root.minsize(440, 380)
+        self.root.geometry("480x540")
+        self.root.minsize(400, 340)
 
         self.ttk.Label(self.root, text=(
             "Update status via profiles.camfrog.com. Dry-run is the default; "
             "nothing is sent unless Send live is on. Passwords and cookie values "
             "are never stored, logged, or shown."
-        ), wraplength=520).pack(fill="x", padx=12, pady=(12, 8))
+        ), wraplength=440).pack(fill="x", padx=10, pady=(8, 6))
 
-        form = self.ttk.Frame(self.root, padding=(12, 0, 12, 8))
+        form = self.ttk.Frame(self.root, padding=(10, 0, 10, 6))
         form.pack(fill="x")
         self.ttk.Label(form, text="Nickname").grid(row=0, column=0, sticky="w")
         self.login = self.tk.StringVar(value="Seaza")
         self.ttk.Entry(form, textvariable=self.login).grid(row=0, column=1, sticky="ew", padx=6)
         self.ttk.Label(form, text="Pool (one status per line)").grid(
             row=1, column=0, sticky="nw", pady=(5, 0))
-        self.pool_box = self.tk.Text(form, height=5, width=40, undo=True)
+        self.pool_box = self.tk.Text(form, height=4, width=40, undo=True)
         self.pool_box.grid(row=1, column=1, sticky="ew", padx=6, pady=(5, 0))
         pool_btns = self.ttk.Frame(form)
         pool_btns.grid(row=1, column=2, sticky="n", pady=(5, 0))
@@ -871,16 +871,16 @@ class WebStatusManager:
         self.live = self.tk.BooleanVar(value=False)
         self.ttk.Checkbutton(form, text="Send live (otherwise dry-run preview only)",
                              variable=self.live).grid(row=5, column=0, columnspan=3,
-                                                      sticky="w", pady=(8, 0))
+                                                      sticky="w", pady=(6, 0))
 
-        account = self.ttk.LabelFrame(self.root, padding=(12, 8, 12, 8),
+        account = self.ttk.LabelFrame(self.root, padding=(10, 6, 10, 6),
                                       text="Account (stored encrypted)")
-        account.pack(fill="x", padx=12, pady=(8, 0))
+        account.pack(fill="x", padx=10, pady=(6, 0))
         self.ttk.Label(account, text=(
             "Saved with Windows DPAPI: the file only decrypts under your Windows "
             "user, so a copy is useless elsewhere. The password is never written "
             "in plain text, logged, or shown."
-        ), wraplength=520, foreground="#555").pack(anchor="w", pady=(0, 6))
+        ), wraplength=440, foreground="#555").pack(anchor="w", pady=(0, 4))
         row = self.ttk.Frame(account)
         row.pack(fill="x")
         self.ttk.Label(row, text="Nickname").pack(side="left")
@@ -893,18 +893,18 @@ class WebStatusManager:
         self.acct_pw_entry.pack(side="left", padx=6)
         self.ttk.Button(row, text="Save encrypted", command=self.save_account).pack(side="left")
         self.acct_state = self.ttk.Label(account, text="", foreground="#555")
-        self.acct_state.pack(anchor="w", pady=(6, 0))
+        self.acct_state.pack(anchor="w", pady=(4, 0))
         self.refresh_account_state()
 
-        browser = self.ttk.LabelFrame(self.root, padding=(12, 8, 12, 8),
+        browser = self.ttk.LabelFrame(self.root, padding=(10, 6, 10, 6),
                                       text="Browser login (no closing, no export)")
-        browser.pack(fill="x", padx=12, pady=(8, 0))
+        browser.pack(fill="x", padx=10, pady=(6, 0))
         self.ttk.Label(browser, text=(
             "Log in in your browser as usual (it solves the CAPTCHA for you), then "
             "copy the profile cookie from devtools: F12 -> Application -> Cookies "
             "-> profiles.camfrog.com, and paste it below. It is used in memory "
             "only and probed live."
-        ), wraplength=520, foreground="#555").pack(anchor="w", pady=(0, 6))
+        ), wraplength=440, foreground="#555").pack(anchor="w", pady=(0, 4))
         row2 = self.ttk.Frame(browser)
         row2.pack(fill="x")
         self.ttk.Button(row2, text="Open login page",
@@ -915,9 +915,9 @@ class WebStatusManager:
         self.ttk.Button(row2, text="Use pasted cookie",
                         command=self.use_pasted_cookie).pack(side="left")
         self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
-        self.paste_state.pack(anchor="w", pady=(6, 0))
+        self.paste_state.pack(anchor="w", pady=(4, 0))
 
-        actions = self.ttk.Frame(self.root, padding=(12, 0, 12, 8))
+        actions = self.ttk.Frame(self.root, padding=(10, 0, 10, 6))
         actions.pack(fill="x")
         self.ttk.Button(actions, text="Preview plan", command=self.preview).pack(side="left", padx=5)
         self.ttk.Button(actions, text="Probe session", command=self.probe).pack(side="left")
@@ -930,7 +930,7 @@ class WebStatusManager:
         self.ttk.Button(actions, text="How to capture", command=self.capture).pack(side="right")
         self.note = self.tk.StringVar(value="Dry-run is on. Nothing has been sent.")
         self.ttk.Label(self.root, textvariable=self.note, anchor="w",
-                       padding=(12, 0, 12, 10), wraplength=530).pack(fill="x")
+                       padding=(10, 0, 10, 8), wraplength=450).pack(fill="x")
         self.root.after(120, self._poll)
 
     # ---- helpers
