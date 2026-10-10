@@ -144,7 +144,18 @@ def test_pid_reuse_guard(monkeypatch):
     monkeypatch.setattr(c.sys, "executable", "room-control.exe")
     assert c.pid_is_ours(1, "room-control.exe") is True
     assert c.pid_is_ours(1, r"C:\Python313\pythonw.exe") is True
-    assert c.pid_is_ours(1, "") is True        # unknown -> old behaviour
+    assert c.pid_is_ours(1, "") is False       # unknown -> fail closed
+
+
+def test_stop_does_not_force_kill_when_process_identity_changes(cfg, monkeypatch, tmp_path):
+    (tmp_path / cfg["safety"]["pid_file"]).write_text("4242")
+    monkeypatch.setattr(c, "pid_alive", lambda p: True)
+    checks = iter([True, False, False])
+    monkeypatch.setattr(c, "pid_is_ours", lambda p, image=None: next(checks, False))
+    called = []
+    monkeypatch.setattr(c.subprocess, "run", lambda *a, **k: called.append(a))
+    assert c.cmd_stop(cfg) == 0
+    assert called == []
 
 
 def test_stop_ignores_stranger_pid(cfg, monkeypatch, tmp_path):
