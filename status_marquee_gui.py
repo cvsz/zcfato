@@ -3650,16 +3650,28 @@ def build_app():
             entries.columnconfigure(1, weight=1)
 
         def _build_actions(self, parent):
-            # Keep operator actions together and in execution order.
-            for title_en, title_th, command in (
-                ("1. Discovery", "1. ค้นหา Control", self.discover),
-                ("2. Apply", "2. ใช้ทันที", self.apply_now),
-                ("3. Start", "3. เริ่ม", lambda: self.set_enabled(self.mode, True)),
-                ("4. Stop", "4. หยุด", lambda: self.set_enabled(self.mode, False)),
-            ):
-                ttk.Button(parent, text=self._tr(title_en, title_th),
-                           command=command, style="Action.TButton").pack(
-                               fill="x", pady=(0, 5))
+            """Two-column, colour-coded controls shared by Random and Marquee."""
+            actions = ttk.Frame(parent)
+            actions.pack(fill="x", pady=(2, 8))
+            actions.columnconfigure(0, weight=1, uniform="action")
+            actions.columnconfigure(1, weight=1, uniform="action")
+            for index, (title_en, title_th, command, colour, active) in enumerate((
+                ("1. Discovery", "1. ค้นหา Control", self.discover, "#1769c2", "#125397"),
+                ("2. Apply", "2. ใช้ทันที", self.apply_now, "#17682a", "#10521d"),
+                ("3. Start", "3. เริ่ม", lambda: self.set_enabled(self.mode, True), "#006d78", "#00535c"),
+                ("4. Stop", "4. หยุด", lambda: self.set_enabled(self.mode, False), "#d72d32", "#a81b22"),
+            )):
+                button = tk.Button(
+                    actions, text=self._tr(title_en, title_th), command=command,
+                    font=("Segoe UI", 10, "bold"), bg=colour, fg="#ffffff",
+                    activebackground=active, activeforeground="#ffffff",
+                    relief="flat", bd=0, padx=5, pady=10,
+                    cursor="hand2", highlightthickness=2, highlightbackground="#d5dbe0",
+                    highlightcolor="#102b45", takefocus=True,
+                )
+                button.grid(row=index // 2, column=index % 2,
+                            padx=(0, 4) if index % 2 == 0 else (4, 0),
+                            pady=(0, 7), sticky="ew")
             ttk.Button(parent, text=self._tr("Check for updates", "ตรวจอัปเดต"),
                        command=self.check_update).pack(fill="x", pady=(0, 5))
             ttk.Label(parent, text=self._tr(
