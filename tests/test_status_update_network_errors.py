@@ -85,7 +85,8 @@ def test_manual_update_worker_handles_rate_limit(module_name, monkeypatch):
                   if isinstance(node, ast.FunctionDef) and node.name == "check_update")
     namespace = {}
     exec(compile(ast.Module(body=[method], type_ignores=[]), "<isolated-method>", "exec"), 
-         {"threading": module.threading, "self_update": module.self_update}, namespace)
+         {"threading": module.threading, "self_update": module.self_update,
+          "logging": module.logging}, namespace)
     namespace["check_update"](FakeWindow())
     state, message = result.get_nowait()
     assert state == "failed"
