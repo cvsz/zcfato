@@ -3453,8 +3453,8 @@ def build_app():
             self.root = tk.Tk()
             self.app_name = "Random Status"
             self.root.title(f"Camfrog {self.app_name}")
-            self.root.geometry("430x650")
-            self.root.minsize(430, 650)
+            self.root.geometry("430x610")
+            self.root.minsize(420, 600)
             self.root.resizable(True, True)
             try:
                 self.root.iconbitmap(str(BASE / "app.ico"))
@@ -3601,7 +3601,7 @@ def build_app():
             self.pages = {}
             available_modes = (("Random Status", "random"),)
             for name, mode in available_modes:
-                page = ttk.Frame(self.tabs, padding=10)
+                page = ttk.Frame(self.tabs, padding=8)
                 self.tabs.add(page, text=name)
                 self.pages[mode] = page
                 self._build_page(page, mode)
@@ -3650,9 +3650,9 @@ def build_app():
             for index, var in enumerate(self._fields_for_mode(mode)):
                 ttk.Label(entries, text=f"{index + 1:02d}", width=3,
                           background="#f4f7f7", foreground="#53636d").grid(
-                    row=index, column=0, sticky="w", pady=3, padx=(4, 8))
+                    row=index, column=0, sticky="w", pady=1, padx=(4, 8))
                 entry = ttk.Entry(entries, textvariable=var, style="Entry.TEntry")
-                entry.grid(row=index, column=1, sticky="ew", pady=3, padx=(0, 4))
+                entry.grid(row=index, column=1, sticky="ew", pady=1, padx=(0, 4))
                 self.entry_widgets[mode].append((entry, var))
             entries.columnconfigure(1, weight=1)
 
@@ -3660,8 +3660,8 @@ def build_app():
             """Two-column, colour-coded controls shared by Random and Marquee."""
             actions = ttk.Frame(parent)
             actions.pack(fill="x", pady=(2, 8))
-            actions.columnconfigure(0, weight=1, uniform="action")
-            actions.columnconfigure(1, weight=1, uniform="action")
+            for col in range(4):
+                actions.columnconfigure(col, weight=1, uniform="action")
             for index, (title_en, title_th, command, colour, active) in enumerate((
                 ("1. Discovery", "1. ค้นหา Control", self.discover, "#1769c2", "#125397"),
                 ("2. Apply", "2. ใช้ทันที", self.apply_now, "#17682a", "#10521d"),
@@ -3672,13 +3672,13 @@ def build_app():
                     actions, text=self._tr(title_en, title_th), command=command,
                     font=("Segoe UI", 10, "bold"), bg=colour, fg="#ffffff",
                     activebackground=active, activeforeground="#ffffff",
-                    relief="flat", bd=0, padx=5, pady=10,
+                    relief="flat", bd=0, padx=5, pady=6,
                     cursor="hand2", highlightthickness=2, highlightbackground="#d5dbe0",
                     highlightcolor="#102b45", takefocus=True,
                 )
-                button.grid(row=index // 2, column=index % 2,
-                            padx=(0, 4) if index % 2 == 0 else (4, 0),
-                            pady=(0, 7), sticky="ew")
+                button.grid(row=0, column=index,
+                            padx=(0, 4) if index < 3 else (0, 0),
+                            pady=(0, 4), sticky="ew")
             ttk.Button(parent, text=self._tr("Check for updates", "ตรวจอัปเดต"),
                        command=self.check_update).pack(fill="x", pady=(0, 5))
             ttk.Label(parent, text=self._tr(

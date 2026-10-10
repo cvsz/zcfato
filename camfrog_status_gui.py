@@ -2025,7 +2025,7 @@ def build_app():
                     (("Random Status", "random"),) if STATUS_MODE == "random" else
                     (("Marquee Status", "marquee"),))
             for name, mode in available_modes:
-                page = ttk.Frame(self.tabs, padding=10)
+                page = ttk.Frame(self.tabs, padding=8)
                 self.tabs.add(page, text=name)
                 self.pages[mode] = page
                 self._build_page(page, mode)
@@ -2101,9 +2101,9 @@ def build_app():
             for index, var in enumerate(self._fields_for_mode(mode)):
                 ttk.Label(entries, text=f"{index + 1:02d}", width=3,
                           background="#f4f7f7", foreground="#53636d").grid(
-                    row=index, column=0, sticky="w", pady=3, padx=(4, 8))
+                    row=index, column=0, sticky="w", pady=1, padx=(4, 8))
                 entry = ttk.Entry(entries, textvariable=var, style="Entry.TEntry")
-                entry.grid(row=index, column=1, sticky="ew", pady=3, padx=(0, 4))
+                entry.grid(row=index, column=1, sticky="ew", pady=1, padx=(0, 4))
                 self.entry_widgets[mode].append((entry, var))
             entries.columnconfigure(1, weight=1)
 
