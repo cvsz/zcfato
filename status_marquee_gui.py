@@ -3650,20 +3650,16 @@ def build_app():
             entries.columnconfigure(1, weight=1)
 
         def _build_actions(self, parent):
-            ttk.Button(parent, text=self._tr("Apply Now", "ใช้ทันที"),
-                       command=self.apply_now).pack(fill="x", pady=(0, 5))
-            actions = ttk.Frame(parent)
-            actions.pack(fill="x", pady=(0, 6))
-            ttk.Button(actions, text=self._tr("Start", "เริ่ม"),
-                        style="Action.TButton",
-                        command=lambda: self.set_enabled(self.mode, True)).pack(
-                            side="left", fill="x", expand=True, padx=(0, 3))
-            ttk.Button(actions, text=self._tr("Stop", "หยุด"),
-                        style="Action.TButton",
-                        command=lambda: self.set_enabled(self.mode, False)).pack(
-                            side="left", fill="x", expand=True, padx=(3, 0))
-            ttk.Button(parent, text=self._tr("Discover controls", "ดึง control"),
-                       command=self.discover).pack(fill="x", pady=(0, 5))
+            # Keep operator actions together and in execution order.
+            for title_en, title_th, command in (
+                ("1. Discovery", "1. ค้นหา Control", self.discover),
+                ("2. Apply", "2. ใช้ทันที", self.apply_now),
+                ("3. Start", "3. เริ่ม", lambda: self.set_enabled(self.mode, True)),
+                ("4. Stop", "4. หยุด", lambda: self.set_enabled(self.mode, False)),
+            ):
+                ttk.Button(parent, text=self._tr(title_en, title_th),
+                           command=command, style="Action.TButton").pack(
+                               fill="x", pady=(0, 5))
             ttk.Button(parent, text=self._tr("Check for updates", "ตรวจอัปเดต"),
                        command=self.check_update).pack(fill="x", pady=(0, 5))
             ttk.Label(parent, text=self._tr(
@@ -3768,6 +3764,8 @@ def build_app():
 
         def apply_now(self):
             """Immediately apply the selected or first configured status to Camfrog."""
+            if self.busy:
+                return
             config = self.save_settings()
             if config is None:
                 return
@@ -3817,6 +3815,11 @@ def build_app():
         def discover(self):
             """Scan the running Camfrog window for status/room controls and write the
             detected selectors into this app's config (apply=True)."""
+            if self.busy:
+                return
+            # Persist current operator edits before discovery rewrites selectors.
+            if self.save_settings() is None:
+                return
             def do():
                 cfg = load_cfg(self.config_path)
                 rc = cmd_detect(cfg, self.config_path, apply=True)
@@ -3826,26 +3829,38 @@ def build_app():
             self.run_task(do, self._tr("Controls discovered", "ดึง control แล้ว"))
 
         def set_enabled(self, mode, enabled):
-            config = self.save_settings(enabled=enabled, mode=mode)
-            if config is None:
+            if self.busy:
                 return
             self.mode = mode
-            runtime = runtime_config(config)
-            worker_pid = running_pid(runtime)
-            if enabled:
-                if worker_pid:
-                    self.note.configure(text=self._tr("Status worker is already running.",
-                                                      "ตัวเปลี่ยนสถานะกำลังทำงานอยู่"),
-                                         foreground="#138a55")
+            if not enabled:
+                # Stop is an emergency/operator action: do not validate or save
+                # unsaved form data first. Invalid input must never block Stop.
+                try:
+                    config = load_cfg(self.config_path)
+                    runtime = runtime_config(config)
+                    worker_pid = running_pid(runtime)
+                except (OSError, sqlite3.Error, ValueError, KeyError) as exc:
+                    self.note.configure(text=str(exc), foreground="#a52834")
                     return
-                self._start_worker(config)
-            else:
                 if worker_pid:
                     self.run_task(lambda: self._stop_worker(runtime),
                                   self._tr("Status worker stopped.", "หยุดตัวเปลี่ยนสถานะแล้ว"))
                 else:
-                    self.note.configure(text=self._tr("Status rotation disabled.",
-                                                      "ปิดการเปลี่ยนสถานะแล้ว"), foreground="#53636d")
+                    self.note.configure(text=self._tr("Status rotation is not running.",
+                                                      "ไม่ได้เปิดการเปลี่ยนสถานะอยู่"),
+                                        foreground="#53636d")
+                return
+
+            config = self.save_settings(enabled=True, mode=mode)
+            if config is None:
+                return
+            runtime = runtime_config(config)
+            if running_pid(runtime):
+                self.note.configure(text=self._tr("Status worker is already running.",
+                                                  "ตัวเปลี่ยนสถานะกำลังทำงานอยู่"),
+                                    foreground="#138a55")
+                return
+            self._start_worker(config)
 
         def _start_worker(self, config):
             runtime = runtime_config(config)
