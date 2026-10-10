@@ -839,7 +839,7 @@ class WebStatusManager:
         self.ttk.Label(form, text="Nickname").grid(row=0, column=0, sticky="w")
         self.login = self.tk.StringVar(value="Seaza")
         self.ttk.Entry(form, textvariable=self.login).grid(row=0, column=1, sticky="ew", padx=6)
-        self.ttk.Label(form, text="Pool (one status per line)").grid(
+        self.ttk.Label(form, text="Pool").grid(
             row=1, column=0, sticky="nw", pady=(5, 0))
         self.pool_box = self.tk.Text(form, height=4, width=40, undo=True)
         self.pool_box.grid(row=1, column=1, sticky="ew", padx=6, pady=(5, 0))
@@ -863,21 +863,22 @@ class WebStatusManager:
         self.ttk.Label(timing, text="s").pack(side="left")
         self.ttk.Label(form, text="Cookies file").grid(row=3, column=0, sticky="w", pady=(5, 0))
         self.cookies = self.tk.StringVar(value=cookies_default)
-        self.ttk.Entry(form, textvariable=self.cookies).grid(row=3, column=1, sticky="ew", padx=6, pady=(5, 0))
-        self.ttk.Button(form, text="Browse...", command=self.browse).grid(
-            row=3, column=2, sticky="w", pady=(5, 0))
-        self.ttk.Button(form, text="Chrome", command=self.chrome_import).grid(
-            row=3, column=3, sticky="w", pady=(5, 0))
-        self.ttk.Label(form, text="Password (used once, cleared immediately)").grid(
-            row=4, column=0, sticky="w", pady=(5, 0))
+        self.ttk.Entry(form, textvariable=self.cookies).grid(row=3, column=1, columnspan=2,
+                                                             sticky="ew", padx=6, pady=(5, 0))
+        cookie_btns = self.ttk.Frame(form)
+        cookie_btns.grid(row=4, column=1, columnspan=2, sticky="w", padx=6)
+        self.ttk.Button(cookie_btns, text="Browse...", command=self.browse).pack(side="left")
+        self.ttk.Button(cookie_btns, text="Chrome", command=self.chrome_import).pack(side="left", padx=(6, 0))
+        self.ttk.Label(form, text="Password").grid(
+            row=5, column=0, sticky="w", pady=(5, 0))
         self.password = self.tk.StringVar(value="")
         self.pw_entry = self.ttk.Entry(form, textvariable=self.password, show="\u2022")
-        self.pw_entry.grid(row=4, column=1, sticky="ew", padx=6, pady=(5, 0))
+        self.pw_entry.grid(row=5, column=1, columnspan=2, sticky="ew", padx=6, pady=(5, 0))
         form.columnconfigure(1, weight=1)
 
         self.live = self.tk.BooleanVar(value=False)
         self.ttk.Checkbutton(form, text="Send live (otherwise dry-run preview only)",
-                             variable=self.live).grid(row=5, column=0, columnspan=3,
+                             variable=self.live).grid(row=6, column=0, columnspan=3,
                                                       sticky="w", pady=(6, 0))
 
         account = self.ttk.LabelFrame(session_tab, padding=(10, 6, 10, 6),
