@@ -4183,7 +4183,7 @@ def github_latest_release(timeout=15.0):
     if not tag:
         return None
     assets = {}
-    entries = data.get("assets") or []
+    entries = data.get("assets", [])
     if not isinstance(entries, list):
         raise ValueError("invalid GitHub release assets")
     for asset in entries:
