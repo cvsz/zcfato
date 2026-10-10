@@ -818,8 +818,8 @@ class WebStatusManager:
         style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
                   foreground=[("selected", "#096c7b")])
         self.root.title("Camfrog Web Status (prototype)")
-        self.root.geometry("480x680")
-        self.root.minsize(460, 660)
+        self.root.geometry("480x510")
+        self.root.minsize(440, 490)
 
         self.ttk.Label(self.root, text=(
             "Update status via profiles.camfrog.com. Dry-run is the default; "
@@ -827,7 +827,14 @@ class WebStatusManager:
             "are never stored, logged, or shown."
         ), wraplength=440).pack(fill="x", padx=10, pady=(8, 6))
 
-        form = self.ttk.Frame(self.root, padding=(10, 0, 10, 6))
+        self.nb = self.ttk.Notebook(self.root)
+        self.nb.pack(fill="both", expand=True, padx=10)
+        setup_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
+        session_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
+        self.nb.add(setup_tab, text="Setup")
+        self.nb.add(session_tab, text="Account & Session")
+
+        form = self.ttk.Frame(setup_tab)
         form.pack(fill="x")
         self.ttk.Label(form, text="Nickname").grid(row=0, column=0, sticky="w")
         self.login = self.tk.StringVar(value="Seaza")
@@ -873,9 +880,9 @@ class WebStatusManager:
                              variable=self.live).grid(row=5, column=0, columnspan=3,
                                                       sticky="w", pady=(6, 0))
 
-        account = self.ttk.LabelFrame(self.root, padding=(10, 6, 10, 6),
+        account = self.ttk.LabelFrame(session_tab, padding=(10, 6, 10, 6),
                                       text="Account (stored encrypted)")
-        account.pack(fill="x", padx=10, pady=(6, 0))
+        account.pack(fill="x", pady=(0, 6))
         self.ttk.Label(account, text=(
             "Saved with Windows DPAPI: the file only decrypts under your Windows "
             "user, so a copy is useless elsewhere. The password is never written "
@@ -896,9 +903,9 @@ class WebStatusManager:
         self.acct_state.pack(anchor="w", pady=(4, 0))
         self.refresh_account_state()
 
-        browser = self.ttk.LabelFrame(self.root, padding=(10, 6, 10, 6),
+        browser = self.ttk.LabelFrame(session_tab, padding=(10, 6, 10, 6),
                                       text="Browser login (no closing, no export)")
-        browser.pack(fill="x", padx=10, pady=(6, 0))
+        browser.pack(fill="x")
         self.ttk.Label(browser, text=(
             "Log in in your browser as usual (it solves the CAPTCHA for you), then "
             "copy the profile cookie from devtools: F12 -> Application -> Cookies "
