@@ -628,3 +628,13 @@ def test_live_update_requires_verified_session_before_post(monkeypatch):
     code, message = ws.live_update("Seaza", "password", "hello", 1.0, confirm=True)
     assert code == ws.EXIT_BLOCKED
     assert "not confirmed signed in" in message
+
+
+def test_unverified_session_explains_confirmation_and_blocks_post(monkeypatch):
+    monkeypatch.setattr(ws, "attempt_login", lambda *a: "https://profiles.camfrog.com/en/")
+    monkeypatch.setattr(ws, "fetch_profile", lambda *a: "<title>Camfrog</title>")
+    monkeypatch.setattr(ws, "perform_update", lambda *a, **kw: (_ for _ in ()).throw(AssertionError("must not POST")))
+    code, message = ws.live_update("test", "secret", "hi", 1.0, confirm=False)
+    assert code == ws.EXIT_BLOCKED
+    assert "not confirmed signed in" in message
+    assert "--confirm-update" in message
