@@ -11,6 +11,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Web Status now has an Activity Log tab and a rotating `web_status.log` containing allowlisted activity only; it never records status text or session cookies.
 - Web Status can scroll each populated status slot in 5-second frames. **Infinity Loop** starts at slot 1 again after the last populated slot; turn it off to stop after one pass.
 
+### Fixed
+- The feature build now removes a stale root-level `dist/web-status.exe` from standalone PyInstaller builds before checking the expected executable set.
+
 ## [2.19.2] - 2026-10-11
 
 ### Added

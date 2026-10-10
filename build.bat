@@ -168,6 +168,7 @@ if exist "dist\status-marquee\status-marquee.exe" del /q "dist\status-marquee\st
 if exist "dist\im-autoreply\im-autoreply.exe" del /q "dist\im-autoreply\im-autoreply.exe"
 if exist "dist\music-dj\music-dj.exe" del /q "dist\music-dj\music-dj.exe"
 if exist "dist\web-status\web-status.exe" del /q "dist\web-status\web-status.exe"
+if exist "dist\web-status.exe" del /q "dist\web-status.exe"
 if exist "dist\camfrog-auto.exe" del /q "dist\camfrog-auto.exe"
 if exist "dist\camfrog-auto-gui.exe" del /q "dist\camfrog-auto-gui.exe"
 if exist "dist\zcfato.exe" del /q "dist\zcfato.exe"
