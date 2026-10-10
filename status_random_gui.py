@@ -3559,7 +3559,7 @@ def build_app():
             style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
             style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
                             font=("Segoe UI", 9, "bold"))
-            style.configure("TButton", padding=(9, 6), font=("Segoe UI", 9),
+            style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
                             background="#d9e8f0", foreground="#1a3a52")
             style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
             style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
@@ -3575,7 +3575,7 @@ def build_app():
             style.configure("Hint.TLabel", font=("Segoe UI", 8), foreground="#53636d")
             style.configure("Mode.TNotebook", tabmargins=(0, 5, 0, 0))
             style.configure("Mode.TNotebook.Tab", padding=(12, 7), font=("Segoe UI", 9, "bold"))
-            style.configure("Action.TButton", padding=(10, 7), font=("Segoe UI", 9, "bold"))
+            style.configure("Action.TButton", padding=(8, 5), font=("Segoe UI", 9, "bold"))
             style.configure("Card.TFrame", background="#ffffff", padding=(2, 2))
             style.configure("Entry.TEntry", padding=(2, 2))
             outer = ttk.Frame(root, padding=(12, 10, 12, 10))

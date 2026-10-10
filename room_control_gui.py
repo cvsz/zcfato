@@ -3352,7 +3352,7 @@ def build_app():
             style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
             style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
                             font=("Segoe UI", 9, "bold"))
-            style.configure("TButton", padding=(9, 6), font=("Segoe UI", 9),
+            style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
                             background="#d9e8f0", foreground="#1a3a52")
             style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
             style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
