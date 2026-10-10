@@ -196,3 +196,37 @@ def test_status_gui_smoke_single_mode(name, tmp_path, monkeypatch):
     assert collected["status"]["messages"]  # pools seeded, not lost
     assert collected["status"]["random"] is (name == "status_random_gui")
     assert collected["status"]["marquee"]["enabled"] is (name == "status_marquee_gui")
+
+
+def test_marquee_runner_scrolls_frames_and_rotates_lines(monkeypatch):
+    """Live-path regression: scrolled lines advance frame-by-frame then rotate.
+
+    The engine was once suspected of not scrolling; this drives the real
+    Runner.do_status with a fake clock and asserts frames move and lines
+    rotate 1->2.
+    """
+    import status_marquee_gui as m
+
+    cfg = copy.deepcopy(m.DEFAULTS)
+    cfg["dry_run"] = True
+    cfg["status"]["enabled"] = True
+    cfg["status"]["messages"] = ["AAA line one here", "BBB line two here"]
+    cfg["status"]["interval_seconds"] = 0.3
+    cfg["status"]["history"]["enabled"] = False
+    cfg["status"]["marquee"].update(enabled=True, scroll=True, width=10, stride=2,
+                                    step_seconds=0.3, cycles=1, max_frames=80)
+    assert m.validate(cfg)[0] == []
+    r = m.Runner(cfg)
+    r.status_edit, r.apply_btn, r.win = object(), None, object()
+    sent = []
+    monkeypatch.setattr(r, "send", lambda ctrl, text, btn=None, win=None:
+                        sent.append(text) or True)
+    clock = [0.0]
+    monkeypatch.setattr(m.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(m.time, "sleep", lambda s: None)
+    for _ in range(400):
+        clock[0] += 0.1
+        r.do_status(clock[0])
+    assert len(sent) > 10, "frames never advanced"
+    assert len({s[:3] for s in sent}) > 1, "lines never rotated"
+    assert r.stats.get("statuses", 0) >= 2
