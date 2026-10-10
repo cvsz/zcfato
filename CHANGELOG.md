@@ -5,7 +5,10 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.19.1] - 2026-10-10
+## [2.19.1] - 2026-10-10 (assets refreshed same day)
+
+### Fixed
+- **Self-update sums lookup.** The flat sums published as `release-SHA256SUMS.txt` while the updater looked up only `SHA256SUMS.txt`, so the lookup missed and every update was refused. The updater now falls back to any `*SHA256SUMS.txt` release asset. (The dist-relative vs flat path mismatch from this morning is covered by the both-forms matcher.)
 
 ### Fixed
 - **Self-update checksum verification.** The published `SHA256SUMS.txt` lists dist-relative paths (`room-control/room-control.exe`) while the verifier matched only bare asset names, so every real update was refused as a checksum mismatch. The verifier now accepts both forms, and `tools/release.py` publishes an additional flat-basename `SHA256SUMS.txt` so already-installed 2.19.0 apps can still verify the next release.

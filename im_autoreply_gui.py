@@ -4132,7 +4132,11 @@ def check_release_assets(asset_name, timeout=15.0):
     tag, notes, assets = release
     url = assets.get(asset_name)
     if url and version_newer(tag):
-        return tag, url, assets.get(UPDATE_ASSET_SUMS, ""), notes
+        sums_url = assets.get(UPDATE_ASSET_SUMS, "")
+        if not sums_url:  # e.g. release-SHA256SUMS.txt alongside SHA256SUMS.txt
+            sums_url = next((u for n, u in sorted(assets.items())
+                             if n.endswith("SHA256SUMS.txt")), "")
+        return tag, url, sums_url, notes
     return None
 
 

@@ -151,6 +151,20 @@ def test_verify_accepts_flat_sums(tmp_path, monkeypatch):
     assert ca.verify_against_sums("https://x/sums", "room-control.exe", target) is True
 
 
+def test_sums_lookup_falls_back_to_prefixed_sums_file(monkeypatch):
+    """v2.19.1 published the flat sums as release-SHA256SUMS.txt."""
+    payload = dict(RELEASE, assets=[
+        {"name": "room-control.exe",
+         "browser_download_url": "https://example.test/room-control.exe"},
+        {"name": "release-SHA256SUMS.txt",
+         "browser_download_url": "https://example.test/release-SHA256SUMS.txt"},
+    ])
+    _fake_github(monkeypatch, payload)
+    tag, url, sums, notes = ca.check_release_assets("room-control.exe")
+    assert tag == "2.20.0"
+    assert sums == "https://example.test/release-SHA256SUMS.txt"
+
+
 def test_download_update_streams_bytes(tmp_path, monkeypatch):
     body = b"0123456789" * 1024
 
