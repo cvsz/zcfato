@@ -10,6 +10,10 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import base64
+import random
+import socket
+import time
 import urllib.parse
 import urllib.request
 from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
@@ -891,8 +895,8 @@ class WebStatusManager:
                        width=18).pack(side="left", padx=6)
         self.ttk.Button(row2, text="Use PHPSESSID",
                         command=self.use_pasted_cookie).pack(side="left")
-        self.ttk.Button(row2, text="Login",
-                        command=self.login_session).pack(side="left", padx=(6, 0))
+        self.ttk.Button(row2, text="Login in browser",
+                        command=self.login_via_browser).pack(side="left", padx=(6, 0))
         self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
         self.paste_state.pack(anchor="w", pady=(4, 0))
 
@@ -1052,25 +1056,45 @@ class WebStatusManager:
 
         self._run_bg(do, force=True, on_done=on_done)
 
+    def login_via_browser(self):
+        """One-click login: the real browser solves the CAPTCHA and the
+        HttpOnly session cookie comes back through DevTools."""
+        if find_browser() is None:
+            self.note.set("No Chrome or Edge found on this computer.")
+            return
+        self.note.set("Browser opened - sign in there; this window confirms by itself.")
+
+        def work():
+            cookies, _profile = browser_login(
+                on_status=lambda text: self.root.after(
+                    0, lambda: self.note.set(text)))
+            self.root.after(0, lambda: self._browser_login_done(cookies))
+            return "done"
+
+        self._run_bg(work, force=True)
+
+    def _browser_login_done(self, cookies):
+        try:
+            cookie_from_paste(cookies)  # validate before adopting
+        except ValueError as exc:
+            self.note.set(str(exc))
+            return
+        self.cookie_paste = cookies
+        self.paste_state.configure(text="Session captured from browser.",
+                                   foreground="#555")
+        self._verify_session(self._login_name(),
+                             self._timeout_value() or 20.0, self._on_logged_in)
+
     def login_session(self):
-        """Single login: verify the PHPSESSID session live, arm automation on success."""
+        """Verify the captured session live, arm automation on success."""
         try:
             login = self._login_name()
         except ValueError as exc:
             self.note.set(str(exc))
             return
         if not self.cookie_paste:
-            text = self.cookie_paste_var.get().strip()
-            if text:
-                try:
-                    cookie_from_paste(text)
-                    self.cookie_paste = text
-                except ValueError as exc:
-                    self.note.set(str(exc))
-                    return
-            else:
-                self.note.set("Paste PHPSESSID first (Session tab) - then Login.")
-                return
+            self.note.set("Use Login in browser or paste a cookie first.")
+            return
         timeout = self._timeout_value()
         if timeout is None:
             return
@@ -1147,11 +1171,12 @@ class WebStatusManager:
             self.note.set(str(exc))
             return
         live = self.live.get()
-        if live and not (self.cookie_paste or self.cookie_paste_var.get().strip()):
-            self.note.set("Live needs PHPSESSID - paste it in Session tab and press Login.")
-            return
         if live and not self.cookie_paste:
             self.cookie_paste = self.cookie_paste_var.get().strip()
+        if live and not (self.cookie_paste or self.cookies.get().strip() or self.chrome_mode):
+            self.note.set("Live needs a session: use Login in browser, paste a "
+                          "cookie, pick a cookies file, or press Chrome.")
+            return
         if live and not getattr(self, "session_ready", False):
             # Single login: verify the session first, then chain into rotation.
             self._pending = (login, pool, interval, timeout)
