@@ -77,6 +77,8 @@ Status: login flow mapped; the status-update endpoint was captured from a logged
 
 - No args opens the GUI; any args use the CLI (`web-status.exe --login Seaza --status "..."`). Dry-run is default — no network at all.
 - In Setup, enter up to ten statuses in the numbered single-line fields. **Save to webtext.db** saves each slot beside the app; **Start** also saves the current values and rotates through non-empty slots every N seconds.
+- Turn on **Marquee** to scroll each status one frame every 10 seconds, then move to the next populated slot. **Infinity Loop** is on by default; after the last populated slot it starts again at slot 1. Turn it off to stop after one pass. With Marquee off, the existing **Switch every** rotation remains in effect.
+- **Activity Log** shows and appends fixed activity events to `web_status.log` beside the app. It does not record status text, passwords, or cookies.
 - In **Account & Session**, press **Open login page**, sign in in your browser, then copy `PHPSESSID=...` from the `profiles.camfrog.com/home.php` request in DevTools and paste it into the session field. Press **Login** to verify the current cookie; a signed-in result arms automation. The cookie stays in memory only.
 - With **Send live** enabled, **Start** verifies the current cookie if Login has not already armed the session, asks for confirmation, and begins rotation. **Stop** cancels the loop and disarms the session, so the next Start verifies again. Dry-run remains the default.
 - CLI password login can be blocked by CAPTCHA; the tool does not bypass it. For CLI use, `--probe` is read-only and `--cookies-file` accepts a Netscape cookie export. Never paste passwords or cookie values into chat, issues, or files.

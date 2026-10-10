@@ -1,5 +1,6 @@
 """Camfrog web status updater - self-contained (updater logic + GUI inlined, no shared imports)."""
 import argparse
+import datetime
 import getpass
 import hashlib
 import json
@@ -20,6 +21,7 @@ from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
 from pathlib import Path
 import queue
 import threading
+import unicodedata
 
 
 # ============================================================
@@ -59,6 +61,127 @@ EXIT_BLOCKED = 3
 ROTATE_INTERVAL_MIN = 30
 ROTATE_INTERVAL_DEFAULT = 300
 ROTATE_INTERVAL_MAX = 86400
+
+WEB_MARQUEE_STEP_SECONDS = 10
+WEB_MARQUEE_WIDTH = 28
+WEB_MARQUEE_STRIDE = 2
+WEB_MARQUEE_SEPARATOR = "   \u2022   "
+WEB_MARQUEE_MAX_FRAMES = 80
+
+WEB_STATUS_LOG_NAME = "web_status.log"
+WEB_STATUS_LOG_MAX_BYTES = 512 * 1024
+WEB_STATUS_LOG_BACKUPS = 3
+WEB_STATUS_LOG_GUI_LINES = 200
+WEB_STATUS_LOG_EVENTS = {
+    "session_verification_started": "Session verification started",
+    "session_verification_succeeded": "Session verification succeeded",
+    "session_verification_failed": "Session verification failed",
+    "browser_login_started": "Browser login started",
+    "browser_session_captured": "Browser session captured",
+    "status_lines_saved": "Status lines saved",
+    "dry_run_rotation_started": "Dry-run rotation started",
+    "live_rotation_started": "Live rotation started",
+    "marquee_completed": "Marquee completed all populated slots",
+    "status_previewed": "Dry-run status previewed",
+    "status_update_succeeded": "Live status update succeeded",
+    "status_update_failed": "Live status update failed",
+    "rotation_stopped": "Rotation stopped",
+}
+_WEB_STATUS_LOG_LOCK = threading.Lock()
+
+
+def web_status_log_path():
+    return BASE / WEB_STATUS_LOG_NAME
+
+
+def _web_status_log_entry(event, now=None):
+    try:
+        label = WEB_STATUS_LOG_EVENTS[event]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("unknown activity") from exc
+    timestamp = now or datetime.datetime.now().astimezone()
+    return "{0:%Y-%m-%d %H:%M:%S %z} | {1}".format(timestamp, label)
+
+
+def load_web_status_log(path=None):
+    """Load only the bounded, most recent activity lines for the GUI."""
+    log_path = Path(path) if path is not None else web_status_log_path()
+    if not log_path.exists():
+        return []
+    with log_path.open("r", encoding="utf-8", errors="replace") as stream:
+        return [line.rstrip("\r\n") for line in stream.readlines()[-WEB_STATUS_LOG_GUI_LINES:]
+                if line.strip()]
+
+
+def append_web_status_log(event, path=None, now=None):
+    """Append one allowlisted event; callers cannot add status or session data."""
+    entry = _web_status_log_entry(event, now)
+    log_path = Path(path) if path is not None else web_status_log_path()
+    encoded = (entry + "\n").encode("utf-8")
+    with _WEB_STATUS_LOG_LOCK:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current_size = log_path.stat().st_size
+        except FileNotFoundError:
+            current_size = 0
+        if current_size and current_size + len(encoded) > WEB_STATUS_LOG_MAX_BYTES:
+            for backup in range(WEB_STATUS_LOG_BACKUPS, 1, -1):
+                source = Path(str(log_path) + ".{0}".format(backup - 1))
+                target = Path(str(log_path) + ".{0}".format(backup))
+                if source.exists():
+                    os.replace(source, target)
+            os.replace(log_path, Path(str(log_path) + ".1"))
+        with log_path.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(entry + "\n")
+    return entry
+
+
+_WEB_MARQUEE_LEAD_VOWELS = set("\u0e40\u0e41\u0e42\u0e43\u0e44")
+
+
+def _web_status_clusters(text):
+    """Keep Thai marks, emoji modifiers, and leading vowels with their base."""
+    out, prefix = [], ""
+    for char in text:
+        if char in _WEB_MARQUEE_LEAD_VOWELS:
+            prefix += char
+            continue
+        attach = (unicodedata.category(char) in ("Mn", "Mc", "Me")
+                  or char in "\u200d\ufe0f\ufe0e"
+                  or (out and out[-1].endswith("\u200d")))
+        if out and not prefix and attach:
+            out[-1] += char
+        else:
+            out.append(prefix + char)
+            prefix = ""
+    if prefix:
+        out.append(prefix)
+    return out
+
+
+def web_status_frames(text, enabled=True):
+    """Build a bounded ticker for one status slot, then settle on its full text."""
+    value = str(text).strip()
+    if not value:
+        return []
+    if not enabled:
+        return [value]
+    clusters = _web_status_clusters(value)
+    if len(clusters) <= WEB_MARQUEE_WIDTH:
+        return [value]
+    ticker = clusters + _web_status_clusters(WEB_MARQUEE_SEPARATOR)
+    steps = min(WEB_MARQUEE_MAX_FRAMES,
+                max(1, (len(ticker) + WEB_MARQUEE_STRIDE - 1) // WEB_MARQUEE_STRIDE))
+    frames = []
+    for frame_no in range(steps):
+        start = (frame_no * WEB_MARQUEE_STRIDE) % len(ticker)
+        frame = "".join(ticker[(start + offset) % len(ticker)]
+                        for offset in range(WEB_MARQUEE_WIDTH)).strip()
+        if frame and (not frames or frame != frames[-1]):
+            frames.append(frame)
+    if not frames or frames[-1] != value:
+        frames.append(value)
+    return frames
 
 
 def parse_rotate_interval(raw):
@@ -880,8 +1003,8 @@ class WebStatusManager:
         style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
                   foreground=[("selected", "#096c7b")])
         self.root.title("Camfrog Web Status (prototype)")
-        self.root.geometry("500x560")
-        self.root.minsize(480, 540)
+        self.root.geometry("500x620")
+        self.root.minsize(480, 560)
 
         self.ttk.Label(self.root, text=(
             "Update status via profiles.camfrog.com. Dry-run is the default; "
@@ -893,8 +1016,10 @@ class WebStatusManager:
         self.nb.pack(fill="both", expand=True, padx=10)
         setup_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
         session_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
+        log_tab = self.ttk.Frame(self.nb, padding=(8, 6, 8, 6))
         self.nb.add(setup_tab, text="Setup")
         self.nb.add(session_tab, text="Account & Session")
+        self.nb.add(log_tab, text="Activity Log")
         pool_lines, pool_load_warning = load_web_text_slots()
 
         form = self.ttk.Frame(setup_tab)
@@ -941,6 +1066,16 @@ class WebStatusManager:
         self.ttk.Checkbutton(form, text="Send live (otherwise dry-run preview only)",
                              variable=self.live).grid(row=3, column=0, columnspan=3,
                                                       sticky="w", pady=(6, 0))
+        modes = self.ttk.Frame(form)
+        modes.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.marquee_mode = self.tk.BooleanVar(value=False)
+        self.infinity_loop = self.tk.BooleanVar(value=True)
+        self.ttk.Checkbutton(
+            modes, text="Marquee (10 seconds per frame)",
+            variable=self.marquee_mode).pack(side="left")
+        self.ttk.Checkbutton(
+            modes, text="Infinity Loop (last slot → slot 1)",
+            variable=self.infinity_loop).pack(side="left", padx=(8, 0))
 
         browser = self.ttk.LabelFrame(session_tab, padding=(10, 6, 10, 6),
                                       text="Session (PHPSESSID via iframe / web login)")
@@ -967,6 +1102,22 @@ class WebStatusManager:
         self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
         self.paste_state.pack(anchor="w", pady=(4, 0))
 
+        log_frame = self.ttk.Frame(log_tab)
+        log_frame.pack(fill="both", expand=True)
+        log_scroll = self.ttk.Scrollbar(log_frame, orient="vertical")
+        log_scroll.pack(side="right", fill="y")
+        self.log_view = self.tk.Text(
+            log_frame, wrap="word", height=12, state="disabled",
+            yscrollcommand=log_scroll.set)
+        self.log_view.pack(side="left", fill="both", expand=True)
+        log_scroll.configure(command=self.log_view.yview)
+        try:
+            self._show_log_lines(load_web_status_log())
+            log_load_warning = ""
+        except OSError as exc:
+            log_load_warning = "Could not load web_status.log ({0}).".format(
+                type(exc).__name__)
+
         actions = self.ttk.Frame(self.root, padding=(10, 0, 10, 2))
         actions.pack(fill="x")
         self.ttk.Button(actions, text="Preview plan", command=self.preview).pack(side="left", padx=5)
@@ -982,6 +1133,8 @@ class WebStatusManager:
         self.note = self.tk.StringVar(value="Dry-run is on. Nothing has been sent.")
         if pool_load_warning:
             self.note.set(pool_load_warning)
+        elif log_load_warning:
+            self.note.set(log_load_warning)
         self.ttk.Label(self.root, textvariable=self.note, anchor="w",
                        padding=(10, 0, 10, 8), wraplength=450).pack(fill="x")
         self.root.after(120, self._poll)
@@ -995,29 +1148,66 @@ class WebStatusManager:
 
         self._run_bg(do, on_done=lambda: setattr(self, "chrome_mode", True))
 
-    def _run_bg(self, fn, force=False, on_done=None):
+    def _run_bg(self, fn, force=False, on_done=None, on_error=None):
         if self.busy and not force:
             return
         self.busy = True
         self.note.set("Working...")
-        threading.Thread(target=self._worker, args=(fn, on_done), daemon=True).start()
+        threading.Thread(target=self._worker, args=(fn, on_done, on_error), daemon=True).start()
 
-    def _worker(self, fn, on_done):
+    def _worker(self, fn, on_done, on_error):
         try:
             text, ok = fn(), True
         except Exception as exc:  # shown in the GUI, never a traceback window
             text, ok = "failed: {0}: {1}".format(type(exc).__name__, exc), False
-        self.q.put((ok, text, on_done))
+        self.q.put((ok, text, on_done, on_error))
+
+    def _show_log_lines(self, lines):
+        if not hasattr(self, "log_view"):
+            return
+        self.log_view.configure(state="normal")
+        self.log_view.delete("1.0", "end")
+        self.log_view.insert("end", "\n".join(lines[-WEB_STATUS_LOG_GUI_LINES:]))
+        if lines:
+            self.log_view.insert("end", "\n")
+        self.log_view.configure(state="disabled")
+        self.log_view.see("end")
+
+    def _append_log_line(self, entry):
+        if not hasattr(self, "log_view"):
+            return
+        self.log_view.configure(state="normal")
+        self.log_view.insert("end", entry + "\n")
+        line_count = int(self.log_view.index("end-1c").split(".", 1)[0])
+        excess = max(0, line_count - WEB_STATUS_LOG_GUI_LINES - 1)
+        if excess:
+            self.log_view.delete("1.0", "{0}.0".format(excess + 1))
+        self.log_view.configure(state="disabled")
+        self.log_view.see("end")
+
+    def _record_activity(self, event):
+        try:
+            entry = append_web_status_log(event)
+        except (OSError, ValueError) as exc:
+            try:
+                entry = _web_status_log_entry(event)
+            except ValueError:
+                return
+            if hasattr(self, "note"):
+                self.note.set("Could not write web_status.log ({0}).".format(
+                    type(exc).__name__))
+        self._append_log_line(entry)
 
     def _poll(self):
         try:
             while True:
-                ok, text, on_done = self.q.get_nowait()
+                ok, text, on_done, on_error = self.q.get_nowait()
                 self.busy = False
                 self.note.set(text)
-                if ok and on_done is not None:
+                callback = on_done if ok else on_error
+                if callback is not None:
                     try:
-                        on_done()
+                        callback()
                     except Exception as exc:
                         self.note.set("{0} ({1})".format(text, exc))
         except queue.Empty:
@@ -1050,6 +1240,7 @@ class WebStatusManager:
             self.note.set("Could not save status lines to webtext.db: {0}".format(
                 type(exc).__name__))
             return False
+        self._record_activity("status_lines_saved")
         if notify:
             self.note.set("Saved status lines to webtext.db.")
         return True
@@ -1125,7 +1316,15 @@ class WebStatusManager:
                 raise ValueError(detail)
             return detail
 
-        self._run_bg(do, force=True, on_done=on_done)
+        self._record_activity("session_verification_started")
+
+        def verified():
+            self._record_activity("session_verification_succeeded")
+            on_done()
+
+        self._run_bg(
+            do, force=True, on_done=verified,
+            on_error=lambda: self._record_activity("session_verification_failed"))
 
     def login_via_browser(self):
         """One-click login: the real browser solves the CAPTCHA and the
@@ -1133,6 +1332,7 @@ class WebStatusManager:
         if find_browser() is None:
             self.note.set("No Chrome or Edge found on this computer.")
             return
+        self._record_activity("browser_login_started")
         self.note.set("Browser opened - sign in there; this window confirms by itself.")
 
         def work():
@@ -1155,6 +1355,7 @@ class WebStatusManager:
         self.cookie_paste_var.set("")
         self.session_ready = False
         self._invalidate_pending_start()
+        self._record_activity("browser_session_captured")
         self.paste_state.configure(text="Session captured from browser.",
                                    foreground="#555")
         self._verify_session(self._login_name(),
@@ -1270,6 +1471,11 @@ class WebStatusManager:
                 return
             self._live_confirmed = True
         self.switching = True
+        self._cycle_marquee = (bool(self.marquee_mode.get())
+                               if hasattr(self, "marquee_mode") else False)
+        self._cycle_infinity_loop = (bool(self.infinity_loop.get())
+                                     if hasattr(self, "infinity_loop") else True)
+        self._record_activity("live_rotation_started" if live else "dry_run_rotation_started")
         self._cycle(login, pool, interval, timeout, live, 0)
 
     def _invalidate_pending_start(self):
@@ -1298,9 +1504,15 @@ class WebStatusManager:
             return
         self._live_confirmed = True
         self.switching = True
+        self._cycle_marquee = (bool(self.marquee_mode.get())
+                               if hasattr(self, "marquee_mode") else False)
+        self._cycle_infinity_loop = (bool(self.infinity_loop.get())
+                                     if hasattr(self, "infinity_loop") else True)
+        self._record_activity("live_rotation_started")
         self._cycle(login, pool, interval, timeout, True, 0)
 
     def stop(self):
+        was_active = self.switching or self._pending is not None
         self._invalidate_pending_start()
         self.switching = False
         self.session_ready = False  # next Start re-verifies the session
@@ -1312,36 +1524,101 @@ class WebStatusManager:
                 pass
             self.rotate_job = None
         self.note.set("Auto-switch stopped. Nothing further will be sent.")
+        if was_active:
+            self._record_activity("rotation_stopped")
 
-    def _cycle(self, login, pool, interval, timeout, live, index):
+    def _cycle(self, login, pool, interval, timeout, live, index, frame_index=0,
+               generation=None):
         if not self.switching:
+            return
+        current_generation = getattr(self, "_start_generation", 0)
+        if generation is None:
+            generation = current_generation
+        if generation != current_generation:
             return
         try:
             pool = self._pool_values() or pool
-            status, _ = next_rotation(pool, index)
+            if not pool:
+                raise ValueError("status pool is empty; add at least one line.")
+            status = pool[index % len(pool)]
         except ValueError as exc:
             self.note.set(str(exc))
             self.stop()
             return
-        # main thread: no Tk calls in the worker; the jar is built there
+        marquee_setting = getattr(self, "marquee_mode", None)
+        infinity_setting = getattr(self, "infinity_loop", None)
+        marquee = bool(getattr(
+            self, "_cycle_marquee",
+            marquee_setting.get() if marquee_setting is not None else False))
+        infinity_loop = bool(getattr(
+            self, "_cycle_infinity_loop",
+            infinity_setting.get() if infinity_setting is not None else True))
+        frames = web_status_frames(status, enabled=marquee)
+        frame_index = min(frame_index, len(frames) - 1)
+        frame = frames[frame_index]
+        slot_index = index % len(pool)
+        step_delay = WEB_MARQUEE_STEP_SECONDS if marquee else interval
 
         def do():
             if not live:
-                return "cycle #{0}/{1} (dry-run): {2}".format(index + 1, len(pool), status)
+                return "cycle #{0}/{1} (dry-run): {2}".format(
+                    index + 1, len(pool), frame)
             import urllib.request
 
             try:
                 jar = self._session_jar()
             except (OSError, ValueError) as exc:
-                return "cycle #{0}/{1} stopped: {2}".format(index + 1, len(pool), exc)
+                raise ValueError("cycle #{0}/{1} stopped: {2}".format(
+                    index + 1, len(pool), exc)) from exc
             opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-            ok, message = perform_update(opener, status, timeout, confirm=True)
+            ok, message = perform_update(opener, frame, timeout, confirm=True)
+            if not ok:
+                raise RuntimeError(message)
             return "cycle #{0}/{1}: {2}".format(index + 1, len(pool), message)
 
-        self._run_bg(do, force=True)
-        _, nxt = next_rotation(pool, index)
-        self.rotate_job = self.root.after(max(1, interval) * 1000,
-                                          self._cycle, login, pool, interval, timeout, live, nxt)
+        def advance():
+            if (not self.switching
+                    or generation != getattr(self, "_start_generation", 0)):
+                return
+            if not marquee:
+                next_index = (slot_index + 1) % len(pool)
+                next_frame = 0
+            elif frame_index + 1 < len(frames):
+                next_index = slot_index
+                next_frame = frame_index + 1
+            elif slot_index + 1 < len(pool):
+                next_index = slot_index + 1
+                next_frame = 0
+            elif infinity_loop:
+                next_index = 0
+                next_frame = 0
+            else:
+                self.switching = False
+                self.rotate_job = None
+                self.session_ready = False
+                self.chrome_mode = False
+                self._invalidate_pending_start()
+                self._record_activity("marquee_completed")
+                self.note.set("Marquee completed all populated slots.")
+                return
+            self.rotate_job = self.root.after(
+                max(1, int(step_delay)) * 1000, self._cycle,
+                login, pool, interval, timeout, live, next_index, next_frame,
+                generation)
+
+        def failed():
+            self.switching = False
+            self.rotate_job = None
+            self.session_ready = False
+            self.chrome_mode = False
+            self._invalidate_pending_start()
+            self._record_activity("status_update_failed" if live else "rotation_stopped")
+
+        self._run_bg(
+            do, force=True, on_done=lambda: (
+                self._record_activity("status_update_succeeded" if live
+                                      else "status_previewed"),
+                advance()), on_error=failed)
 
 
 # ============================================================
