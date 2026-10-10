@@ -4,15 +4,18 @@ Usage:
   python tools/release.py              # tag from camfrog_auto.APP_VERSION, upload assets
   python tools/release.py --dry-run    # print the plan, change nothing
 
-Run full-build.bat first. The release is created with the authenticated `gh`
-CLI (no token is stored in this repo); `gh auth status` must succeed.
+Run full-build.bat on the exact clean `main` commit after its PR checks pass.
+The tag is pinned to that commit. The release is created with the authenticated
+`gh` CLI (no token is stored in this repo); `gh auth status` must succeed.
 
 Assets: every feature exe (stable names so the apps' self-update can find their
-own file), the line-status-changer exe + config, the all-features zip, and
-SHA256SUMS.txt (the self-update verifies downloads against it).
+own file), the line-status-changer exe + generic default config, the
+all-features zip, and SHA256SUMS.txt (the self-update verifies downloads
+against it). Local LINE settings are never included.
 """
 import argparse
 import hashlib
+import json
 import re
 import subprocess
 import sys
@@ -21,6 +24,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
+
+# Running as `python tools/release.py` puts tools/ (not the repository root)
+# on sys.path. Resolve the project's LINE defaults through the checkout.
+sys.path.insert(0, str(ROOT))
+from line.config_store import default_config
 
 FEATURE_EXES = {
     "room-control.exe": DIST / "room-control" / "room-control.exe",
@@ -33,7 +41,6 @@ FEATURE_EXES = {
 }
 OTHER_ASSETS = {
     "line-status-changer.exe": ROOT / "line" / "dist" / "line-status-changer.exe",
-    "line_config.json": ROOT / "line" / "dist" / "line_config.json",
     "camfrog-features-windows.zip": ROOT / "camfrog-features-windows.zip",
 }
 
@@ -82,6 +89,35 @@ def check_assets():
             ", ".join(sorted(missing))))
 
 
+def write_public_line_config(path):
+    """Write the generic defaults, never the machine's saved LINE settings."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(default_config(), ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8", newline="\n")
+
+
+def release_target():
+    """Require a clean main checkout that exactly matches origin/main."""
+    def git(*args):
+        result = subprocess.run(["git", *args], cwd=ROOT, capture_output=True,
+                                text=True)
+        if result.returncode:
+            raise SystemExit("could not verify release source: git " + " ".join(args))
+        return result.stdout.strip()
+
+    if git("status", "--porcelain", "--untracked-files=normal"):
+        raise SystemExit("release requires a clean working tree")
+    branch = git("branch", "--show-current")
+    if branch != "main":
+        raise SystemExit("release requires the main branch after PR merge")
+    head = git("rev-parse", "HEAD")
+    remote = git("ls-remote", "origin", "refs/heads/main").split()
+    if not remote or remote[0] != head:
+        raise SystemExit("release HEAD must exactly match origin/main")
+    return head
+
+
 def verify_feature_hashes():
     """Verify the seven packaged EXEs against the build-produced SHA256SUMS."""
     manifest = DIST / "SHA256SUMS.txt"
@@ -126,40 +162,47 @@ def main(argv=None):
         raise SystemExit("release tag must match APP_VERSION to prevent mismatched releases")
     check_assets()
     verify_feature_hashes()
-    pairs = list(FEATURE_EXES.items()) + list(OTHER_ASSETS.items())
-    sums_path = DIST / "release-SHA256SUMS.txt"
-    sums_path.write_text(flat_sums(pairs), encoding="utf-8", newline="\n")
-    pairs.append(("SHA256SUMS.txt", sums_path))
-    assets = [str(path) for _name, path in pairs]
-    asset_names = [name for name, _path in pairs]
     notes = release_notes(version)
+    with tempfile.TemporaryDirectory(prefix="camfrog-release-") as temp_dir:
+        public_config = Path(temp_dir) / "line_config.json"
+        write_public_line_config(public_config)
+        pairs = (list(FEATURE_EXES.items())
+                 + list(OTHER_ASSETS.items())
+                 + [("line_config.json", public_config)])
+        sums_path = DIST / "release-SHA256SUMS.txt"
+        sums_path.write_text(flat_sums(pairs), encoding="utf-8", newline="\n")
+        pairs.append(("SHA256SUMS.txt", sums_path))
+        assets = [str(path) for _name, path in pairs]
+        asset_names = [name for name, _path in pairs]
 
-    print("release : {0}".format(tag))
-    print("title   : Camfrog feature apps {0}".format(version))
-    print("notes   : {0} chars from CHANGELOG.md".format(len(notes)))
-    for name in asset_names:
-        print("  asset : {0}".format(name))
-    if args.dry_run:
-        print("dry-run: nothing was created.")
-        return 0
-    if not gh_ready():
-        print("gh is not authenticated; run `gh auth login` first.")
-        return 2
-    exists = subprocess.run(["gh", "release", "view", tag], capture_output=True)
-    if exists.returncode == 0:
-        print("release {0} already exists; refusing to overwrite published assets.".format(tag))
-        return 3
-    with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
-                                     encoding="utf-8") as handle:
-        handle.write(notes)
-        notes_path = handle.name
-    try:
-        command = (["gh", "release", "create", tag] + assets
-                   + ["--title", "Camfrog feature apps {0}".format(version),
-                      "--notes-file", notes_path])
-        return subprocess.run(command).returncode
-    finally:
-        Path(notes_path).unlink(missing_ok=True)
+        print("release : {0}".format(tag))
+        print("title   : Camfrog feature apps {0}".format(version))
+        print("notes   : {0} chars from CHANGELOG.md".format(len(notes)))
+        for name in asset_names:
+            print("  asset : {0}".format(name))
+        if args.dry_run:
+            print("dry-run: nothing was created.")
+            return 0
+        target = release_target()
+        if not gh_ready():
+            print("gh is not authenticated; run `gh auth login` first.")
+            return 2
+        exists = subprocess.run(["gh", "release", "view", tag], capture_output=True)
+        if exists.returncode == 0:
+            print("release {0} already exists; refusing to overwrite published assets.".format(tag))
+            return 3
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
+                                         encoding="utf-8") as handle:
+            handle.write(notes)
+            notes_path = handle.name
+        try:
+            command = (["gh", "release", "create", tag] + assets
+                       + ["--target", target,
+                          "--title", "Camfrog feature apps {0}".format(version),
+                          "--notes-file", notes_path])
+            return subprocess.run(command).returncode
+        finally:
+            Path(notes_path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":

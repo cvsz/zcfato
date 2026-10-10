@@ -7,8 +7,16 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [2.19.2] - 2026-10-11
+
 ### Added
-- Web-status single login: a **Login** button verifies the paste/Chrome/file session live and arms automation; a live **Start** chains login → one confirmation → rotation in a single press. `Stop` disarms so the next Start re-verifies.
+- Web-status session login: **Login** verifies the current `PHPSESSID` entry and arms automation; live **Start** verifies that same current cookie, asks once for confirmation, then begins rotation. `Stop` disarms so the next Start re-verifies.
+- Web-status Setup now has ten single-line status fields saved by slot in `webtext.db`; Start persists current fields before rotation.
+- Music DJ now has a **Browse** button to select the music folder for chat requests.
+
+### Fixed
+- Web-status live rotation now calls the status updater with its supported arguments, avoiding a duplicate `confirm` argument error.
+- Music DJ now finds and plays common Windows audio formats, reports playback errors, and advances when the current audio file finishes.
 
 ### Changed
 - Marquee `step_seconds` floor lowered 0.5 → 0.3 across the engine and all feature apps (validation, frame-wait floor, GUI spinbox minimum).

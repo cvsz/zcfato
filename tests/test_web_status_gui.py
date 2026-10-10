@@ -17,25 +17,6 @@ def test_any_args_mean_cli():
     assert wsg.wants_gui(["--how-to-capture"]) is False
 
 
-def test_pool_text_roundtrip(tmp_path):
-    path = tmp_path / "pool.txt"
-    text = "hello\nworld\n"
-    assert wsg.save_pool_text(path, text) == len(text)
-    assert wsg.load_pool_text(path) == text
-
-
-def test_pool_text_unicode_roundtrip(tmp_path):
-    path = tmp_path / "pool.txt"
-    text = "สวัสดี\nhello\n"
-    wsg.save_pool_text(path, text)
-    assert wsg.load_pool_text(path) == text
-
-
-def test_load_pool_text_missing_file(tmp_path):
-    with pytest.raises(OSError):
-        wsg.load_pool_text(tmp_path / "missing.txt")
-
-
 @pytest.mark.parametrize("raw, expected", [
     ("20", 20.0),
     ("20.0", 20.0),
@@ -140,6 +121,139 @@ def test_pasted_cookie_is_the_session_source(tmp_path, monkeypatch):
     assert "capture PHPSESSID" in manager.paste_state.cget("text")
 
 
+class _Value:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class _Label:
+    def __init__(self):
+        self.options = {}
+
+    def configure(self, **options):
+        self.options.update(options)
+
+
+class _Root:
+    def after(self, *args):
+        return "rotation-id"
+
+
+def _bare_manager(cookie_text="", cookie_paste="", live=True):
+    manager = object.__new__(wsg.WebStatusManager)
+    manager.login = _Value("Seaza")
+    manager.timeout = _Value("20")
+    manager.interval = _Value("30")
+    manager.cookie_paste_var = _Value(cookie_text)
+    manager.cookie_paste = cookie_paste
+    manager.session_ready = False
+    manager.live = _Value(live)
+    manager.note = _Value()
+    manager.paste_state = _Label()
+    manager.switching = False
+    manager.chrome_mode = False
+    manager.root = object()
+    manager.pool_vars = [_Value("hello")] + [_Value("") for _ in range(9)]
+    manager._fields = lambda: ("Seaza", ["hello"])
+    return manager
+
+
+def test_login_session_verifies_php_sessid_from_entry_without_use_step():
+    manager = _bare_manager("PHPSESSID=abc1234567890123")
+    verified = []
+    manager._verify_session = lambda *args: verified.append(args)
+
+    manager.login_session()
+
+    assert manager.cookie_paste == "PHPSESSID=abc1234567890123"
+    assert len(verified) == 1
+    assert verified[0][:2] == ("Seaza", 20.0)
+
+
+def test_login_session_rejects_empty_php_sessid_and_discards_old_session():
+    manager = _bare_manager("PHPSESSID=", "PHPSESSID=old1234567890123")
+    manager.session_ready = True
+    manager._verify_session = lambda *args: pytest.fail("must not verify an empty cookie")
+
+    manager.login_session()
+
+    assert manager.cookie_paste == ""
+    assert manager.session_ready is False
+    assert "PHPSESSID" in manager.note.get()
+
+
+def test_start_verifies_latest_php_sessid_and_continues_to_rotation(monkeypatch, tmp_path):
+    import sys
+    import types
+
+    tkinter = types.ModuleType("tkinter")
+    tkinter.messagebox = types.SimpleNamespace(askyesno=lambda *a, **k: True)
+    monkeypatch.setitem(sys.modules, "tkinter", tkinter)
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager("PHPSESSID=new1234567890123", "PHPSESSID=old1234567890123")
+    verified = []
+    rotations = []
+
+    def verify(login, timeout, on_done):
+        verified.append((login, timeout, manager.cookie_paste))
+        on_done()
+
+    manager._verify_session = verify
+    manager._cycle = lambda *args: rotations.append(args)
+
+    manager.start()
+
+    assert verified == [("Seaza", 20.0, "PHPSESSID=new1234567890123")]
+    assert manager.session_ready is True
+    assert manager.switching is True
+    assert rotations and rotations[0][0:2] == ("Seaza", ["hello"])
+
+
+def test_start_without_session_reports_guidance_instead_of_crashing(monkeypatch, tmp_path):
+    manager = _bare_manager(cookie_text="", cookie_paste="")
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager._verify_session = lambda *args: pytest.fail("must not verify without a cookie")
+
+    manager.start()
+
+    assert "PHPSESSID" in manager.note.get()
+
+
+def test_live_cycle_calls_perform_update_with_supported_arguments(monkeypatch):
+    manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123")
+    manager.switching = True
+    manager.root = _Root()
+    manager._session_jar = lambda: object()
+    manager._run_bg = lambda fn, force=False: fn()
+    calls = []
+
+    def perform_update(opener, status, timeout, confirm=False):
+        calls.append((status, timeout, confirm))
+        return True, "status acknowledged"
+
+    monkeypatch.setattr(wsg, "perform_update", perform_update)
+    monkeypatch.setattr(wsg.urllib.request, "build_opener", lambda *args: object())
+
+    manager._cycle("Seaza", ["hello"], 30, 20.0, True, 0)
+
+    assert calls == [("hello", 20.0, True)]
+
+
+def test_web_text_database_persists_ten_status_lines(tmp_path):
+    path = tmp_path / "webtext.db"
+    lines = ["first", "", "third"] + ["line {0}".format(i) for i in range(4, 11)]
+
+    assert wsg.load_web_text_lines(path) == [""] * 10
+    assert wsg.save_web_text_lines(lines, path) == 10
+    assert wsg.load_web_text_lines(path) == lines
+
+
 def _signed_in_page():
     return ("<title>Camfrog - profile</title>"
             "<div class=\"nav-user-logged\">var _user_id = '1'; var nick = 'Seaza';")
@@ -159,9 +273,9 @@ def test_login_arms_automation(tmp_path, monkeypatch):
     assert getattr(manager, "session_ready", False) is False
 
     monkeypatch.setattr(wsg, "fetch_profile", lambda *a: _signed_in_page())
-    manager.cookie_paste_var.set("cf_session=abc123")
-    manager.use_pasted_cookie()
-    manager.login_session()
+    manager.cookie_paste_var.set("PHPSESSID=abc1234567890123")
+    assert manager.btn_login.cget("text") == "Login"
+    manager.btn_login.invoke()
     for _ in range(50):
         manager.root.update()
         if getattr(manager, "session_ready", False):
@@ -213,17 +327,23 @@ def test_start_chains_login_then_rotation(tmp_path, monkeypatch):
     monkeypatch.setattr(tkinter, "Tk", lambda: root)
     manager = wsg.WebStatusManager()
     manager.root.update()
+    assert len(manager.pool_entries) == 10
 
     monkeypatch.setattr(wsg, "fetch_profile", lambda *a: _signed_in_page())
     posted = []
-    monkeypatch.setattr(wsg, "perform_update",
-                        lambda *a, **k: posted.append((a, k)) or (True, "status updated."))
-    manager.cookie_paste_var.set("cf_session=abc123")
-    manager.use_pasted_cookie()
-    manager.pool_box.delete("1.0", "end")
-    manager.pool_box.insert("1.0", "hello world")
+
+    def fake_perform_update(opener, status, timeout, confirm=False):
+        posted.append((status, timeout, confirm))
+        return True, "status updated."
+
+    monkeypatch.setattr(wsg, "perform_update", fake_perform_update)
+    manager.cookie_paste_var.set("PHPSESSID=abc1234567890123")
+    manager.pool_vars[0].set("hello world")
+    manager.pool_vars[9].set("last line")
+    manager.btn_save_web_text.invoke()
+    assert wsg.load_web_text_lines(tmp_path / "webtext.db")[0] == "hello world"
     manager.live.set(True)
-    manager.start()
+    manager.btn_start.invoke()
     for _ in range(100):
         manager.root.update()
         if posted:
@@ -231,6 +351,8 @@ def test_start_chains_login_then_rotation(tmp_path, monkeypatch):
         import time
         time.sleep(0.05)
     assert posted, "rotation never started after chained login"
+    assert posted[0] == ("hello world", 20.0, True)
+    assert wsg.load_web_text_lines(tmp_path / "webtext.db")[9] == "last line"
     assert manager.session_ready is True
     manager.stop()
     assert manager.session_ready is False
