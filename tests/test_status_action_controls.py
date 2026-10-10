@@ -56,16 +56,15 @@ def test_action_handlers_guard_busy_state(name):
 
 
 @pytest.mark.parametrize("name", ["status_random_gui.py", "status_marquee_gui.py"])
-def test_action_grid_has_two_columns_and_distinct_button_colours(name):
+def test_action_grid_has_one_row_and_distinct_button_colours(name):
     source = (ROOT / name).read_text(encoding="utf-8")
     tree = ast.parse(source)
     method = next(node for node in ast.walk(tree)
                   if isinstance(node, ast.FunctionDef) and node.name == "_build_actions")
     body = ast.get_source_segment(source, method)
     assert 'tk.Button(' in body
-    assert 'columnconfigure(0, weight=1' in body
-    assert 'columnconfigure(1, weight=1' in body
-    assert 'row=index // 2, column=index % 2' in body
+    assert 'for col in range(4):' in body
+    assert 'row=0, column=index' in body
     assert all(colour in body for colour in ("#1769c2", "#17682a", "#006d78", "#d72d32"))
     assert 'command=command' in body
     assert 'highlightthickness=2' in body
