@@ -3,6 +3,7 @@ import argparse
 import copy
 import ctypes
 import datetime as dt
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -13,6 +14,7 @@ import subprocess
 import sys
 import time
 import unicodedata
+import urllib.request
 from pathlib import Path
 from typing import Any, Optional, Union
 from contextlib import closing
@@ -3464,6 +3466,7 @@ def build_app():
             self.root.protocol("WM_DELETE_WINDOW", self.close_app)
             self.task_poll_job = self.root.after(100, self.poll_task_results)
             self.state_job = self.root.after(500, self.refresh_state)
+            self.root.after(2500, self._auto_update_check)
 
             # A second launch restores the visible standalone window.
             if os.name == "nt":
@@ -3614,6 +3617,8 @@ def build_app():
                             side="left", fill="x", expand=True, padx=(3, 0))
             ttk.Button(parent, text=self._tr("Discover controls", "ดึง control"),
                        command=self.discover).pack(fill="x", pady=(0, 5))
+            ttk.Button(parent, text=self._tr("Check for updates", "ตรวจอัปเดต"),
+                       command=self.check_update).pack(fill="x", pady=(0, 5))
             ttk.Label(parent, text=self._tr(
                 "Close / X stops this app's worker before exiting.",
                 "ปิดหน้าต่างด้วย X เพื่อหยุด worker ของแอปก่อนออก"),
@@ -3626,6 +3631,31 @@ def build_app():
                                  if str(page) == selected)
             except Exception:
                 pass
+
+        def check_update(self):
+            self.note.configure(text=self._tr("Checking for updates...",
+                                              "กำลังตรวจอัปเดต..."),
+                                foreground="#53636d")
+
+            def work():
+                state, message = self_update("status-random.exe")
+                self.root.after(0, lambda: self._update_done(state, message))
+
+            threading.Thread(target=work, daemon=True).start()
+
+        def _update_done(self, state, message):
+            self.note.configure(
+                text=message,
+                foreground="#a52834" if state == "failed" else "#138a55")
+            if state == "ready":
+                self.root.after(1200, self.root.destroy)
+
+        def _auto_update_check(self):
+            def work():
+                found = check_for_update("status-random.exe")
+                if found:
+                    self.root.after(0, self.check_update)
+            threading.Thread(target=work, daemon=True).start()
 
         def schedule_save(self, *_args):
             if self.save_job is not None:
@@ -4040,5 +4070,153 @@ def main(argv=None):
     finally:
         instance.release()
 
+
+# ---------- self-update from the GitHub release ----------
+# Read-only GitHub API (no token needed for public repos, stdlib only). Each
+# packaged app checks the same repo's latest release and downloads only its
+# own executable asset, verified against the release's SHA256SUMS.txt.
+APP_VERSION = "2.19.0"
+GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
+UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
+
+
+def _version_key(text):
+    parts = [int(p) for p in re.findall(r"\d+", str(text))[:3]]
+    while len(parts) < 3:
+        parts.append(0)
+    return tuple(parts)
+
+
+def version_newer(latest, current=APP_VERSION):
+    """True when `latest` sorts above `current` (2.19.0 > 2.18.3)."""
+    return _version_key(latest) > _version_key(current)
+
+
+def github_latest_release(timeout=15.0):
+    """(tag, notes, {asset_name: url}) for the newest release, or None."""
+    request = urllib.request.Request(
+        "https://api.github.com/repos/{0}/releases/latest".format(GITHUB_REPO),
+        headers={"Accept": "application/vnd.github+json",
+                 "User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        data = json.loads(response.read().decode("utf-8", "replace"))
+    tag = str(data.get("tag_name") or "").lstrip("v")
+    if not tag:
+        return None
+    assets = {}
+    for asset in data.get("assets") or []:
+        name = str(asset.get("name") or "")
+        url = str(asset.get("browser_download_url") or "")
+        if name and url:
+            assets[name] = url
+    return tag, str(data.get("body") or ""), assets
+
+
+def check_for_update(asset_name, timeout=15.0):
+    """(tag, url, notes) when a newer release carries this asset, else None."""
+    found = check_release_assets(asset_name, timeout)
+    return None if found is None else found[:3]
+
+
+def check_release_assets(asset_name, timeout=15.0):
+    """(tag, url, sums_url, notes) for a newer release carrying `asset_name`."""
+    release = github_latest_release(timeout)
+    if release is None:
+        return None
+    tag, notes, assets = release
+    url = assets.get(asset_name)
+    if url and version_newer(tag):
+        return tag, url, assets.get(UPDATE_ASSET_SUMS, ""), notes
+    return None
+
+
+def self_update(asset_name, confirm=None, timeout=15.0):
+    """Check -> confirm -> download -> verify -> stage the swap.
+
+    Returns (state, message) with state in
+    ("no-update", "declined", "ready", "failed"); "ready" means the new file is
+    staged as <asset>.new and camfrog-update.cmd will swap it after we exit.
+    """
+    found = check_release_assets(asset_name, timeout)
+    if found is None:
+        return "no-update", "no update available (running v{0}).".format(APP_VERSION)
+    tag, url, sums_url, _notes = found
+    if confirm is not None and not confirm(tag):
+        return "declined", "update to v{0} declined.".format(tag)
+    ok, message = stage_and_swap_update(url, asset_name, sums_url or None)
+    return ("ready" if ok else "failed"), message
+
+
+def _sha256_file(path, chunk=1 << 20):
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(chunk), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def download_update(url, target, timeout=60.0):
+    """Stream a release asset to `target`. Returns the bytes written."""
+    request = urllib.request.Request(
+        url, headers={"User-Agent": "camfrog_auto/{0}".format(APP_VERSION)})
+    written = 0
+    with urllib.request.urlopen(request, timeout=timeout) as response, \
+            open(target, "wb") as handle:
+        while True:
+            block = response.read(1 << 16)
+            if not block:
+                break
+            handle.write(block)
+            written += len(block)
+    return written
+
+
+def verify_against_sums(sums_url, asset_name, local_path, timeout=30.0):
+    """True when local_path matches the release's SHA256SUMS entry."""
+    request = urllib.request.Request(
+        sums_url, headers={"User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        text = response.read().decode("utf-8", "replace")
+    want = ""
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[1].lstrip("*") == asset_name:
+            want = parts[0].lower()
+    return bool(want) and want == _sha256_file(local_path)
+
+
+def stage_and_swap_update(url, asset_name, sums_url=None):
+    """Download the new exe beside this one, then swap it in after we exit.
+
+    A running .exe cannot be overwritten on Windows, so the new file lands as
+    `<asset>.new` and a small `camfrog-update.cmd` moves it into place a few
+    seconds after this process exits. Returns (ok, message).
+    """
+    if not getattr(sys, "frozen", False):
+        return False, "self-update only applies to the packaged executable."
+    exe = Path(sys.executable).resolve()
+    staged = exe.parent / (asset_name + ".new")
+    try:
+        written = download_update(url, staged)
+        if not written:
+            raise OSError("empty download")
+        if sums_url and not verify_against_sums(sums_url, asset_name, staged):
+            staged.unlink(missing_ok=True)
+            return False, "checksum mismatch; update refused."
+    except Exception as exc:
+        staged.unlink(missing_ok=True)
+        return False, "download failed: {0}: {1}".format(type(exc).__name__, exc)
+    script = exe.parent / "camfrog-update.cmd"
+    script.write_text(
+        "@echo off\r\n"
+        "ping -n 4 127.0.0.1 >nul\r\n"
+        'move /Y "{staged}" "{exe}"\r\n'
+        'del "%~f0"\r\n'.format(staged=staged, exe=exe), encoding="utf-8")
+    command = ["cmd", "/c", str(script)]
+    spawn = {"cwd": str(exe.parent)}
+    if os.name == "nt":  # CREATE_NO_WINDOW: no console flash during the swap
+        spawn["creationflags"] = 0x08000000
+    subprocess.Popen(command, close_fds=True, **spawn)
+    return True, "update downloaded; the app will restart itself with {0}.".format(asset_name)
 
 

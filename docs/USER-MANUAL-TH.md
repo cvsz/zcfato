@@ -6,6 +6,8 @@ English version: `USER-MANUAL-EN.md`.
 
 แอป: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-autoreply`, `music-dj`, `web-status` ทุกแอปใช้ได้เฉพาะ Windows และต้องเปิด Camfrog ไว้ ยกเว้น `web-status` ที่ทำงานผ่านเว็บไซต์
 
+**อัปเดต** ทุกแอปตรวจ GitHub release ตอนเปิด (ขึ้น banner เฉพาะเมื่อมีเวอร์ชันใหม่) และมีปุ่ม **Check for updates** ส่วน CLI ใช้คำสั่ง `<app> update` การอัปเดตดาวน์โหลดเฉพาะไฟล์ของแอปนั้น ตรวจกับ `SHA256SUMS.txt` ของ release แล้วติดตั้งตอนปิดแอป (`<app>.new` กับ `camfrog-update.cmd` เป็นตัวสลับไฟล์) ไม่ต้องมีบัญชีหรือโทเคน และไม่ส่งข้อมูลอะไรขึ้น GitHub เลย เผยแพร่ release ด้วย `python tools/release.py`
+
 ## 1. ติดตั้ง
 
 1. ติดตั้ง Python 64-bit รุ่น 3.12 หรือ 3.13

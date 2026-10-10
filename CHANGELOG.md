@@ -5,9 +5,11 @@ All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/);
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [2.19.0] - 2026-10-10
 
 ### Added
+- **Self-update from the GitHub release.** Every packaged app checks `releases/latest` on start (and via a **Check for updates** button / `update` CLI command), downloads only its own `.exe` asset, verifies it against the release's `SHA256SUMS.txt`, stages it as `<app>.new`, and swaps it in with a small `camfrog-update.cmd` after the app exits. No tokens, no third-party updater; GitHub API is read-only and stdlib-only.
+- `tools/release.py` publishes the release: per-app exe assets with stable names, the all-features zip, `SHA256SUMS.txt`, and notes taken from this section. `--dry-run` prints the plan.
 - **Music DJ app** (`music-dj`): room bot that answers `!request` / `!queue` / `!current` / `!skip` / `!help` in chat, keeps a persistent `dj_queue.json`, and can play `.wav` files locally (`dj.audio_backend: "local"`) with automatic next-song advance. New `dj` config section; needs `autoreply.enabled` for chat plumbing. GUI has a queue view with owner Skip/Clear buttons.
 - `--chrome` CLI flag and GUI **Chrome** button: import the Camfrog session straight from Chrome's cookie store (nothing written to disk; DPAPI / AES-GCM decrypted in memory; clear error points to the cookies.txt fallback when the `cryptography` package is missing).
 - Chrome 127+ keeps its cookie DB under `<profile>/Network/Cookies`; the finder now prefers it over the legacy `<profile>/Cookies`.

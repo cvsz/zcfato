@@ -6,6 +6,8 @@ Six apps, one manual.
 
 Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-autoreply`, `music-dj`, `web-status`. All are Windows-only and need Camfrog open, except `web-status` which works through the website.
 
+**Updates.** Every app checks the project's GitHub release when it starts (a banner appears only when something newer exists) and each has a **Check for updates** button; the CLI equivalent is `<app> update`. An update downloads only that app's own file, verifies it against the release's `SHA256SUMS.txt`, and installs it the next time you close the app (`<app>.new` + `camfrog-update.cmd` do the swap). No account, no token, nothing is uploaded. Releases are published with `python tools/release.py`.
+
 ## 1. Install
 
 1. Install 64-bit Python 3.12 or 3.13.
