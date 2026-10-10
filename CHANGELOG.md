@@ -7,6 +7,9 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- Web-status single login: a **Login** button verifies the paste/Chrome/file session live and arms automation; a live **Start** chains login → one confirmation → rotation in a single press. `Stop` disarms so the next Start re-verifies.
+
 ### Changed
 - Marquee `step_seconds` floor lowered 0.5 → 0.3 across the engine and all feature apps (validation, frame-wait floor, GUI spinbox minimum).
 - Random `status.interval_seconds` floor lowered 30 → 0.3 across the engine and all feature apps (validation, `RANDOM_INTERVAL_MIN`, GUI field now accepts decimals).

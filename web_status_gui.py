@@ -918,9 +918,11 @@ class WebStatusManager:
                         command=self.open_login_page).pack(side="left")
         self.cookie_paste_var = self.tk.StringVar(value="")
         self.ttk.Entry(row2, textvariable=self.cookie_paste_var,
-                       width=26).pack(side="left", padx=6)
+                       width=18).pack(side="left", padx=6)
         self.ttk.Button(row2, text="Use pasted cookie",
                         command=self.use_pasted_cookie).pack(side="left")
+        self.ttk.Button(row2, text="Login",
+                        command=self.login_session).pack(side="left", padx=(6, 0))
         self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
         self.paste_state.pack(anchor="w", pady=(4, 0))
 
@@ -1095,6 +1097,43 @@ class WebStatusManager:
             return import_chrome_jar()
         return load_cookie_jar(self.cookies.get().strip())
 
+    def _verify_session(self, login, timeout, on_done):
+        """Probe paste/Chrome/file session in a worker; on_done runs on success."""
+
+        def do():
+            import urllib.request
+
+            jar = self._session_jar()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
+            html = fetch_profile(opener, login, timeout)
+            verdict, detail = summarize_session(html)
+            if verdict != "signed-in":
+                raise ValueError(detail)
+            return detail
+
+        self._run_bg(do, on_done=on_done)
+
+    def login_session(self):
+        """Single login: verify the session live, arm automation on success."""
+        try:
+            login = self._login_name()
+        except ValueError as exc:
+            self.note.set(str(exc))
+            return
+        if not (self.cookies.get().strip() or self.cookie_paste or self.chrome_mode):
+            self.note.set("Paste a cookie, pick a cookies file, or press Chrome "
+                          "first - then Login.")
+            return
+        timeout = self._timeout_value()
+        if timeout is None:
+            return
+        self._verify_session(login, timeout, self._on_logged_in)
+
+    def _on_logged_in(self):
+        self.session_ready = True
+        self.paste_state.configure(text="Logged in - automation armed.",
+                                   foreground="#060")
+
     def preview(self):
         try:
             login, pool = self._fields()
@@ -1186,11 +1225,18 @@ class WebStatusManager:
             self.note.set(str(exc))
             return
         live = self.live.get()
-        if live and not (self.cookies.get().strip() or self.cookie_paste
-                         or self.chrome_mode or stored_account()):
+        has_source = bool(self.cookies.get().strip() or self.cookie_paste
+                          or self.chrome_mode)
+        if live and not (has_source or stored_account()):
             self.note.set("Live needs a cookies file, the Chrome button (Chrome "
-                          "closed), or a saved account - save one in the Account "
-                          "section above.")
+                          "closed), a pasted cookie with Login, or a saved account "
+                          "- save one in the Account section above.")
+            return
+        if live and has_source and stored_account() is None \
+                and not getattr(self, "session_ready", False):
+            # Single login: verify the session first, then chain into rotation.
+            self._pending = (login, pool, interval, timeout)
+            self._verify_session(login, timeout, self._after_login)
             return
         if live and not getattr(self, "_live_confirmed", False):
             from tkinter import messagebox
@@ -1205,8 +1251,30 @@ class WebStatusManager:
         self.switching = True
         self._cycle(login, pool, interval, timeout, live, 0)
 
+    def _after_login(self):
+        """Continue a pending live Start after the session verified."""
+        pending, self._pending = getattr(self, "_pending", None), None
+        if not pending:
+            return
+        self.session_ready = True
+        self.paste_state.configure(text="Logged in - automation armed.",
+                                   foreground="#060")
+        login, pool, interval, timeout = pending
+        from tkinter import messagebox
+        ok = messagebox.askyesno(
+            "Send for real?",
+            "Logged in. This will POST your status to Camfrog for real.\n"
+            "Continue?", parent=self.root)
+        if not ok:
+            self.note.set("Live start cancelled. Nothing was sent.")
+            return
+        self._live_confirmed = True
+        self.switching = True
+        self._cycle(login, pool, interval, timeout, True, 0)
+
     def stop(self):
         self.switching = False
+        self.session_ready = False  # next Start re-verifies the session
         self.chrome_mode = False  # Stop also drops an imported Chrome session
         if self.rotate_job is not None:
             try:

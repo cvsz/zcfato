@@ -213,3 +213,99 @@ def test_pasted_cookie_is_the_session_source(tmp_path, monkeypatch):
     manager.open_login_page()
     assert opened == [wsg.LOGIN_PAGE_URL]
     assert "copy the profile cookie" in manager.paste_state.cget("text")
+
+
+def _signed_in_page():
+    return ("<title>Camfrog - profile</title>"
+            "<div class=\"nav-user-logged\">var _user_id = '1'; var nick = 'Seaza';")
+
+
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
+def test_login_arms_automation(tmp_path, monkeypatch):
+    """The single Login button verifies the session and arms automation."""
+    import tkinter
+
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    root = tk_root()
+    root.deiconify()
+    monkeypatch.setattr(tkinter, "Tk", lambda: root)
+    manager = wsg.WebStatusManager()
+    manager.root.update()
+    assert getattr(manager, "session_ready", False) is False
+
+    monkeypatch.setattr(wsg, "fetch_profile", lambda *a: _signed_in_page())
+    manager.cookie_paste_var.set("cf_session=abc123")
+    manager.use_pasted_cookie()
+    manager.login_session()
+    for _ in range(50):
+        manager.root.update()
+        if getattr(manager, "session_ready", False):
+            break
+        import time
+        time.sleep(0.05)
+    assert manager.session_ready is True
+    assert "armed" in manager.paste_state.cget("text")
+    manager.stop()
+
+
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
+def test_login_refuses_logged_out_session(tmp_path, monkeypatch):
+    """A bad cookie leaves automation disarmed with the reason shown."""
+    import tkinter
+
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    root = tk_root()
+    root.deiconify()
+    monkeypatch.setattr(tkinter, "Tk", lambda: root)
+    manager = wsg.WebStatusManager()
+    manager.root.update()
+
+    monkeypatch.setattr(wsg, "fetch_profile",
+                        lambda *a: "<title>Camfrog - Login Page</title>nav-btn-sign-on")
+    manager.cookie_paste_var.set("cf_session=stale")
+    manager.use_pasted_cookie()
+    manager.login_session()
+    for _ in range(50):
+        manager.root.update()
+        import time
+        time.sleep(0.05)
+    assert getattr(manager, "session_ready", False) is False
+    assert "NOT signed in" in manager.note.get()
+    manager.stop()
+
+
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
+def test_start_chains_login_then_rotation(tmp_path, monkeypatch):
+    """One Start press verifies the session, confirms, then rotates."""
+    import tkinter
+
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    monkeypatch.delenv("CAMFROG_USER", raising=False)
+    monkeypatch.delenv("CAMFROG_PASSWORD", raising=False)
+    monkeypatch.setattr("tkinter.messagebox.askyesno", lambda *a, **k: True)
+    root = tk_root()
+    root.deiconify()
+    monkeypatch.setattr(tkinter, "Tk", lambda: root)
+    manager = wsg.WebStatusManager()
+    manager.root.update()
+
+    monkeypatch.setattr(wsg, "fetch_profile", lambda *a: _signed_in_page())
+    posted = []
+    monkeypatch.setattr(wsg, "perform_update",
+                        lambda *a, **k: posted.append((a, k)) or (True, "status updated."))
+    manager.cookie_paste_var.set("cf_session=abc123")
+    manager.use_pasted_cookie()
+    manager.pool_box.delete("1.0", "end")
+    manager.pool_box.insert("1.0", "hello world")
+    manager.live.set(True)
+    manager.start()
+    for _ in range(100):
+        manager.root.update()
+        if posted:
+            break
+        import time
+        time.sleep(0.05)
+    assert posted, "rotation never started after chained login"
+    assert manager.session_ready is True
+    manager.stop()
+    assert manager.session_ready is False
