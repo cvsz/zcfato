@@ -564,7 +564,9 @@ def live_update(login, password, status, timeout, confirm=False):
             type(exc).__name__, exc)
     verdict, detail = summarize_session(html)
     if verdict != "signed-in":
-        return EXIT_BLOCKED, "status update blocked: session not confirmed signed in."
+        guidance = (" Use --confirm-update for live changes; a verified signed-in "
+                    "session is also required.") if not confirm else ""
+        return EXIT_BLOCKED, "status update blocked: session not confirmed signed in." + guidance
     ok, update_message = perform_update(opener, status, timeout, confirm=confirm)
     return (EXIT_OK if ok else EXIT_BLOCKED), "{0}\n{1}".format(detail, update_message)
 
