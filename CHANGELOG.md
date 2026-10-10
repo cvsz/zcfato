@@ -16,7 +16,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 - Web-status live rotation now calls the status updater with its supported arguments, avoiding a duplicate `confirm` argument error.
+- Web-status ignores a cached manually pasted `PHPSESSID` after its entry is cleared, while retaining sessions captured by browser login; an unreadable `webtext.db` now leaves the GUI open with empty fields and a warning.
 - Music DJ now finds and plays common Windows audio formats, reports playback errors, and advances when the current audio file finishes.
+- Music DJ drops an initial request whose local playback fails so it cannot remain stuck as the current song.
+- Release publishing verifies that build artifacts came from the exact clean release commit and rejects a remote version tag that points elsewhere.
 
 ### Changed
 - Marquee `step_seconds` floor lowered 0.5 → 0.3 across the engine and all feature apps (validation, frame-wait floor, GUI spinbox minimum).

@@ -41,7 +41,7 @@ and they document where each split module came from.
 
 ## Releases and self-update
 
-`tools/release.py` publishes a GitHub release from `full-build.bat` outputs: one asset per app (stable names — `room-control.exe`, `music-dj.exe`, …), the all-features zip, a generated generic LINE config, and `SHA256SUMS.txt`. It requires a clean `main` checkout that exactly matches `origin/main`, and pins the tag to that commit. It never uploads the build machine's saved LINE settings. Notes come from the matching `CHANGELOG.md` section; version comes from `APP_VERSION` in `camfrog_auto.py` (kept in sync in every split module).
+`full-build.bat` records the source commit and whether the working tree was clean in ignored `dist/BUILD_SOURCE.txt`. `tools/release.py` publishes a GitHub release from those outputs: one asset per app (stable names — `room-control.exe`, `music-dj.exe`, …), the all-features zip, a generated generic LINE config, and `SHA256SUMS.txt`. It requires the artifact marker to match a clean `main` checkout that exactly matches `origin/main`, rejects an existing release tag that points elsewhere (including annotated tags), and pins new tags to that commit. It never uploads the build machine's saved LINE settings. Notes come from the matching `CHANGELOG.md` section; version comes from `APP_VERSION` in `camfrog_auto.py` (kept in sync in every split module).
 
 Each app carries the same inlined self-update block: check `releases/latest` (read-only, no token) -> compare `APP_VERSION` -> download only its own asset -> verify against the release `SHA256SUMS.txt` -> stage `<app>.new` -> swap via `camfrog-update.cmd` after exit. `tests/test_update.py` covers the flow; a fresh `--dry-run` of `tools/release.py` shows what a publish would upload.
 

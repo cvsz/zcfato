@@ -55,6 +55,8 @@ def test_release_rejects_existing_tag_without_upload(monkeypatch, tmp_path):
     monkeypatch.setattr(release, "flat_sums", lambda pairs: "abc\n")
     monkeypatch.setattr(release, "release_notes", lambda ver: "notes")
     monkeypatch.setattr(release, "release_target", lambda: "a" * 40)
+    monkeypatch.setattr(release, "verify_build_source", lambda target: None)
+    monkeypatch.setattr(release, "verify_remote_tag", lambda tag, target: None)
     monkeypatch.setattr(release, "gh_ready", lambda: True)
     class Completed:
         returncode = 0
@@ -78,6 +80,8 @@ def test_release_pins_tag_to_verified_commit(monkeypatch, tmp_path):
     monkeypatch.setattr(release, "flat_sums", lambda pairs: "abc\n")
     monkeypatch.setattr(release, "release_notes", lambda ver: "notes")
     monkeypatch.setattr(release, "release_target", lambda: target)
+    monkeypatch.setattr(release, "verify_build_source", lambda source: None)
+    monkeypatch.setattr(release, "verify_remote_tag", lambda tag, source: None)
     monkeypatch.setattr(release, "gh_ready", lambda: True)
 
     class Completed:
@@ -94,6 +98,71 @@ def test_release_pins_tag_to_verified_commit(monkeypatch, tmp_path):
     create = next(command for command in calls if command[:3] == ["gh", "release", "create"])
     target_index = create.index("--target")
     assert create[target_index + 1] == target
+
+
+def test_verify_build_source_requires_clean_matching_commit(tmp_path, monkeypatch):
+    monkeypatch.setattr(release, "BUILD_SOURCE", tmp_path / "BUILD_SOURCE.txt")
+    target = "a" * 40
+    with pytest.raises(SystemExit, match="dist/BUILD_SOURCE.txt"):
+        release.verify_build_source(target)
+
+    release.BUILD_SOURCE.write_text(
+        "commit={0}\nclean=false\n".format(target), encoding="utf-8")
+    with pytest.raises(SystemExit, match="built from a dirty working tree"):
+        release.verify_build_source(target)
+
+    release.BUILD_SOURCE.write_text(
+        "commit={0}\nclean=true\n".format("b" * 40), encoding="utf-8")
+    with pytest.raises(SystemExit, match="does not match release HEAD"):
+        release.verify_build_source(target)
+
+    release.BUILD_SOURCE.write_text(
+        "commit={0}\nclean=true\n".format(target), encoding="utf-8")
+    assert release.verify_build_source(target) is None
+
+
+def test_remote_tag_check_uses_peeled_annotated_target(monkeypatch):
+    target = "a" * 40
+    annotated = "b" * 40
+    calls = []
+
+    class Completed:
+        returncode = 0
+        stdout = "{0}\trefs/tags/v2.19.2\n{1}\trefs/tags/v2.19.2^{{}}\n".format(
+            annotated, target)
+
+    monkeypatch.setattr(release.subprocess, "run",
+                        lambda command, **kwargs: calls.append(command) or Completed())
+
+    assert release.remote_tag_target("v2.19.2") == target
+    release.verify_remote_tag("v2.19.2", target)
+    assert len(calls) == 2
+    assert "refs/tags/v2.19.2^{}" in calls[0]
+
+
+def test_release_rejects_mismatched_remote_tag_before_gh(monkeypatch, tmp_path):
+    target = "a" * 40
+    monkeypatch.setattr(release, "DIST", tmp_path)
+    monkeypatch.setattr(release, "app_version", lambda: "2.19.2")
+    monkeypatch.setattr(release, "check_assets", lambda: None)
+    monkeypatch.setattr(release, "verify_feature_hashes", lambda: None)
+    monkeypatch.setattr(release, "FEATURE_EXES", {})
+    monkeypatch.setattr(release, "OTHER_ASSETS", {})
+    monkeypatch.setattr(release, "flat_sums", lambda pairs: "abc\n")
+    monkeypatch.setattr(release, "release_notes", lambda version: "notes")
+    monkeypatch.setattr(release, "release_target", lambda: target)
+    monkeypatch.setattr(release, "verify_build_source", lambda source: None)
+    monkeypatch.setattr(release, "remote_tag_target", lambda tag: "b" * 40)
+    monkeypatch.setattr(release, "gh_ready", lambda: True)
+
+    calls = []
+    monkeypatch.setattr(release.subprocess, "run",
+                        lambda command, **kwargs: calls.append(command))
+
+    with pytest.raises(SystemExit, match="remote tag v2.19.2 points to"):
+        release.main([])
+
+    assert calls == []
 
 
 def test_release_rejects_mismatched_tag(monkeypatch):

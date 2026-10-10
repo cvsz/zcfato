@@ -2052,6 +2052,7 @@ class Runner:
             if queue.current is None:
                 queue.current = queue.queue.pop(0)
                 if not self.dj_start_playback(queue, dj):
+                    queue.current = None
                     raise DJError(bi("could not start local audio; check the file and Windows audio support|"
                                      "เริ่มเล่นเสียงในเครื่องไม่ได้ โปรดตรวจสอบไฟล์และ codec ของ Windows"))
                 return dj["announce_now"].format(title=queue.current["title"],
@@ -2071,6 +2072,7 @@ class Runner:
         if cmd == "skip":
             nxt = queue.skip(nick, owner)
             if not self.dj_start_playback(queue, dj):
+                queue.current = None
                 raise DJError(bi("skipped, but could not start local audio|ข้ามเพลงแล้ว แต่เริ่มเล่นเสียงในเครื่องไม่ได้"))
             if nxt is None:
                 return "[dj] skipped, queue is empty"
@@ -2099,9 +2101,20 @@ class Runner:
         return False
 
     def dj_auto_advance(self, queue, dj):
-        """Advance when the current local audio file finishes."""
+        """Advance finished tracks and recover queued work when none is current."""
         if queue.current is None:
-            return False
+            if not queue.queue:
+                return False
+            queue.current = queue.queue.pop(0)
+            started = self.dj_start_playback(queue, dj)
+            if not started:
+                queue.current = None
+                self.say_now(bi("could not start local audio; check the file and Windows audio support|"
+                                 "เริ่มเล่นเสียงในเครื่องไม่ได้ โปรดตรวจสอบไฟล์และ codec ของ Windows"))
+            else:
+                self.say_now(dj["announce_now"].format(
+                    title=queue.current["title"], user=queue.current["user"]))
+            return True
         if not self.dj_started:
             if not self.dry and dj.get("audio_backend", "chat") == "local":
                 if time.monotonic() >= getattr(self, "dj_retry_at", 0.0):
@@ -2121,6 +2134,7 @@ class Runner:
         if nxt is None:
             self.say_now("[dj] queue finished")
         elif not started:
+            queue.current = None
             self.say_now(bi("could not start local audio; check the file and Windows audio support|"
                              "เริ่มเล่นเสียงในเครื่องไม่ได้ โปรดตรวจสอบไฟล์และ codec ของ Windows"))
         else:

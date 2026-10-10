@@ -24,6 +24,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = ROOT / "dist"
+BUILD_SOURCE = DIST / "BUILD_SOURCE.txt"
 
 # Running as `python tools/release.py` puts tools/ (not the repository root)
 # on sys.path. Resolve the project's LINE defaults through the checkout.
@@ -118,6 +119,47 @@ def release_target():
     return head
 
 
+def verify_build_source(target):
+    """Require full-build.bat's marker to bind artifacts to this clean HEAD."""
+    try:
+        data = {}
+        for line in BUILD_SOURCE.read_text(encoding="utf-8").splitlines():
+            key, separator, value = line.partition("=")
+            if not separator or key in data:
+                raise ValueError("invalid build source marker")
+            data[key] = value
+    except (OSError, ValueError) as exc:
+        raise SystemExit("missing or invalid dist/BUILD_SOURCE.txt; run full-build.bat") from exc
+    commit = data.get("commit", "")
+    if data.get("clean") != "true":
+        raise SystemExit("release artifacts were built from a dirty working tree")
+    if commit != target:
+        raise SystemExit("build source commit does not match release HEAD")
+
+
+def remote_tag_target(tag):
+    """Return the remote tag's commit, peeling annotated tags when necessary."""
+    base_ref = "refs/tags/" + tag
+    result = subprocess.run(
+        ["git", "ls-remote", "--tags", "origin", base_ref, base_ref + "^{}"],
+        cwd=ROOT, capture_output=True, text=True)
+    if result.returncode:
+        raise SystemExit("could not verify remote release tag")
+    refs = {}
+    for line in result.stdout.splitlines():
+        fields = line.split("\t", 1)
+        if len(fields) == 2:
+            refs[fields[1]] = fields[0]
+    return refs.get(base_ref + "^{}") or refs.get(base_ref)
+
+
+def verify_remote_tag(tag, target):
+    existing = remote_tag_target(tag)
+    if existing and existing != target:
+        raise SystemExit("remote tag {0} points to {1}, not verified release HEAD {2}".format(
+            tag, existing, target))
+
+
 def verify_feature_hashes():
     """Verify the seven packaged EXEs against the build-produced SHA256SUMS."""
     manifest = DIST / "SHA256SUMS.txt"
@@ -184,6 +226,8 @@ def main(argv=None):
             print("dry-run: nothing was created.")
             return 0
         target = release_target()
+        verify_build_source(target)
+        verify_remote_tag(tag, target)
         if not gh_ready():
             print("gh is not authenticated; run `gh auth login` first.")
             return 2

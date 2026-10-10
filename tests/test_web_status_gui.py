@@ -152,6 +152,7 @@ def _bare_manager(cookie_text="", cookie_paste="", live=True):
     manager.interval = _Value("30")
     manager.cookie_paste_var = _Value(cookie_text)
     manager.cookie_paste = cookie_paste
+    manager._cookie_from_browser = False
     manager.session_ready = False
     manager.live = _Value(live)
     manager.note = _Value()
@@ -187,6 +188,47 @@ def test_login_session_rejects_empty_php_sessid_and_discards_old_session():
     assert manager.cookie_paste == ""
     assert manager.session_ready is False
     assert "PHPSESSID" in manager.note.get()
+
+
+def test_clearing_manually_pasted_cookie_discards_cached_session():
+    cookie = "PHPSESSID=abc1234567890123"
+    manager = _bare_manager(cookie, cookie)
+    manager.session_ready = True
+    manager.cookie_paste_var.set("")
+
+    with pytest.raises(ValueError, match="PHPSESSID"):
+        manager._sync_pasted_cookie()
+
+    assert manager.cookie_paste == ""
+    assert manager.session_ready is False
+
+
+def test_browser_captured_cookie_remains_available_with_empty_entry():
+    cookie = "PHPSESSID=abc1234567890123"
+    manager = _bare_manager("", cookie)
+    manager._verify_session = lambda *args: None
+
+    manager._browser_login_done(cookie)
+
+    assert manager._sync_pasted_cookie() == cookie
+    assert manager.cookie_paste == cookie
+    assert manager._cookie_from_browser is True
+
+
+def test_manually_entered_browser_cookie_is_cleared_with_its_entry():
+    cookie = "PHPSESSID=abc1234567890123"
+    manager = _bare_manager("", cookie)
+    manager._cookie_from_browser = True
+    manager.cookie_paste_var.set(cookie)
+
+    assert manager._sync_pasted_cookie() == cookie
+    assert manager._cookie_from_browser is False
+    manager.cookie_paste_var.set("")
+
+    with pytest.raises(ValueError, match="PHPSESSID"):
+        manager._sync_pasted_cookie()
+
+    assert manager.cookie_paste == ""
 
 
 def test_start_verifies_latest_php_sessid_and_continues_to_rotation(monkeypatch, tmp_path):
@@ -307,6 +349,39 @@ def test_web_text_database_persists_ten_status_lines(tmp_path):
     assert wsg.load_web_text_lines(path) == [""] * 10
     assert wsg.save_web_text_lines(lines, path) == 10
     assert wsg.load_web_text_lines(path) == lines
+
+
+def test_web_text_database_load_falls_back_without_overwriting_corrupt_file(tmp_path):
+    path = tmp_path / "webtext.db"
+    path.write_bytes(b"not a sqlite database")
+    original = path.read_bytes()
+
+    lines, warning = wsg.load_web_text_slots(path)
+
+    assert lines == [""] * 10
+    assert "webtext.db" in warning
+    assert path.read_bytes() == original
+
+
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
+def test_corrupt_web_text_database_does_not_prevent_gui_open(tmp_path, monkeypatch):
+    import tkinter
+
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    path = tmp_path / "webtext.db"
+    path.write_bytes(b"not a sqlite database")
+    original = path.read_bytes()
+    root = tk_root()
+    root.deiconify()
+    monkeypatch.setattr(tkinter, "Tk", lambda: root)
+
+    manager = wsg.WebStatusManager()
+    manager.root.update()
+
+    assert len(manager.pool_entries) == 10
+    assert "Could not load webtext.db" in manager.note.get()
+    assert path.read_bytes() == original
+    manager.stop()
 
 
 def _signed_in_page():

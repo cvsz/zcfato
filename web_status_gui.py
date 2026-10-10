@@ -109,6 +109,16 @@ def load_web_text_lines(path=None):
     return values
 
 
+def load_web_text_slots(path=None):
+    """Load GUI status slots, falling back without modifying an unreadable DB."""
+    try:
+        return load_web_text_lines(path), ""
+    except (OSError, sqlite3.Error) as exc:
+        return ([""] * WEB_TEXT_SLOT_COUNT,
+                "Could not load webtext.db ({0}); status fields are empty. "
+                "The existing database was left unchanged.".format(type(exc).__name__))
+
+
 def save_web_text_lines(lines, path=None):
     """Save exactly ten single-line status slots to the local database."""
     database = Path(path) if path is not None else web_text_db_path()
@@ -842,6 +852,7 @@ class WebStatusManager:
         self.rotate_job = None
         self.chrome_mode = False
         self.cookie_paste = ""
+        self._cookie_from_browser = False
         self.session_ready = False
         self._pending = None
         self._start_generation = 0
@@ -884,7 +895,7 @@ class WebStatusManager:
         session_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
         self.nb.add(setup_tab, text="Setup")
         self.nb.add(session_tab, text="Account & Session")
-        pool_lines = load_web_text_lines()
+        pool_lines, pool_load_warning = load_web_text_slots()
 
         form = self.ttk.Frame(setup_tab)
         form.pack(fill="x")
@@ -969,6 +980,8 @@ class WebStatusManager:
         self.btn_stop.pack(side="left", padx=5)
         self.ttk.Button(actions2, text="How to capture", command=self.capture).pack(side="right")
         self.note = self.tk.StringVar(value="Dry-run is on. Nothing has been sent.")
+        if pool_load_warning:
+            self.note.set(pool_load_warning)
         self.ttk.Label(self.root, textvariable=self.note, anchor="w",
                        padding=(10, 0, 10, 8), wraplength=450).pack(fill="x")
         self.root.after(120, self._poll)
@@ -1068,20 +1081,28 @@ class WebStatusManager:
         """Validate the current entry and use it instead of any stale cached paste."""
         text = self.cookie_paste_var.get().strip()
         if not text:
-            if self.cookie_paste:
+            if self.cookie_paste and self._cookie_from_browser:
                 return self.cookie_paste
+            if self.cookie_paste or self.session_ready:
+                self.cookie_paste = ""
+                self._cookie_from_browser = False
+                self.session_ready = False
+                self._invalidate_pending_start()
             raise ValueError("Enter or paste PHPSESSID first (Session tab).")
         changed = text != self.cookie_paste
         if changed:
             self.session_ready = False
             self._invalidate_pending_start()
+        self._cookie_from_browser = False
         try:
             cookie_from_paste(text)
         except ValueError:
             if changed:
                 self.cookie_paste = ""
+                self._cookie_from_browser = False
             raise
         self.cookie_paste = text
+        self._cookie_from_browser = False
         return text
 
     def _session_jar(self):
@@ -1130,8 +1151,10 @@ class WebStatusManager:
             self.note.set(str(exc))
             return
         self.cookie_paste = cookies
+        self._cookie_from_browser = True
         self.cookie_paste_var.set("")
         self.session_ready = False
+        self._invalidate_pending_start()
         self.paste_state.configure(text="Session captured from browser.",
                                    foreground="#555")
         self._verify_session(self._login_name(),
