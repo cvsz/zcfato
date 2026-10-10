@@ -369,6 +369,7 @@ def test_web_status_marquee_scrolls_each_message_and_settles_on_full_text():
 
 
 def test_web_status_marquee_sends_one_slot_then_advances_to_next(monkeypatch, tmp_path):
+    assert wsg.WEB_MARQUEE_STEP_SECONDS == 5
     monkeypatch.setattr(wsg, "BASE", tmp_path)
     manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123")
     manager.pool_vars = [_Value("This is a long web status message that should scroll."),

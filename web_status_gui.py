@@ -62,7 +62,7 @@ ROTATE_INTERVAL_MIN = 30
 ROTATE_INTERVAL_DEFAULT = 300
 ROTATE_INTERVAL_MAX = 86400
 
-WEB_MARQUEE_STEP_SECONDS = 10
+WEB_MARQUEE_STEP_SECONDS = 5
 WEB_MARQUEE_WIDTH = 28
 WEB_MARQUEE_STRIDE = 2
 WEB_MARQUEE_SEPARATOR = "   \u2022   "
@@ -1071,7 +1071,7 @@ class WebStatusManager:
         self.marquee_mode = self.tk.BooleanVar(value=False)
         self.infinity_loop = self.tk.BooleanVar(value=True)
         self.ttk.Checkbutton(
-            modes, text="Marquee (10 seconds per frame)",
+            modes, text="Marquee (5 seconds per frame)",
             variable=self.marquee_mode).pack(side="left")
         self.ttk.Checkbutton(
             modes, text="Infinity Loop (last slot → slot 1)",
