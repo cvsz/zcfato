@@ -3695,9 +3695,14 @@ def build_app():
 
         def _auto_update_check(self):
             def work():
-                found = check_for_update("status-marquee.exe")
-                if found:
-                    self.root.after(0, self.check_update)
+                try:
+                    found = check_for_update("status-marquee.exe")
+                    if found:
+                        self.root.after(0, self.check_update)
+                except (OSError, ValueError, KeyError, TypeError) as exc:
+                    # GitHub 403/rate limits, offline mode and invalid metadata
+                    # must not crash an unattended GUI background thread.
+                    logging.warning("Automatic update check unavailable: %s", type(exc).__name__)
             threading.Thread(target=work, daemon=True).start()
 
         def schedule_save(self, *_args):
