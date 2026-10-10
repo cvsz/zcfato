@@ -66,5 +66,7 @@ def test_action_grid_has_two_columns_and_distinct_button_colours(name):
     assert 'columnconfigure(0, weight=1' in body
     assert 'columnconfigure(1, weight=1' in body
     assert 'row=index // 2, column=index % 2' in body
-    assert all(colour in body for colour in ("#1769c2", "#228b35", "#008f9c", "#d72d32"))
+    assert all(colour in body for colour in ("#1769c2", "#17682a", "#006d78", "#d72d32"))
     assert 'command=command' in body
+    assert 'highlightthickness=2' in body
+    assert 'highlightcolor="#102b45"' in body
