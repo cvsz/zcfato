@@ -21,3 +21,72 @@ def test_auto_update_worker_handles_network_error(name):
             for item in handler.type.elts)
         for handler in node.handlers) for node in worker.body), (
         "Background update check must catch HTTPError (an OSError subclass)")
+
+
+
+@pytest.mark.parametrize("module_name", ["status_random_gui", "status_marquee_gui"])
+@pytest.mark.parametrize("payload", [b"[]", b'{"tag_name":"v1.2.3","assets":[null]}',
+                                     b'{"tag_name":"v1.2.3","assets":{}}'])
+def test_release_metadata_rejects_invalid_json_shapes(module_name, payload, monkeypatch):
+    module = __import__(module_name)
+
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self):
+            return payload
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", lambda *a, **k: Response())
+    with pytest.raises(ValueError):
+        module.github_latest_release()
+
+
+@pytest.mark.parametrize("module_name", ["status_random_gui", "status_marquee_gui"])
+def test_manual_update_worker_handles_rate_limit(module_name, monkeypatch):
+    """Manual update's SECOND network request must not raise in the daemon worker."""
+    import urllib.error
+    import threading
+    import queue
+    module = __import__(module_name)
+    result = queue.Queue()
+
+    class FakeRoot:
+        def after(self, _delay, callback):
+            callback()
+
+    class FakeLabel:
+        def configure(self, **kwargs):
+            pass
+
+    class FakeWindow:
+        root = FakeRoot()
+        note = FakeLabel()
+        _tr = staticmethod(lambda en, th: en)
+        _update_done = lambda self, state, message: result.put((state, message))
+
+    def fail(*args, **kwargs):
+        raise urllib.error.HTTPError("https://api.github.com/", 403,
+                                     "rate limit exceeded", {}, None)
+    monkeypatch.setattr(module, "self_update", fail)
+    original = threading.Thread
+    spawned = []
+    class SynchronousThread:
+        def __init__(self, target, **kwargs):
+            self.target = target
+        def start(self):
+            self.target()
+    monkeypatch.setattr(module.threading, "Thread", SynchronousThread)
+    src = (ROOT / (module_name + ".py")).read_text(encoding="utf-8")
+    import ast
+    tree = ast.parse(src)
+    method = next(node for node in ast.walk(tree)
+                  if isinstance(node, ast.FunctionDef) and node.name == "check_update")
+    namespace = {}
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<isolated-method>", "exec"), 
+         {"threading": module.threading, "self_update": module.self_update}, namespace)
+    namespace["check_update"](FakeWindow())
+    state, message = result.get_nowait()
+    assert state == "failed"
+    assert "unavailable" in message
