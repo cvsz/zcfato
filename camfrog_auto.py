@@ -1288,7 +1288,7 @@ def pid_is_ours(pid, image=None):
         return True
     image = image if image is not None else pid_image(pid)
     if not image:
-        return True  # cannot tell: keep the old behaviour
+        return False  # fail closed: never signal an unidentified or inaccessible PID
     name = Path(image).name.lower()
     return "camfrog" in name or name.startswith("python") or name == Path(sys.executable).name.lower()
 
@@ -1361,7 +1361,7 @@ def cmd_stop(cfg):
             break
         time.sleep(0.1)
     forced = False
-    if pid_alive(pid):
+    if pid_alive(pid) and pid_is_ours(pid):
         try:
             subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
                            capture_output=True, check=False, timeout=10)
