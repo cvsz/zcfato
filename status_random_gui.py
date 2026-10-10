@@ -3648,7 +3648,7 @@ def build_app():
             for index, (title_en, title_th, symbol, color, command) in enumerate((
                 ("1. Discovery", "1. ค้นหา Control", "⌕", "#1764b0", self.discover),
                 ("2. Apply", "2. ใช้ทันที", "✓", "#188439", self.apply_now),
-                ("3. Start", "3. เริ่ม", "▶", "#008c99",
+                ("3. Start", "3. เริ่ม", "▶", "#006c77",
                  lambda: self.set_enabled(self.mode, True)),
                 ("4. Stop", "4. หยุด", "■", "#be2828",
                  lambda: self.set_enabled(self.mode, False)),
@@ -3659,7 +3659,8 @@ def build_app():
                     activebackground=color, activeforeground="#ffffff",
                     font=("Segoe UI", 10, "bold"), height=2,
                     relief="raised", bd=2, cursor="hand2",
-                    highlightthickness=0, takefocus=True,
+                    highlightthickness=2, highlightbackground="#eef1f4",
+                    highlightcolor="#111827", takefocus=True,
                 )
                 button.grid(row=index // 2, column=index % 2,
                             sticky="nsew", padx=4, pady=4)
