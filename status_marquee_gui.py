@@ -1227,7 +1227,8 @@ def new_lines(prev, cur):
 
 # ---------- process control (background mode) ----------
 def pid_path(cfg):
-    return BASE / cfg["safety"]["pid_file"]
+    # Each standalone status worker writes its PID/STOP into its own DATA_DIR.
+    return DATA_DIR / cfg["safety"]["pid_file"]
 
 
 def read_pid(cfg):
@@ -1312,7 +1313,7 @@ def child_env():
 
 
 def stats_path(cfg):
-    return BASE / cfg["stats"]["file"]
+    return DATA_DIR / cfg["stats"]["file"]
 
 
 def cmd_state(cfg):

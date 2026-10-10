@@ -318,3 +318,27 @@ def test_status_gui_marquee_shape_skipped_when_scroll_off():
     cfg["status"]["marquee"]["width"] = 3
     errs, _ = gui.validate(cfg)
     assert not [e for e in errs if "marquee" in e]
+
+
+@pytest.mark.parametrize("module_name", ["status_random_gui", "status_marquee_gui"])
+def test_pid_and_stats_paths_match_between_gui_and_worker(module_name, tmp_path, monkeypatch):
+    """GUI and worker must resolve PID/stats files identically.
+
+    Regression: the worker is spawned with ZCFATO_DATA_DIR, which re-points
+    BASE at DATA_DIR. Resolving these files under BASE split-brained them:
+    the worker wrote one place, the GUI read another, so Start-verification,
+    Stop, and refresh_state could never see the worker.
+    """
+    module = pytest.importorskip(module_name)
+    exe_dir = tmp_path / "app"
+    data_dir = exe_dir / "mode-data"
+    data_dir.mkdir(parents=True)
+    cfg = {"safety": {"pid_file": "w.pid"}, "stats": {"file": "s.json"}}
+    monkeypatch.setattr(module, "DATA_DIR", data_dir)
+    # GUI side: BASE is the exe dir.
+    monkeypatch.setattr(module, "BASE", exe_dir)
+    gui_pid, gui_stats = module.pid_path(cfg), module.stats_path(cfg)
+    # Worker side: ZCFATO_DATA_DIR re-points BASE at DATA_DIR.
+    monkeypatch.setattr(module, "BASE", data_dir)
+    assert module.pid_path(cfg) == gui_pid == data_dir / "w.pid"
+    assert module.stats_path(cfg) == gui_stats == data_dir / "s.json"
