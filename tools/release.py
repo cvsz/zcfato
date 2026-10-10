@@ -12,6 +12,7 @@ own file), the line-status-changer exe + config, the all-features zip, and
 SHA256SUMS.txt (the self-update verifies downloads against it).
 """
 import argparse
+import hashlib
 import re
 import subprocess
 import sys
@@ -81,6 +82,33 @@ def check_assets():
             ", ".join(sorted(missing))))
 
 
+def verify_feature_hashes():
+    """Verify the seven packaged EXEs against the build-produced SHA256SUMS."""
+    manifest = DIST / "SHA256SUMS.txt"
+    if not manifest.is_file():
+        raise SystemExit("missing dist/SHA256SUMS.txt; run a full build first")
+    expected = {str(path.relative_to(DIST)).replace("\\", "/"): path
+                for path in FEATURE_EXES.values()}
+    found = {}
+    for line in manifest.read_text(encoding="utf-8").splitlines():
+        parts = line.split(maxsplit=1)
+        if len(parts) != 2 or not re.fullmatch(r"[0-9a-fA-F]{64}", parts[0]):
+            raise SystemExit("invalid SHA256SUMS.txt entry")
+        name = parts[1].lstrip("*").replace("\\", "/")
+        if name in found or name not in expected:
+            raise SystemExit("unexpected or duplicate SHA256SUMS entry: " + name)
+        found[name] = parts[0].lower()
+    if set(found) != set(expected):
+        raise SystemExit("SHA256SUMS.txt does not cover exactly seven feature EXEs")
+    for name, path in expected.items():
+        h = hashlib.sha256()
+        with path.open("rb") as source:
+            for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                h.update(chunk)
+        if h.hexdigest() != found[name]:
+            raise SystemExit("artifact checksum mismatch: " + name)
+
+
 def gh_ready():
     result = subprocess.run(["gh", "auth", "status"], capture_output=True)
     return result.returncode == 0
@@ -89,12 +117,15 @@ def gh_ready():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--tag", default=None, help="override vX.Y.Z")
+    parser.add_argument("--tag", default=None, help="override vX.Y.Z (must match APP_VERSION)")
     args = parser.parse_args(argv)
 
     version = app_version()
     tag = args.tag or "v{0}".format(version)
+    if tag != "v{0}".format(version):
+        raise SystemExit("release tag must match APP_VERSION to prevent mismatched releases")
     check_assets()
+    verify_feature_hashes()
     pairs = list(FEATURE_EXES.items()) + list(OTHER_ASSETS.items())
     sums_path = DIST / "release-SHA256SUMS.txt"
     sums_path.write_text(flat_sums(pairs), encoding="utf-8", newline="\n")
@@ -116,17 +147,19 @@ def main(argv=None):
         return 2
     exists = subprocess.run(["gh", "release", "view", tag], capture_output=True)
     if exists.returncode == 0:
-        print("release {0} already exists; uploading with --clobber.".format(tag))
-        command = ["gh", "release", "upload", tag] + assets + ["--clobber"]
-        return subprocess.run(command).returncode
+        print("release {0} already exists; refusing to overwrite published assets.".format(tag))
+        return 3
     with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False,
                                      encoding="utf-8") as handle:
         handle.write(notes)
         notes_path = handle.name
-    command = (["gh", "release", "create", tag] + assets
-               + ["--title", "Camfrog feature apps {0}".format(version),
-                  "--notes-file", notes_path])
-    return subprocess.run(command).returncode
+    try:
+        command = (["gh", "release", "create", tag] + assets
+                   + ["--title", "Camfrog feature apps {0}".format(version),
+                      "--notes-file", notes_path])
+        return subprocess.run(command).returncode
+    finally:
+        Path(notes_path).unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
