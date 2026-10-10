@@ -3340,6 +3340,27 @@ def build_app():
     class App:
         def __init__(self, cfg_path):
             self.root = tk.Tk()
+            style = ttk.Style(self.root)
+            try:
+                style.theme_use("clam")
+            except tk.TclError:
+                pass
+            style.configure("TFrame", background="#edf2f5")
+            style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
+            style.configure("TRadiobutton", background="#edf2f5", foreground="#233548")
+            style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
+            style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
+                            font=("Segoe UI", 9, "bold"))
+            style.configure("TButton", padding=(9, 6), font=("Segoe UI", 9),
+                            background="#d9e8f0", foreground="#1a3a52")
+            style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
+            style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
+                            foreground="#152b3a")
+            style.configure("TNotebook", background="#edf2f5")
+            style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
+            style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
+                      foreground=[("selected", "#096c7b")])
             self.root.geometry("980x700")
             self.root.minsize(820, 560)
             self.model = ConfigModel(cfg_path)

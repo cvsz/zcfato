@@ -3553,6 +3553,22 @@ def build_app():
                 style.theme_use("clam")
             except tk.TclError:
                 pass
+            style.configure("TFrame", background="#edf2f5")
+            style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
+            style.configure("TRadiobutton", background="#edf2f5", foreground="#233548")
+            style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
+            style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
+                            font=("Segoe UI", 9, "bold"))
+            style.configure("TButton", padding=(9, 6), font=("Segoe UI", 9),
+                            background="#d9e8f0", foreground="#1a3a52")
+            style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
+            style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
+                            foreground="#152b3a")
+            style.configure("TNotebook", background="#edf2f5")
+            style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
+            style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
+                      foreground=[("selected", "#096c7b")])
             style.configure("Brand.TLabel", font=("Segoe UI", 10, "bold"), foreground="#126c68")
             style.configure("State.TLabel", font=("Segoe UI", 9, "bold"))
             style.configure("State.OK.TLabel", font=("Segoe UI", 9, "bold"), foreground="#138a55")
@@ -3561,7 +3577,7 @@ def build_app():
             style.configure("Mode.TNotebook", tabmargins=(0, 5, 0, 0))
             style.configure("Mode.TNotebook.Tab", padding=(12, 7), font=("Segoe UI", 9, "bold"))
             style.configure("Action.TButton", padding=(10, 7), font=("Segoe UI", 9, "bold"))
-            style.configure("Card.TFrame", background="#f4f7f7", padding=(2, 2))
+            style.configure("Card.TFrame", background="#ffffff", padding=(2, 2))
             style.configure("Entry.TEntry", padding=(2, 2))
             outer = ttk.Frame(root, padding=(12, 10, 12, 10))
             outer.pack(fill="both", expand=True)
