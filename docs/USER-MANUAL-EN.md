@@ -51,7 +51,7 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 
 ## 7. Status Marquee
 
-- Long statuses scroll across a window of `width` characters: **Step** (seconds per frame, min 0.5), **Stride** (clusters per frame), **Loop** (repeat without settling). With **Scroll** off (default), each pool line is applied whole, one per tick, rotating 1..N and wrapping.
+- Long statuses scroll across a window of `width` characters: **Step** (seconds per frame, min 0.3), **Stride** (clusters per frame), **Loop** (repeat the ticker until `status.interval_seconds`, then move to the next status). With **Scroll** off (default), each pool line is applied whole, one per tick, rotating 1..N and wrapping. Text that fits within `width` stays static.
 - Every frame is a real status change on Camfrog, so keep frames slow and few. Start with dry-run.
 - Thai-safe: never splits vowel/tone clusters, never emits a blank frame.
 
@@ -76,7 +76,10 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 Status: login flow mapped; the status-update endpoint was captured from a logged-in `profiles.camfrog.com/home.php` session (POST `{status, csrf}` to `/ajax/update_status.php`) and stays gated. CLI live sends need `--confirm-update`; GUI live Start asks for confirmation.
 
 - No args opens the GUI; any args use the CLI (`web-status.exe --login Seaza --status "..."`). Dry-run is default — no network at all.
-- In Setup, enter up to ten statuses in the numbered single-line fields. **Save to webtext.db** saves each slot beside the app; **Start** also saves the current values and rotates through non-empty slots every N seconds.
+- In Setup, enter up to ten statuses in the numbered single-line fields. **Save to webtext.db** saves each slot beside the app; **Start** also saves the current values and rotates through non-empty slots. **Switch every** defaults to 8 seconds and accepts values down to 0.5; **Timeout** defaults to 2 seconds.
+- GUI input fields support **Ctrl+V** and **Shift+Insert**; right-click an editable field and choose **Paste** if needed.
+- Turn on **Marquee** to scroll each status one frame every 0.5 seconds, then move to the next populated slot. **Infinity Loop** is on by default; after the last populated slot it starts again at slot 1. Turn it off to stop after one pass. With Marquee off, **Switch every** controls the slot rotation interval.
+- **Activity Log** shows and appends activity events to `web_status.log` beside the app. Failed operations include bounded diagnostics such as the HTTP status, retry delay, response shape, or server error message. Status text, passwords, cookies, CSRF values, and sensitive response headers are redacted.
 - In **Account & Session**, press **Open login page**, sign in in your browser, then copy `PHPSESSID=...` from the `profiles.camfrog.com/home.php` request in DevTools and paste it into the session field. Press **Login** to verify the current cookie; a signed-in result arms automation. The cookie stays in memory only.
 - With **Send live** enabled, **Start** verifies the current cookie if Login has not already armed the session, asks for confirmation, and begins rotation. **Stop** cancels the loop and disarms the session, so the next Start verifies again. Dry-run remains the default.
 - CLI password login can be blocked by CAPTCHA; the tool does not bypass it. For CLI use, `--probe` is read-only and `--cookies-file` accepts a Netscape cookie export. Never paste passwords or cookie values into chat, issues, or files.

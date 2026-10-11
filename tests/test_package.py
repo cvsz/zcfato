@@ -198,3 +198,11 @@ def test_bat_files_are_crlf():
     for p in list(root.glob("*.bat")) + list((root / "extras").glob("*.bat")):
         b = p.read_bytes()
         assert b.count(b"\n") == b.count(b"\r\n"), f"{p.name} has bare LF (cmd.exe breaks)"
+
+
+def test_build_cleans_stale_root_web_status_exe_before_packaging():
+    root = Path(__file__).resolve().parent.parent
+    build = (root / "build.bat").read_text(encoding="utf-8")
+    cleanup = r'if exist "dist\web-status.exe" del /q "dist\web-status.exe"'
+    assert cleanup in build
+    assert build.index(cleanup) < build.index("tools\\package.py")

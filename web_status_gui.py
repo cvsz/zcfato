@@ -1,5 +1,6 @@
 """Camfrog web status updater - self-contained (updater logic + GUI inlined, no shared imports)."""
 import argparse
+import datetime
 import getpass
 import hashlib
 import json
@@ -15,11 +16,14 @@ import random
 import socket
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
+from html.parser import HTMLParser
 from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
 from pathlib import Path
 import queue
 import threading
+import unicodedata
 
 
 # ============================================================
@@ -56,17 +60,298 @@ EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_BLOCKED = 3
 
-ROTATE_INTERVAL_MIN = 30
-ROTATE_INTERVAL_DEFAULT = 300
+ROTATE_INTERVAL_MIN = 0.5
+ROTATE_INTERVAL_DEFAULT = 8.0
 ROTATE_INTERVAL_MAX = 86400
+
+WEB_MARQUEE_STEP_SECONDS = 0.5
+WEB_MARQUEE_WIDTH = 28
+WEB_MARQUEE_STRIDE = 2
+WEB_MARQUEE_SEPARATOR = "   \u2022   "
+WEB_MARQUEE_MAX_FRAMES = 80
+
+WEB_STATUS_LOG_NAME = "web_status.log"
+WEB_STATUS_LOG_MAX_BYTES = 512 * 1024
+WEB_STATUS_LOG_BACKUPS = 3
+WEB_STATUS_LOG_GUI_LINES = 200
+WEB_STATUS_LOG_DETAIL_MAX_CHARS = 1000
+WEB_STATUS_LOG_FAILURE_EVENTS = frozenset((
+    "session_verification_failed",
+    "status_update_failed",
+))
+WEB_STATUS_LOG_EVENTS = {
+    "session_verification_started": "Session verification started",
+    "session_verification_succeeded": "Session verification succeeded",
+    "session_verification_failed": "Session verification failed",
+    "browser_login_started": "Browser login started",
+    "browser_session_captured": "Browser session captured",
+    "status_lines_saved": "Status lines saved",
+    "dry_run_rotation_started": "Dry-run rotation started",
+    "live_rotation_started": "Live rotation started",
+    "marquee_completed": "Marquee completed all populated slots",
+    "status_previewed": "Dry-run status previewed",
+    "status_update_succeeded": "Live status update succeeded",
+    "status_update_failed": "Live status update failed",
+    "rotation_stopped": "Rotation stopped",
+}
+_WEB_STATUS_LOG_LOCK = threading.Lock()
+
+
+def _sanitize_web_status_detail(value, secrets=()):
+    """Bound diagnostics and remove cookie, token, and caller-known secret values."""
+    text = str(value)
+    for secret in sorted((str(item) for item in secrets if item),
+                         key=len, reverse=True):
+        if len(secret) <= 3:
+            text = re.sub(r"(?<!\w){0}(?!\w)".format(re.escape(secret)),
+                          "[redacted]", text)
+        else:
+            text = text.replace(secret, "[redacted]")
+    text = re.sub(
+        r"(?im)(\b(?:cookie|set-cookie|authorization)\s*:\s*)[^\r\n]*",
+        r"\1[redacted]", text)
+    text = re.sub(
+        r"(?i)(\b(?:php\s*session\s*id|phpsessid|session[_-]?id|csrf(?:[_-]?token)?|"
+        r"access[_-]?token|auth[_-]?token|authorization|token|password|passwd|secret)\b"
+        r"[\"']?\s*[:=]\s*)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^&\s,;}}\]]+)",
+        r"\1[redacted]", text)
+    text = re.sub(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+                  "[email redacted]", text)
+    text = re.sub(r"(?<!\w)\+?\d[\d().\s-]{6,}\d(?!\w)",
+                  "[number redacted]", text)
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    text = re.sub(r"\s+", " ", text).replace("|", "/").strip()
+    if len(text) > WEB_STATUS_LOG_DETAIL_MAX_CHARS:
+        text = text[:WEB_STATUS_LOG_DETAIL_MAX_CHARS - 14].rstrip() + " [truncated]"
+    return text
+
+
+def _web_status_response_keys(data):
+    """Return a small, safe summary of untrusted JSON object keys."""
+    safe = []
+    for key in data:
+        if isinstance(key, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,39}", key):
+            if re.search(r"(?i)cookie|csrf|token|password|secret|session", key):
+                safe.append("[sensitive-key]")
+            else:
+                safe.append(key)
+        else:
+            safe.append("[other-key]")
+    return ",".join(sorted(set(safe))[:12]) or "none"
+
+
+def _web_status_value_summary(value, secrets=()):
+    if isinstance(value, str):
+        return "string({0} chars): {1}".format(
+            len(value), _sanitize_web_status_detail(value, secrets=secrets))
+    if isinstance(value, (bool, int, float)) or value is None:
+        return "{0}: {1}".format(type(value).__name__, value)
+    if isinstance(value, (dict, list, tuple)):
+        return "{0}({1} items)".format(type(value).__name__, len(value))
+    return type(value).__name__
+
+
+class _VisibleResponseText(HTMLParser):
+    """Collect visible response text without HTML attributes or script contents."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self._hidden_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in ("script", "style", "noscript"):
+            self._hidden_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag.lower() in ("script", "style", "noscript") and self._hidden_depth:
+            self._hidden_depth -= 1
+
+    def handle_data(self, data):
+        if not self._hidden_depth and data.strip():
+            self.parts.append(data.strip())
+
+
+def _web_status_error_response_summary(value, secrets=()):
+    """Summarize visible server error text while excluding markup and common PII."""
+    if not isinstance(value, str):
+        return _web_status_value_summary(value, secrets=secrets)
+    parser = _VisibleResponseText()
+    try:
+        parser.feed(value)
+        parser.close()
+        visible = " ".join(parser.parts)
+    except Exception:
+        visible = value
+    visible = _sanitize_web_status_detail(visible, secrets=secrets)
+    if len(visible) > 300:
+        visible = visible[:286].rstrip() + " [truncated]"
+    return "string({0} chars); visible_text={1}".format(len(value), visible or "empty")
+
+
+def _session_cookie_redaction_values(cookie):
+    if not cookie:
+        return ()
+    value = str(cookie).strip()
+    result = [value]
+    if "=" in value:
+        raw = value.split("=", 1)[1].strip()
+        if raw:
+            result.append(raw)
+    return tuple(result)
+
+
+def _web_status_request_error(stage, exc, secrets=()):
+    """Describe a failed HTTP request without recording response headers or secrets."""
+    if isinstance(exc, urllib.error.HTTPError):
+        parts = ["{0}: HTTPError HTTP {1}".format(stage, exc.code)]
+        if exc.reason:
+            parts.append("reason={0}".format(exc.reason))
+        headers = exc.headers or {}
+        for name, label in (("Content-Type", "content_type"),
+                            ("Retry-After", "retry_after")):
+            value = headers.get(name)
+            if value:
+                parts.append("{0}={1}".format(label, value))
+        try:
+            body = exc.read(4096).decode("utf-8", "replace")
+            if body:
+                try:
+                    parsed = json.loads(body)
+                except ValueError:
+                    parts.append("response_body={0} chars (not JSON)".format(len(body)))
+                else:
+                    if isinstance(parsed, dict):
+                        parts.append("response_keys={0}".format(
+                            _web_status_response_keys(parsed)))
+                        if parsed.get("error"):
+                            parts.append("server_error={0}".format(
+                                _web_status_value_summary(
+                                    parsed.get("error"), secrets=secrets)))
+                    else:
+                        parts.append("response_json_type={0}".format(
+                            type(parsed).__name__))
+        except Exception:
+            parts.append("response_body=unavailable")
+        return _sanitize_web_status_detail("; ".join(parts), secrets=secrets)
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        description = "{0}: URLError reason={1}".format(stage, reason)
+    else:
+        description = "{0}: {1}: {2}".format(
+            stage, type(exc).__name__, exc)
+    return _sanitize_web_status_detail(description, secrets=secrets)
+
+
+def web_status_log_path():
+    return BASE / WEB_STATUS_LOG_NAME
+
+
+def _web_status_log_entry(event, now=None, detail=None, secrets=()):
+    try:
+        label = WEB_STATUS_LOG_EVENTS[event]
+    except (KeyError, TypeError) as exc:
+        raise ValueError("unknown activity") from exc
+    timestamp = now or datetime.datetime.now().astimezone()
+    entry = "{0:%Y-%m-%d %H:%M:%S %z} | {1}".format(timestamp, label)
+    if detail is not None:
+        if event not in WEB_STATUS_LOG_FAILURE_EVENTS:
+            raise ValueError("details are only allowed for failure events")
+        sanitized = _sanitize_web_status_detail(detail, secrets=secrets)
+        if sanitized:
+            entry += " | " + sanitized
+    return entry
+
+
+def load_web_status_log(path=None):
+    """Load only the bounded, most recent activity lines for the GUI."""
+    log_path = Path(path) if path is not None else web_status_log_path()
+    if not log_path.exists():
+        return []
+    with log_path.open("r", encoding="utf-8", errors="replace") as stream:
+        return [line.rstrip("\r\n") for line in stream.readlines()[-WEB_STATUS_LOG_GUI_LINES:]
+                if line.strip()]
+
+
+def append_web_status_log(event, path=None, now=None, detail=None, secrets=()):
+    """Append one allowlisted event with bounded, redacted failure diagnostics."""
+    entry = _web_status_log_entry(event, now, detail=detail, secrets=secrets)
+    log_path = Path(path) if path is not None else web_status_log_path()
+    encoded = (entry + "\n").encode("utf-8")
+    with _WEB_STATUS_LOG_LOCK:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            current_size = log_path.stat().st_size
+        except FileNotFoundError:
+            current_size = 0
+        if current_size and current_size + len(encoded) > WEB_STATUS_LOG_MAX_BYTES:
+            for backup in range(WEB_STATUS_LOG_BACKUPS, 1, -1):
+                source = Path(str(log_path) + ".{0}".format(backup - 1))
+                target = Path(str(log_path) + ".{0}".format(backup))
+                if source.exists():
+                    os.replace(source, target)
+            os.replace(log_path, Path(str(log_path) + ".1"))
+        with log_path.open("a", encoding="utf-8", newline="\n") as stream:
+            stream.write(entry + "\n")
+    return entry
+
+
+_WEB_MARQUEE_LEAD_VOWELS = set("\u0e40\u0e41\u0e42\u0e43\u0e44")
+
+
+def _web_status_clusters(text):
+    """Keep Thai marks, emoji modifiers, and leading vowels with their base."""
+    out, prefix = [], ""
+    for char in text:
+        if char in _WEB_MARQUEE_LEAD_VOWELS:
+            prefix += char
+            continue
+        attach = (unicodedata.category(char) in ("Mn", "Mc", "Me")
+                  or char in "\u200d\ufe0f\ufe0e"
+                  or (out and out[-1].endswith("\u200d")))
+        if out and not prefix and attach:
+            out[-1] += char
+        else:
+            out.append(prefix + char)
+            prefix = ""
+    if prefix:
+        out.append(prefix)
+    return out
+
+
+def web_status_frames(text, enabled=True):
+    """Build a bounded ticker for one status slot, then settle on its full text."""
+    value = str(text).strip()
+    if not value:
+        return []
+    if not enabled:
+        return [value]
+    clusters = _web_status_clusters(value)
+    if len(clusters) <= WEB_MARQUEE_WIDTH:
+        return [value]
+    ticker = clusters + _web_status_clusters(WEB_MARQUEE_SEPARATOR)
+    steps = min(WEB_MARQUEE_MAX_FRAMES,
+                max(1, (len(ticker) + WEB_MARQUEE_STRIDE - 1) // WEB_MARQUEE_STRIDE))
+    frames = []
+    for frame_no in range(steps):
+        start = (frame_no * WEB_MARQUEE_STRIDE) % len(ticker)
+        frame = "".join(ticker[(start + offset) % len(ticker)]
+                        for offset in range(WEB_MARQUEE_WIDTH)).strip()
+        if frame and (not frames or frame != frames[-1]):
+            frames.append(frame)
+    if not frames or frames[-1] != value:
+        frames.append(value)
+    return frames
 
 
 def parse_rotate_interval(raw):
     """Auto-switch interval in seconds. Clamped to the allowed window."""
     try:
-        value = int(float(str(raw).strip()))
+        value = float(str(raw).strip())
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError("invalid interval: {0!r}".format(raw)) from exc
+    if not (value == value and value not in (float("inf"), float("-inf"))):
+        raise ValueError("invalid interval: {0!r}".format(raw))
     return min(ROTATE_INTERVAL_MAX, max(ROTATE_INTERVAL_MIN, value))
 
 
@@ -145,8 +430,8 @@ def next_rotation(pool, index):
     return pool[index % len(pool)], (index + 1) % len(pool)
 
 
-TIMEOUT_MIN = 5.0
-TIMEOUT_DEFAULT = 20.0
+TIMEOUT_MIN = 2.0
+TIMEOUT_DEFAULT = 2.0
 TIMEOUT_MAX = 120.0
 
 
@@ -172,25 +457,65 @@ def perform_update(opener, status, timeout, confirm=False):
         return False, ("update refused: endpoint captured from home.php but not "
                        "confirmed end to end yet; pass --confirm-update to send "
                        "for real (dry-run preview only).")
-    html = fetch_profile(opener, "", timeout)
+    try:
+        html = fetch_profile(opener, "", timeout)
+    except Exception as exc:
+        return False, _web_status_request_error(
+            "GET /home.php", exc, secrets=(status,))
     csrf = extract_csrf(html)
     if not csrf:
         return False, ("update refused: no CSRF token on the profile page "
-                       "(session expired or not signed in).")
-    reply = _post(opener, WEB_UPDATE_URL, {"status": status, "csrf": csrf}, timeout)
+                       "(session expired or not signed in); profile_chars={0}.".format(
+                           len(html)))
+    try:
+        reply = _post(opener, WEB_UPDATE_URL,
+                      {"status": status, "csrf": csrf}, timeout)
+    except Exception as exc:
+        return False, _web_status_request_error(
+            "POST /ajax/update_status.php", exc, secrets=(status, csrf))
+    response_context = []
+    status_code = getattr(reply, "status_code", None)
+    content_type = getattr(reply, "content_type", None)
+    if status_code is not None:
+        response_context.append("http_status={0}".format(status_code))
+    if content_type:
+        response_context.append("content_type={0}".format(content_type))
+    if response_context:
+        response_context = ["response " + ", ".join(response_context)]
+    response_context.append("response_chars={0}".format(len(reply)))
+    context = "; ".join(response_context)
     try:
         data = json.loads(reply)
-    except ValueError:
-        return False, "update refused: unrecognized server reply ({0}).".format(
-            reply[:60])
+    except (TypeError, ValueError) as exc:
+        parser_detail = type(exc).__name__
+        if isinstance(exc, json.JSONDecodeError):
+            parser_detail += " ({0}, line={1}, column={2}, char={3})".format(
+                exc.msg, exc.lineno, exc.colno, exc.pos)
+        return False, "update refused: invalid JSON server reply; {0}; {1}.".format(
+            parser_detail, context)
     if not isinstance(data, dict):
-        return False, "update refused: invalid server response format."
+        return False, ("update refused: expected a JSON object but received {0}; "
+                       "{1}.").format(type(data).__name__, context)
     if data.get("error"):
-        return False, "update refused by the server (error response)."
-    # The observed API success acknowledgement is {"response": "ok"}.
-    # No missing, empty, or unrecognized response may be treated as success.
-    if data.get("response") != "ok":
-        return False, "update unconfirmed: server did not acknowledge success."
+        response_summary = _web_status_error_response_summary(
+            data.get("response", "missing"), secrets=(status, csrf))
+        return False, ("update refused by the server; response_keys={0}; "
+                       "error={1}; server_response={2}; {3}.").format(
+                           _web_status_response_keys(data),
+                           _web_status_value_summary(
+                               data.get("error"), secrets=(status, csrf)),
+                           response_summary, context)
+    # Camfrog's profile form treats a non-empty response string as success and
+    # writes it back into the status field. It does not require the literal "ok".
+    response = data.get("response")
+    if not isinstance(response, str) or not response.strip():
+        response_type = "missing" if "response" not in data else type(response).__name__
+        response_chars = (len(response) if isinstance(response, str) else "n/a")
+        return False, ("update unconfirmed: server did not acknowledge success; "
+                       "response_type={0}; response_chars={1}; response_keys={2}; "
+                       "{3}.").format(
+                           response_type, response_chars,
+                           _web_status_response_keys(data), context)
     return True, "status update acknowledged by server."
 
 
@@ -244,7 +569,7 @@ def build_parser():
     parser.add_argument("--confirm-update", action="store_true",
                         help="actually POST the status to the captured endpoint "
                              "(without it every run stays a dry-run)")
-    parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument("--timeout", type=float, default=TIMEOUT_DEFAULT)
     parser.add_argument("--how-to-capture", action="store_true",
                         help="print how to capture the update endpoint and exit")
     return parser
@@ -578,7 +903,23 @@ def _post(opener, url, fields, timeout):
     request = urllib.request.Request(url, data=data, headers=dict(
         BROWSER_HEADERS, Referer=LOGIN_PAGE_URL))
     with opener.open(request, timeout=timeout) as response:
-        return response.read().decode("utf-8", "replace").strip()
+        body = response.read().decode("utf-8", "replace").strip()
+        headers = getattr(response, "headers", None)
+        content_type = headers.get("Content-Type") if headers is not None else None
+        return WebStatusReply(
+            body, status_code=getattr(response, "status", None)
+            or (response.getcode() if hasattr(response, "getcode") else None),
+            content_type=content_type)
+
+
+class WebStatusReply(str):
+    """Text response with only non-sensitive HTTP metadata used for diagnostics."""
+
+    def __new__(cls, value, status_code=None, content_type=None):
+        reply = super().__new__(cls, value)
+        reply.status_code = status_code
+        reply.content_type = content_type
+        return reply
 
 
 def attempt_login(opener, login, password, timeout):
@@ -839,6 +1180,148 @@ def run_cli_headless(argv, show=None):
     return code
 
 
+_CLIPBOARD_WIDGET_CLASSES = {
+    "Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox", "Text",
+}
+_CLIPBOARD_EDITABLE_CLASSES = {
+    "Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox", "Text",
+}
+
+
+def _windows_open_clipboard(clipboard, attempts=20, interval=0.025):
+    """Retry briefly while another Windows process holds the clipboard."""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            clipboard.OpenClipboard(None)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(interval)
+    raise OSError("Could not open the Windows clipboard: {0}".format(
+        type(last_error).__name__ if last_error else "unknown error")) from last_error
+
+
+def _read_clipboard_text(root):
+    """Read text through Win32 first, with Tk as a portable fallback."""
+    clipboard_error = None
+    if os.name == "nt":
+        try:
+            import win32clipboard
+            import win32con
+        except ImportError:
+            pass
+        else:
+            try:
+                _windows_open_clipboard(win32clipboard)
+                try:
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                        value = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                        return value if isinstance(value, str) else str(value)
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_TEXT):
+                        value = win32clipboard.GetClipboardData(win32con.CF_TEXT)
+                        if isinstance(value, bytes):
+                            value = value.decode("mbcs", errors="replace")
+                        return value if isinstance(value, str) else str(value)
+                finally:
+                    win32clipboard.CloseClipboard()
+            except Exception as exc:
+                clipboard_error = exc
+
+    try:
+        return str(root.clipboard_get())
+    except Exception as exc:
+        if clipboard_error is not None:
+            raise OSError("Could not read the system clipboard ({0}).".format(
+                type(clipboard_error).__name__)) from clipboard_error
+        raise OSError("Could not read text from the system clipboard.") from exc
+
+
+def _clipboard_widget_class(widget):
+    try:
+        return widget.winfo_class()
+    except Exception:
+        return ""
+
+
+def _clipboard_widget_editable(widget):
+    if _clipboard_widget_class(widget) not in _CLIPBOARD_EDITABLE_CLASSES:
+        return False
+    try:
+        return str(widget.cget("state")) not in {"disabled", "readonly"}
+    except Exception:
+        return True
+
+
+class WebStatusClipboardController:
+    """Bind reliable paste handling and a right-click Paste menu to GUI fields."""
+
+    def __init__(self, root, on_error=None):
+        import tkinter as tk
+
+        self.root = root
+        self.on_error = on_error
+        self.target = None
+        self.menu = tk.Menu(root, tearoff=False)
+        self.menu.add_command(label="Paste", command=self.paste_target)
+
+    def install(self, parent):
+        for widget in parent.winfo_children():
+            if _clipboard_widget_class(widget) in _CLIPBOARD_WIDGET_CLASSES:
+                for sequence in ("<Control-v>", "<Control-V>", "<Shift-Insert>"):
+                    widget.bind(sequence, self.handle, add="+")
+                widget.bind("<Button-3>", self.show_menu, add="+")
+            self.install(widget)
+
+    def handle(self, event):
+        self.target = event.widget
+        self.paste(self.target)
+        return "break"
+
+    def paste_target(self):
+        self.paste(self.target)
+
+    def paste(self, widget):
+        if widget is None or not _clipboard_widget_editable(widget):
+            return False
+        try:
+            value = _read_clipboard_text(self.root)
+            if not value:
+                raise ValueError("The system clipboard does not contain text.")
+            widget_class = _clipboard_widget_class(widget)
+            if widget_class == "Text":
+                if widget.tag_ranges("sel"):
+                    widget.delete("sel.first", "sel.last")
+                widget.insert("insert", value)
+            else:
+                if widget.selection_present():
+                    widget.delete("sel.first", "sel.last")
+                widget.insert("insert", value)
+            return True
+        except Exception as exc:
+            if self.on_error:
+                self.on_error(exc)
+            return False
+
+    def show_menu(self, event):
+        self.target = event.widget
+        if not _clipboard_widget_editable(self.target):
+            return "break"
+        self.target.focus_set()
+        try:
+            self.menu.tk_popup(event.x_root, event.y_root)
+        except Exception as exc:
+            if self.on_error:
+                self.on_error(exc)
+        finally:
+            try:
+                self.menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+
 class WebStatusManager:
     def __init__(self, cookies_default=""):
         import tkinter as tk
@@ -880,8 +1363,8 @@ class WebStatusManager:
         style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
                   foreground=[("selected", "#096c7b")])
         self.root.title("Camfrog Web Status (prototype)")
-        self.root.geometry("500x560")
-        self.root.minsize(480, 540)
+        self.root.geometry("500x620")
+        self.root.minsize(480, 560)
 
         self.ttk.Label(self.root, text=(
             "Update status via profiles.camfrog.com. Dry-run is the default; "
@@ -893,8 +1376,10 @@ class WebStatusManager:
         self.nb.pack(fill="both", expand=True, padx=10)
         setup_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
         session_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
+        log_tab = self.ttk.Frame(self.nb, padding=(8, 6, 8, 6))
         self.nb.add(setup_tab, text="Setup")
         self.nb.add(session_tab, text="Account & Session")
+        self.nb.add(log_tab, text="Activity Log")
         pool_lines, pool_load_warning = load_web_text_slots()
 
         form = self.ttk.Frame(setup_tab)
@@ -932,8 +1417,8 @@ class WebStatusManager:
         self.interval = self.tk.StringVar(value=str(ROTATE_INTERVAL_DEFAULT))
         self.ttk.Spinbox(timing, textvariable=self.interval,
                          from_=ROTATE_INTERVAL_MIN, to=ROTATE_INTERVAL_MAX,
-                         increment=30, width=6).pack(side="left")
-        self.ttk.Label(timing, text="s (min 30)").pack(side="left", padx=(4, 0))
+                         increment=0.5, width=6).pack(side="left")
+        self.ttk.Label(timing, text="s (min 0.5)").pack(side="left", padx=(4, 0))
         self.ttk.Label(timing, text="Timeout").pack(side="left", padx=(10, 0))
         self.timeout = self.tk.StringVar(value=str(TIMEOUT_DEFAULT))
         self.ttk.Entry(timing, textvariable=self.timeout, width=6).pack(side="left", padx=(3, 0))
@@ -941,6 +1426,16 @@ class WebStatusManager:
         self.ttk.Checkbutton(form, text="Send live (otherwise dry-run preview only)",
                              variable=self.live).grid(row=3, column=0, columnspan=3,
                                                       sticky="w", pady=(6, 0))
+        modes = self.ttk.Frame(form)
+        modes.grid(row=4, column=0, columnspan=3, sticky="w", pady=(2, 0))
+        self.marquee_mode = self.tk.BooleanVar(value=False)
+        self.infinity_loop = self.tk.BooleanVar(value=True)
+        self.ttk.Checkbutton(
+            modes, text="Marquee (0.5 seconds per frame)",
+            variable=self.marquee_mode).pack(side="left")
+        self.ttk.Checkbutton(
+            modes, text="Infinity Loop (last slot → slot 1)",
+            variable=self.infinity_loop).pack(side="left", padx=(8, 0))
 
         browser = self.ttk.LabelFrame(session_tab, padding=(10, 6, 10, 6),
                                       text="Session (PHPSESSID via iframe / web login)")
@@ -967,6 +1462,22 @@ class WebStatusManager:
         self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
         self.paste_state.pack(anchor="w", pady=(4, 0))
 
+        log_frame = self.ttk.Frame(log_tab)
+        log_frame.pack(fill="both", expand=True)
+        log_scroll = self.ttk.Scrollbar(log_frame, orient="vertical")
+        log_scroll.pack(side="right", fill="y")
+        self.log_view = self.tk.Text(
+            log_frame, wrap="word", height=12, state="disabled",
+            yscrollcommand=log_scroll.set)
+        self.log_view.pack(side="left", fill="both", expand=True)
+        log_scroll.configure(command=self.log_view.yview)
+        try:
+            self._show_log_lines(load_web_status_log())
+            log_load_warning = ""
+        except OSError as exc:
+            log_load_warning = "Could not load web_status.log ({0}).".format(
+                type(exc).__name__)
+
         actions = self.ttk.Frame(self.root, padding=(10, 0, 10, 2))
         actions.pack(fill="x")
         self.ttk.Button(actions, text="Preview plan", command=self.preview).pack(side="left", padx=5)
@@ -982,11 +1493,21 @@ class WebStatusManager:
         self.note = self.tk.StringVar(value="Dry-run is on. Nothing has been sent.")
         if pool_load_warning:
             self.note.set(pool_load_warning)
+        elif log_load_warning:
+            self.note.set(log_load_warning)
         self.ttk.Label(self.root, textvariable=self.note, anchor="w",
                        padding=(10, 0, 10, 8), wraplength=450).pack(fill="x")
+        self.clipboard_controller = WebStatusClipboardController(
+            self.root, on_error=self._clipboard_error)
+        self.clipboard_controller.install(self.root)
         self.root.after(120, self._poll)
 
     # ---- helpers
+    def _clipboard_error(self, exc):
+        if hasattr(self, "note"):
+            self.note.set("Paste failed: {0}: {1}".format(
+                type(exc).__name__, exc))
+
     def chrome_import(self):
         """Auto-import the session from Chrome's store (nothing saved to disk)."""
         def do():
@@ -995,29 +1516,68 @@ class WebStatusManager:
 
         self._run_bg(do, on_done=lambda: setattr(self, "chrome_mode", True))
 
-    def _run_bg(self, fn, force=False, on_done=None):
+    def _run_bg(self, fn, force=False, on_done=None, on_error=None):
         if self.busy and not force:
             return
         self.busy = True
         self.note.set("Working...")
-        threading.Thread(target=self._worker, args=(fn, on_done), daemon=True).start()
+        threading.Thread(target=self._worker, args=(fn, on_done, on_error), daemon=True).start()
 
-    def _worker(self, fn, on_done):
+    def _worker(self, fn, on_done, on_error):
         try:
             text, ok = fn(), True
         except Exception as exc:  # shown in the GUI, never a traceback window
             text, ok = "failed: {0}: {1}".format(type(exc).__name__, exc), False
-        self.q.put((ok, text, on_done))
+        self.q.put((ok, text, on_done, on_error))
+
+    def _show_log_lines(self, lines):
+        if not hasattr(self, "log_view"):
+            return
+        self.log_view.configure(state="normal")
+        self.log_view.delete("1.0", "end")
+        self.log_view.insert("end", "\n".join(lines[-WEB_STATUS_LOG_GUI_LINES:]))
+        if lines:
+            self.log_view.insert("end", "\n")
+        self.log_view.configure(state="disabled")
+        self.log_view.see("end")
+
+    def _append_log_line(self, entry):
+        if not hasattr(self, "log_view"):
+            return
+        self.log_view.configure(state="normal")
+        self.log_view.insert("end", entry + "\n")
+        line_count = int(self.log_view.index("end-1c").split(".", 1)[0])
+        excess = max(0, line_count - WEB_STATUS_LOG_GUI_LINES - 1)
+        if excess:
+            self.log_view.delete("1.0", "{0}.0".format(excess + 1))
+        self.log_view.configure(state="disabled")
+        self.log_view.see("end")
+
+    def _record_activity(self, event, detail=None, secrets=()):
+        try:
+            entry = append_web_status_log(
+                event, detail=detail, secrets=secrets)
+        except (OSError, ValueError) as exc:
+            try:
+                entry = _web_status_log_entry(
+                    event, detail=detail, secrets=secrets)
+            except ValueError:
+                return
+            if hasattr(self, "note"):
+                self.note.set("Could not write web_status.log ({0}).".format(
+                    type(exc).__name__))
+        self._append_log_line(entry)
 
     def _poll(self):
         try:
             while True:
-                ok, text, on_done = self.q.get_nowait()
+                ok, text, on_done, on_error = self.q.get_nowait()
                 self.busy = False
                 self.note.set(text)
-                if ok and on_done is not None:
+                callback = on_done if ok else on_error
+                if callback is not None:
                     try:
-                        on_done()
+                        callback()
                     except Exception as exc:
                         self.note.set("{0} ({1})".format(text, exc))
         except queue.Empty:
@@ -1050,6 +1610,7 @@ class WebStatusManager:
             self.note.set("Could not save status lines to webtext.db: {0}".format(
                 type(exc).__name__))
             return False
+        self._record_activity("status_lines_saved")
         if notify:
             self.note.set("Saved status lines to webtext.db.")
         return True
@@ -1113,19 +1674,42 @@ class WebStatusManager:
 
     def _verify_session(self, login, timeout, on_done):
         """Probe PHPSESSID session in a worker; on_done runs on success."""
+        failure_detail = []
+        cookie_secrets = _session_cookie_redaction_values(
+            getattr(self, "cookie_paste", ""))
 
         def do():
             import urllib.request
 
-            jar = self._session_jar()
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-            html = fetch_profile(opener, login, timeout)
-            verdict, detail = summarize_session(html)
-            if verdict != "signed-in":
-                raise ValueError(detail)
-            return detail
+            try:
+                jar = self._session_jar()
+                opener = urllib.request.build_opener(
+                    urllib.request.HTTPCookieProcessor(jar))
+                html = fetch_profile(opener, login, timeout)
+                verdict, detail = summarize_session(html)
+                if verdict != "signed-in":
+                    raise ValueError(detail)
+                return detail
+            except Exception as exc:
+                diagnostic = _web_status_request_error(
+                    "session verification GET /home.php", exc,
+                    secrets=(login,) + cookie_secrets)
+                failure_detail[:] = [diagnostic]
+                raise RuntimeError(diagnostic) from exc
 
-        self._run_bg(do, force=True, on_done=on_done)
+        self._record_activity("session_verification_started")
+
+        def verified():
+            self._record_activity("session_verification_succeeded")
+            on_done()
+
+        self._run_bg(
+            do, force=True, on_done=verified,
+            on_error=lambda: self._record_activity(
+                "session_verification_failed",
+                detail=failure_detail[0] if failure_detail else
+                "session verification worker failed without diagnostic details",
+                secrets=cookie_secrets))
 
     def login_via_browser(self):
         """One-click login: the real browser solves the CAPTCHA and the
@@ -1133,6 +1717,7 @@ class WebStatusManager:
         if find_browser() is None:
             self.note.set("No Chrome or Edge found on this computer.")
             return
+        self._record_activity("browser_login_started")
         self.note.set("Browser opened - sign in there; this window confirms by itself.")
 
         def work():
@@ -1155,6 +1740,7 @@ class WebStatusManager:
         self.cookie_paste_var.set("")
         self.session_ready = False
         self._invalidate_pending_start()
+        self._record_activity("browser_session_captured")
         self.paste_state.configure(text="Session captured from browser.",
                                    foreground="#555")
         self._verify_session(self._login_name(),
@@ -1270,6 +1856,11 @@ class WebStatusManager:
                 return
             self._live_confirmed = True
         self.switching = True
+        self._cycle_marquee = (bool(self.marquee_mode.get())
+                               if hasattr(self, "marquee_mode") else False)
+        self._cycle_infinity_loop = (bool(self.infinity_loop.get())
+                                     if hasattr(self, "infinity_loop") else True)
+        self._record_activity("live_rotation_started" if live else "dry_run_rotation_started")
         self._cycle(login, pool, interval, timeout, live, 0)
 
     def _invalidate_pending_start(self):
@@ -1298,9 +1889,15 @@ class WebStatusManager:
             return
         self._live_confirmed = True
         self.switching = True
+        self._cycle_marquee = (bool(self.marquee_mode.get())
+                               if hasattr(self, "marquee_mode") else False)
+        self._cycle_infinity_loop = (bool(self.infinity_loop.get())
+                                     if hasattr(self, "infinity_loop") else True)
+        self._record_activity("live_rotation_started")
         self._cycle(login, pool, interval, timeout, True, 0)
 
     def stop(self):
+        was_active = self.switching or self._pending is not None
         self._invalidate_pending_start()
         self.switching = False
         self.session_ready = False  # next Start re-verifies the session
@@ -1312,36 +1909,118 @@ class WebStatusManager:
                 pass
             self.rotate_job = None
         self.note.set("Auto-switch stopped. Nothing further will be sent.")
+        if was_active:
+            self._record_activity("rotation_stopped")
 
-    def _cycle(self, login, pool, interval, timeout, live, index):
+    def _cycle(self, login, pool, interval, timeout, live, index, frame_index=0,
+               generation=None):
         if not self.switching:
+            return
+        current_generation = getattr(self, "_start_generation", 0)
+        if generation is None:
+            generation = current_generation
+        if generation != current_generation:
             return
         try:
             pool = self._pool_values() or pool
-            status, _ = next_rotation(pool, index)
+            if not pool:
+                raise ValueError("status pool is empty; add at least one line.")
+            status = pool[index % len(pool)]
         except ValueError as exc:
             self.note.set(str(exc))
             self.stop()
             return
-        # main thread: no Tk calls in the worker; the jar is built there
+        marquee_setting = getattr(self, "marquee_mode", None)
+        infinity_setting = getattr(self, "infinity_loop", None)
+        marquee = bool(getattr(
+            self, "_cycle_marquee",
+            marquee_setting.get() if marquee_setting is not None else False))
+        infinity_loop = bool(getattr(
+            self, "_cycle_infinity_loop",
+            infinity_setting.get() if infinity_setting is not None else True))
+        frames = web_status_frames(status, enabled=marquee)
+        frame_index = min(frame_index, len(frames) - 1)
+        frame = frames[frame_index]
+        slot_index = index % len(pool)
+        step_delay = WEB_MARQUEE_STEP_SECONDS if marquee else interval
+        cookie_secrets = _session_cookie_redaction_values(
+            getattr(self, "cookie_paste", ""))
+        diagnostic_secrets = (frame, login) + cookie_secrets
+        failure_detail = []
 
         def do():
             if not live:
-                return "cycle #{0}/{1} (dry-run): {2}".format(index + 1, len(pool), status)
-            import urllib.request
-
+                return "cycle #{0}/{1} (dry-run): {2}".format(
+                    index + 1, len(pool), frame)
             try:
+                import urllib.request
+
                 jar = self._session_jar()
-            except (OSError, ValueError) as exc:
-                return "cycle #{0}/{1} stopped: {2}".format(index + 1, len(pool), exc)
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-            ok, message = perform_update(opener, status, timeout, confirm=True)
+                opener = urllib.request.build_opener(
+                    urllib.request.HTTPCookieProcessor(jar))
+                ok, message = perform_update(opener, frame, timeout, confirm=True)
+                if not ok:
+                    diagnostic = _sanitize_web_status_detail(
+                        message, secrets=diagnostic_secrets)
+                    failure_detail[:] = [diagnostic]
+                    raise RuntimeError(diagnostic)
+            except Exception as exc:
+                diagnostic = _web_status_request_error(
+                    "live status update", exc, secrets=diagnostic_secrets)
+                failure_detail[:] = [diagnostic]
+                raise RuntimeError(diagnostic) from exc
             return "cycle #{0}/{1}: {2}".format(index + 1, len(pool), message)
 
-        self._run_bg(do, force=True)
-        _, nxt = next_rotation(pool, index)
-        self.rotate_job = self.root.after(max(1, interval) * 1000,
-                                          self._cycle, login, pool, interval, timeout, live, nxt)
+        def advance():
+            if (not self.switching
+                    or generation != getattr(self, "_start_generation", 0)):
+                return
+            if not marquee:
+                next_index = (slot_index + 1) % len(pool)
+                next_frame = 0
+            elif frame_index + 1 < len(frames):
+                next_index = slot_index
+                next_frame = frame_index + 1
+            elif slot_index + 1 < len(pool):
+                next_index = slot_index + 1
+                next_frame = 0
+            elif infinity_loop:
+                next_index = 0
+                next_frame = 0
+            else:
+                self.switching = False
+                self.rotate_job = None
+                self.session_ready = False
+                self.chrome_mode = False
+                self._invalidate_pending_start()
+                self._record_activity("marquee_completed")
+                self.note.set("Marquee completed all populated slots.")
+                return
+            self.rotate_job = self.root.after(
+                max(1, int(round(step_delay * 1000))), self._cycle,
+                login, pool, interval, timeout, live, next_index, next_frame,
+                generation)
+
+        def failed():
+            self.switching = False
+            self.rotate_job = None
+            self.session_ready = False
+            self.chrome_mode = False
+            self._invalidate_pending_start()
+            if live:
+                self._record_activity(
+                    "status_update_failed",
+                    detail=failure_detail[0] if failure_detail else
+                    "live status update worker failed without diagnostic details",
+                    secrets=diagnostic_secrets)
+            else:
+                self._record_activity("rotation_stopped")
+
+        self._run_bg(
+            do, force=True, on_done=lambda: (
+                self._record_activity("status_update_succeeded" if live
+                                      else "status_previewed"),
+                advance()), on_error=failed)
 
 
 # ============================================================

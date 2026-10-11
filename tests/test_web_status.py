@@ -1,5 +1,6 @@
 """Tk-free tests for the prototype web status updater (no network)."""
 import os
+import json
 import sys
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools import web_status as ws  # noqa: E402
+import web_status_gui as wsg  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -195,13 +197,20 @@ def test_next_rotation_empty_pool_refused():
         ws.next_rotation([], 0)
 
 
-def test_parse_rotate_interval_clamps_and_rejects():
-    assert ws.parse_rotate_interval("300") == 300
-    assert ws.parse_rotate_interval("5") == ws.ROTATE_INTERVAL_MIN
-    assert ws.parse_rotate_interval("999999") == ws.ROTATE_INTERVAL_MAX
+@pytest.mark.parametrize("module", [ws, wsg], ids=["cli", "gui"])
+def test_parse_rotate_interval_clamps_and_preserves_fractional_seconds(module):
+    assert module.ROTATE_INTERVAL_DEFAULT == 8.0
+    assert module.parse_rotate_interval("0.5") == 0.5
+    assert module.parse_rotate_interval("1.25") == 1.25
+    assert module.parse_rotate_interval("0.25") == module.ROTATE_INTERVAL_MIN
+    assert module.parse_rotate_interval("999999") == module.ROTATE_INTERVAL_MAX
     for bad in ("", "abc", "nan", "inf", None):
         with pytest.raises(ValueError):
-            ws.parse_rotate_interval(bad)
+            module.parse_rotate_interval(bad)
+
+
+def test_web_status_cli_timeout_defaults_to_two_seconds():
+    assert ws.build_parser().parse_args(["--status", "hello"]).timeout == 2.0
 
 
 def test_perform_update_refused_until_confirmed():
@@ -624,7 +633,10 @@ def test_chrome_aes_key_missing_file(tmp_path):
         ws.chrome_aes_key(str(tmp_path / "nothing"))
 
 
-@pytest.mark.parametrize("reply", ['{}', '[]', 'null', '{"response":""}', '{"response":"unknown"}', '{"error":true,"response":"denied"}'])
+@pytest.mark.parametrize("reply", [
+    '{}', '[]', 'null', '{"response":""}', '{"response":"   "}',
+    '{"response":null}', '{"error":true,"response":"denied"}',
+])
 def test_perform_update_refuses_unacknowledged_server_reply(monkeypatch, reply):
     monkeypatch.setattr(ws, "fetch_profile",
                         lambda *a: "var csrf = '90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0';")
@@ -632,6 +644,64 @@ def test_perform_update_refuses_unacknowledged_server_reply(monkeypatch, reply):
     ok, message = ws.perform_update(object(), "new status", 1.0, confirm=True)
     assert not ok
     assert "refused" in message or "unconfirmed" in message
+
+
+def test_perform_update_reports_safe_response_diagnostics(monkeypatch):
+    csrf = "90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0"
+    server_response = (
+        "<html><head><title>Request denied</title>"
+        "<script>var csrf = '{0}';</script></head>"
+        "<body><p>Rate limited for private status</p>"
+        "<p>Contact admin@example.test, reference 123456789</p>"
+        "<input type='hidden' name='csrf' value='{0}'></body></html>".format(csrf))
+    monkeypatch.setattr(wsg, "fetch_profile", lambda *a: "var csrf = '{0}';".format(csrf))
+    monkeypatch.setattr(
+        wsg, "_post", lambda *a: json.dumps({
+            "error": True, "response": server_response, "ok": False}))
+
+    ok, message = wsg.perform_update(object(), "private status", 2.0, confirm=True)
+
+    assert not ok
+    assert "response_keys=error,ok,response" in message
+    assert "server_response=string(" in message
+    assert "Request denied" in message
+    assert "Rate limited" in message
+    assert "[email redacted]" in message
+    assert "[number redacted]" in message
+    assert "response_chars=" in message
+    assert "private status" not in message
+    assert csrf not in message
+    assert "var csrf" not in message
+
+
+def test_perform_update_includes_http_metadata_for_unconfirmed_reply(monkeypatch):
+    monkeypatch.setattr(wsg, "fetch_profile",
+                        lambda *a: "var csrf = '90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0';")
+    monkeypatch.setattr(
+        wsg, "_post",
+        lambda *a: wsg.WebStatusReply(
+            '{"response":""}', status_code=503,
+            content_type="application/json"))
+
+    ok, message = wsg.perform_update(object(), "status", 2.0, confirm=True)
+
+    assert not ok
+    assert "http_status=503" in message
+    assert "content_type=application/json" in message
+    assert "response_type=str" in message
+    assert "response_chars=0" in message
+
+
+@pytest.mark.parametrize("module", [ws, wsg], ids=["cli", "gui"])
+@pytest.mark.parametrize("reply", ['{"response":"new status"}', '{"response":"ok"}'])
+def test_perform_update_accepts_profile_ui_success_response(monkeypatch, module, reply):
+    monkeypatch.setattr(module, "fetch_profile",
+                        lambda *a: "var csrf = '90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0';")
+    monkeypatch.setattr(module, "_post", lambda *a: reply)
+
+    ok, message = module.perform_update(object(), "new status", 1.0, confirm=True)
+
+    assert ok, message
 
 
 def test_live_update_requires_verified_session_before_post(monkeypatch):

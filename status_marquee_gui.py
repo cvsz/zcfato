@@ -1825,6 +1825,13 @@ class Runner:
                 log.warning(t("no_ctrl", spec={"section": "status.edit"}, n=0))
                 self._next_status_warn = now + 60
             return
+        active = self.marq
+        if active is not None and active.get("loop") and now >= active["deadline"]:
+            self.marq = None
+            self.status_i += 1
+            self.stats["statuses"] += 1
+            self.current_text = active["raw"]
+            log.info(t("status_set", text=shown(active["frames"][-1])))
         if self.marq is None:
             if now - self.last_status < st["interval_seconds"]:
                 return
@@ -1834,7 +1841,15 @@ class Runner:
                 log.warning(t("status_blank"))
                 self.last_status = now
                 return
-            self.marq = {"raw": raw, "frames": self.build_frames(text), "i": 0, "next": now}
+            frames = self.build_frames(text)
+            mq = st["marquee"]
+            loop = bool(mq.get("infinite_loop") and mq.get("scroll")
+                        and len(frames) > 1)
+            self.marq = {"raw": raw, "frames": frames, "i": 0, "next": now,
+                         "loop": loop, "deadline": now + st["interval_seconds"],
+                         "history_recorded": False}
+            if loop:
+                self.last_status = now
         m = self.marq
         if now < m["next"]:
             return
@@ -1843,11 +1858,20 @@ class Runner:
             self.marq = None
             self.last_status = now - st["interval_seconds"] + st["retry_seconds"]
             raise RuntimeError(t("status_fail"))
-        if m["i"] == 0 and st["history"]["enabled"] and st["history"]["record"]:
+        if (m["i"] == 0 and not m["history_recorded"]
+                and st["history"]["enabled"] and st["history"]["record"]):
             self.hist.record(m["raw"])
+            m["history_recorded"] = True
         if len(m["frames"]) > 1:
             self.stats["marquee_frames"] += 1
         m["i"] += 1
+        if m["loop"]:
+            if m["i"] >= len(m["frames"]):
+                m["i"] = 0
+            m["next"] = time.monotonic() + max(
+                0.3, float(st["marquee"]["step_seconds"]))
+            log.debug(t("status_set", text=shown(frame)))
+            return
         if m["i"] >= len(m["frames"]):
             self.marq = None
             self.status_i += 1

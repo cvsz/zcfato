@@ -62,9 +62,10 @@ EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_BLOCKED = 3
 
-ROTATE_INTERVAL_MIN = 30
-ROTATE_INTERVAL_DEFAULT = 300
+ROTATE_INTERVAL_MIN = 0.5
+ROTATE_INTERVAL_DEFAULT = 8.0
 ROTATE_INTERVAL_MAX = 86400
+TIMEOUT_DEFAULT = 2.0
 
 
 def parse_pool(text):
@@ -75,9 +76,11 @@ def parse_pool(text):
 def parse_rotate_interval(raw):
     """Auto-switch interval in seconds. Clamped to the allowed window."""
     try:
-        value = int(float(str(raw).strip()))
+        value = float(str(raw).strip())
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError("invalid interval: {0!r}".format(raw)) from exc
+    if not (value == value and value not in (float("inf"), float("-inf"))):
+        raise ValueError("invalid interval: {0!r}".format(raw))
     return min(ROTATE_INTERVAL_MAX, max(ROTATE_INTERVAL_MIN, value))
 
 
@@ -114,9 +117,10 @@ def perform_update(opener, status, timeout, confirm=False):
         return False, "update refused: invalid server response format."
     if data.get("error"):
         return False, "update refused by the server (error response)."
-    # The observed API success acknowledgement is {"response": "ok"}.
-    # No missing, empty, or unrecognized response may be treated as success.
-    if data.get("response") != "ok":
+    # Camfrog's profile form treats a non-empty response string as success and
+    # writes it back into the status field. It does not require the literal "ok".
+    response = data.get("response")
+    if not isinstance(response, str) or not response.strip():
         return False, "update unconfirmed: server did not acknowledge success."
     return True, "status update acknowledged by server."
 
@@ -178,7 +182,7 @@ def build_parser():
     parser.add_argument("--confirm-update", action="store_true",
                         help="actually POST the status to the captured endpoint "
                              "(without it every run stays a dry-run)")
-    parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument("--timeout", type=float, default=TIMEOUT_DEFAULT)
     parser.add_argument("--how-to-capture", action="store_true",
                         help="print how to capture the update endpoint and exit")
     return parser

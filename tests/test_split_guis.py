@@ -232,6 +232,39 @@ def test_marquee_runner_scrolls_frames_and_rotates_lines(monkeypatch):
     assert r.stats.get("statuses", 0) >= 2
 
 
+def test_marquee_infinite_loop_repeats_frames_until_status_interval(monkeypatch):
+    import status_marquee_gui as m
+
+    cfg = copy.deepcopy(m.DEFAULTS)
+    cfg["dry_run"] = True
+    cfg["status"]["enabled"] = True
+    cfg["status"]["messages"] = ["AAA status that is long enough", "BBB next status long enough"]
+    cfg["status"]["interval_seconds"] = 3.0
+    cfg["status"]["history"]["enabled"] = False
+    cfg["status"]["marquee"].update(
+        enabled=True, scroll=True, width=10, stride=2, step_seconds=0.5,
+        cycles=1, max_frames=5, infinite_loop=True)
+    assert m.validate(cfg)[0] == []
+
+    r = m.Runner(cfg)
+    r.status_edit, r.apply_btn, r.win = object(), None, object()
+    sent = []
+    monkeypatch.setattr(r, "send", lambda ctrl, text, btn=None, win=None:
+                        sent.append(text) or True)
+    clock = [0.0]
+    monkeypatch.setattr(m.time, "monotonic", lambda: clock[0])
+
+    for instant in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
+        clock[0] = instant
+        r.do_status(instant)
+
+    assert len(sent) == 7
+    assert sent[0] == sent[5]
+    assert sent[6] != sent[0]
+    assert r.status_i == 1
+    assert r.marq is not None
+
+
 def test_apply_sends_frames_immediately_when_scroll_on(monkeypatch):
     """Apply scrolls at once: ordered frames with step delays between sends."""
     import status_marquee_gui as m
