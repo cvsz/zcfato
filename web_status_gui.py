@@ -18,6 +18,7 @@ import time
 import urllib.parse
 import urllib.error
 import urllib.request
+from html.parser import HTMLParser
 from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
 from pathlib import Path
 import queue
@@ -114,6 +115,10 @@ def _sanitize_web_status_detail(value, secrets=()):
         r"access[_-]?token|auth[_-]?token|authorization|token|password|passwd|secret)\b"
         r"[\"']?\s*[:=]\s*)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^&\s,;}}\]]+)",
         r"\1[redacted]", text)
+    text = re.sub(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b",
+                  "[email redacted]", text)
+    text = re.sub(r"(?<!\w)\+?\d[\d().\s-]{6,}\d(?!\w)",
+                  "[number redacted]", text)
     text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
     text = re.sub(r"\s+", " ", text).replace("|", "/").strip()
     if len(text) > WEB_STATUS_LOG_DETAIL_MAX_CHARS:
@@ -144,6 +149,44 @@ def _web_status_value_summary(value, secrets=()):
     if isinstance(value, (dict, list, tuple)):
         return "{0}({1} items)".format(type(value).__name__, len(value))
     return type(value).__name__
+
+
+class _VisibleResponseText(HTMLParser):
+    """Collect visible response text without HTML attributes or script contents."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self._hidden_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in ("script", "style", "noscript"):
+            self._hidden_depth += 1
+
+    def handle_endtag(self, tag):
+        if tag.lower() in ("script", "style", "noscript") and self._hidden_depth:
+            self._hidden_depth -= 1
+
+    def handle_data(self, data):
+        if not self._hidden_depth and data.strip():
+            self.parts.append(data.strip())
+
+
+def _web_status_error_response_summary(value, secrets=()):
+    """Summarize visible server error text while excluding markup and common PII."""
+    if not isinstance(value, str):
+        return _web_status_value_summary(value, secrets=secrets)
+    parser = _VisibleResponseText()
+    try:
+        parser.feed(value)
+        parser.close()
+        visible = " ".join(parser.parts)
+    except Exception:
+        visible = value
+    visible = _sanitize_web_status_detail(visible, secrets=secrets)
+    if len(visible) > 300:
+        visible = visible[:286].rstrip() + " [truncated]"
+    return "string({0} chars); visible_text={1}".format(len(value), visible or "empty")
 
 
 def _session_cookie_redaction_values(cookie):
@@ -454,12 +497,14 @@ def perform_update(opener, status, timeout, confirm=False):
         return False, ("update refused: expected a JSON object but received {0}; "
                        "{1}.").format(type(data).__name__, context)
     if data.get("error"):
+        response_summary = _web_status_error_response_summary(
+            data.get("response", "missing"), secrets=(status, csrf))
         return False, ("update refused by the server; response_keys={0}; "
-                       "error={1}; {2}.").format(
+                       "error={1}; server_response={2}; {3}.").format(
                            _web_status_response_keys(data),
                            _web_status_value_summary(
                                data.get("error"), secrets=(status, csrf)),
-                           context)
+                           response_summary, context)
     # Camfrog's profile form treats a non-empty response string as success and
     # writes it back into the status field. It does not require the literal "ok".
     response = data.get("response")

@@ -1,5 +1,6 @@
 """Tk-free tests for the prototype web status updater (no network)."""
 import os
+import json
 import sys
 from pathlib import Path
 
@@ -647,20 +648,30 @@ def test_perform_update_refuses_unacknowledged_server_reply(monkeypatch, reply):
 
 def test_perform_update_reports_safe_response_diagnostics(monkeypatch):
     csrf = "90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0"
+    server_response = (
+        "<html><head><title>Request denied</title>"
+        "<script>var csrf = '{0}';</script></head>"
+        "<body><p>Rate limited for private status</p>"
+        "<p>Contact admin@example.test, reference 123456789</p>"
+        "<input type='hidden' name='csrf' value='{0}'></body></html>".format(csrf))
     monkeypatch.setattr(wsg, "fetch_profile", lambda *a: "var csrf = '{0}';".format(csrf))
     monkeypatch.setattr(
-        wsg, "_post",
-        lambda *a: '{"error":"denied: status=private status; csrf=CSRF_VALUE",'
-        '"ok":false}'.replace("CSRF_VALUE", csrf))
+        wsg, "_post", lambda *a: json.dumps({
+            "error": True, "response": server_response, "ok": False}))
 
     ok, message = wsg.perform_update(object(), "private status", 2.0, confirm=True)
 
     assert not ok
-    assert "response_keys=error,ok" in message
-    assert "denied" in message
+    assert "response_keys=error,ok,response" in message
+    assert "server_response=string(" in message
+    assert "Request denied" in message
+    assert "Rate limited" in message
+    assert "[email redacted]" in message
+    assert "[number redacted]" in message
     assert "response_chars=" in message
     assert "private status" not in message
     assert csrf not in message
+    assert "var csrf" not in message
 
 
 def test_perform_update_includes_http_metadata_for_unconfirmed_reply(monkeypatch):
