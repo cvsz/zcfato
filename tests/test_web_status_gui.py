@@ -18,15 +18,20 @@ def test_any_args_mean_cli():
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ("20", 20.0),
-    ("20.0", 20.0),
+    ("2", 2.0),
+    ("2.0", 2.0),
     ("5", 5.0),
-    ("1", 5.0),      # clamped to the minimum
+    ("1", 2.0),      # clamped to the minimum
     ("500", 120.0),  # clamped to the maximum
-    (20, 20.0),
+    (2, 2.0),
 ])
 def test_parse_timeout_accepts_and_clamps(raw, expected):
     assert wsg.parse_timeout(raw) == expected
+
+
+def test_web_status_gui_timeout_defaults_to_two_seconds():
+    assert wsg.TIMEOUT_DEFAULT == 2.0
+    assert wsg.build_parser().parse_args(["--status", "hello"]).timeout == 2.0
 
 
 @pytest.mark.parametrize("bad", ["", "abc", "nan", "inf", None])
@@ -369,7 +374,7 @@ def test_web_status_marquee_scrolls_each_message_and_settles_on_full_text():
 
 
 def test_web_status_marquee_sends_one_slot_then_advances_to_next(monkeypatch, tmp_path):
-    assert wsg.WEB_MARQUEE_STEP_SECONDS == 5
+    assert wsg.WEB_MARQUEE_STEP_SECONDS == 0.5
     monkeypatch.setattr(wsg, "BASE", tmp_path)
     manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123")
     manager.pool_vars = [_Value("This is a long web status message that should scroll."),
@@ -402,7 +407,7 @@ def test_web_status_marquee_sends_one_slot_then_advances_to_next(monkeypatch, tm
     frames = wsg.web_status_frames(
         "This is a long web status message that should scroll.", enabled=True)
     assert sent == [frames[0]]
-    assert manager.root.scheduled[0][0] == wsg.WEB_MARQUEE_STEP_SECONDS * 1000
+    assert manager.root.scheduled[0][0] == 500
 
     for _ in range(len(frames) - 1):
         delay, callback, *args = manager.root.scheduled.pop(0)
@@ -413,6 +418,27 @@ def test_web_status_marquee_sends_one_slot_then_advances_to_next(monkeypatch, tm
     next_delay, _callback, *next_args = manager.root.scheduled[0]
     assert next_delay == wsg.WEB_MARQUEE_STEP_SECONDS * 1000
     assert next_args[-3] == 1
+
+
+def test_web_status_switch_every_schedules_half_second_fractional_interval():
+    manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123", live=False)
+    manager.pool_vars = [_Value("first"), _Value("next")] + [_Value("") for _ in range(8)]
+    manager.marquee_mode = _Value(False)
+    manager.infinity_loop = _Value(True)
+    manager.switching = True
+    manager._start_generation = 0
+    manager.root = _Root()
+    manager._record_activity = lambda _event: None
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        fn()
+        if on_done:
+            on_done()
+
+    manager._run_bg = run_bg
+    manager._cycle("Seaza", ["first", "next"], 0.5, 2.0, False, 0)
+
+    assert manager.root.scheduled[0][0] == 500
 
 
 def test_web_status_infinity_loop_wraps_from_last_populated_slot_to_first(monkeypatch,
@@ -662,7 +688,7 @@ def test_start_chains_login_then_rotation(tmp_path, monkeypatch):
         import time
         time.sleep(0.05)
     assert posted, "rotation never started after chained login"
-    assert posted[0] == ("hello world", 20.0, True)
+    assert posted[0] == ("hello world", 2.0, True)
     assert wsg.load_web_text_lines(tmp_path / "webtext.db")[9] == "last line"
     assert manager.session_ready is True
     manager.stop()

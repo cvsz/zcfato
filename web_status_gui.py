@@ -58,11 +58,11 @@ EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_BLOCKED = 3
 
-ROTATE_INTERVAL_MIN = 30
-ROTATE_INTERVAL_DEFAULT = 300
+ROTATE_INTERVAL_MIN = 0.5
+ROTATE_INTERVAL_DEFAULT = 0.5
 ROTATE_INTERVAL_MAX = 86400
 
-WEB_MARQUEE_STEP_SECONDS = 5
+WEB_MARQUEE_STEP_SECONDS = 0.5
 WEB_MARQUEE_WIDTH = 28
 WEB_MARQUEE_STRIDE = 2
 WEB_MARQUEE_SEPARATOR = "   \u2022   "
@@ -187,9 +187,11 @@ def web_status_frames(text, enabled=True):
 def parse_rotate_interval(raw):
     """Auto-switch interval in seconds. Clamped to the allowed window."""
     try:
-        value = int(float(str(raw).strip()))
+        value = float(str(raw).strip())
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError("invalid interval: {0!r}".format(raw)) from exc
+    if not (value == value and value not in (float("inf"), float("-inf"))):
+        raise ValueError("invalid interval: {0!r}".format(raw))
     return min(ROTATE_INTERVAL_MAX, max(ROTATE_INTERVAL_MIN, value))
 
 
@@ -268,8 +270,8 @@ def next_rotation(pool, index):
     return pool[index % len(pool)], (index + 1) % len(pool)
 
 
-TIMEOUT_MIN = 5.0
-TIMEOUT_DEFAULT = 20.0
+TIMEOUT_MIN = 2.0
+TIMEOUT_DEFAULT = 2.0
 TIMEOUT_MAX = 120.0
 
 
@@ -368,7 +370,7 @@ def build_parser():
     parser.add_argument("--confirm-update", action="store_true",
                         help="actually POST the status to the captured endpoint "
                              "(without it every run stays a dry-run)")
-    parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument("--timeout", type=float, default=TIMEOUT_DEFAULT)
     parser.add_argument("--how-to-capture", action="store_true",
                         help="print how to capture the update endpoint and exit")
     return parser
@@ -1058,8 +1060,8 @@ class WebStatusManager:
         self.interval = self.tk.StringVar(value=str(ROTATE_INTERVAL_DEFAULT))
         self.ttk.Spinbox(timing, textvariable=self.interval,
                          from_=ROTATE_INTERVAL_MIN, to=ROTATE_INTERVAL_MAX,
-                         increment=30, width=6).pack(side="left")
-        self.ttk.Label(timing, text="s (min 30)").pack(side="left", padx=(4, 0))
+                         increment=0.5, width=6).pack(side="left")
+        self.ttk.Label(timing, text="s (min 0.5)").pack(side="left", padx=(4, 0))
         self.ttk.Label(timing, text="Timeout").pack(side="left", padx=(10, 0))
         self.timeout = self.tk.StringVar(value=str(TIMEOUT_DEFAULT))
         self.ttk.Entry(timing, textvariable=self.timeout, width=6).pack(side="left", padx=(3, 0))
@@ -1072,7 +1074,7 @@ class WebStatusManager:
         self.marquee_mode = self.tk.BooleanVar(value=False)
         self.infinity_loop = self.tk.BooleanVar(value=True)
         self.ttk.Checkbutton(
-            modes, text="Marquee (5 seconds per frame)",
+            modes, text="Marquee (0.5 seconds per frame)",
             variable=self.marquee_mode).pack(side="left")
         self.ttk.Checkbutton(
             modes, text="Infinity Loop (last slot → slot 1)",
@@ -1603,7 +1605,7 @@ class WebStatusManager:
                 self.note.set("Marquee completed all populated slots.")
                 return
             self.rotate_job = self.root.after(
-                max(1, int(step_delay)) * 1000, self._cycle,
+                max(1, int(round(step_delay * 1000))), self._cycle,
                 login, pool, interval, timeout, live, next_index, next_frame,
                 generation)
 

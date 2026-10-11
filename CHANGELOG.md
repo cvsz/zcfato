@@ -9,12 +9,15 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 - Web Status now has an Activity Log tab and a rotating `web_status.log` containing allowlisted activity only; it never records status text or session cookies.
-- Web Status can scroll each populated status slot in 5-second frames. **Infinity Loop** starts at slot 1 again after the last populated slot; turn it off to stop after one pass.
+- Web Status can scroll each populated status slot in 0.5-second frames. **Infinity Loop** starts at slot 1 again after the last populated slot; turn it off to stop after one pass.
 
 ### Fixed
 - Web Status now accepts the non-empty status response used by Camfrog's profile form, so live marquee updates do not stop after the first frame.
 - Marquee **Loop** now repeats its frame list until the configured status interval, then advances to the next status.
 - The feature build now removes a stale root-level `dist/web-status.exe` from standalone PyInstaller builds before checking the expected executable set.
+
+### Changed
+- Web Status **Switch every** now defaults to 0.5 seconds and accepts 0.5-second intervals; the network timeout defaults to 2 seconds.
 
 ## [2.19.2] - 2026-10-11
 

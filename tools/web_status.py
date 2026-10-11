@@ -62,9 +62,10 @@ EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_BLOCKED = 3
 
-ROTATE_INTERVAL_MIN = 30
-ROTATE_INTERVAL_DEFAULT = 300
+ROTATE_INTERVAL_MIN = 0.5
+ROTATE_INTERVAL_DEFAULT = 0.5
 ROTATE_INTERVAL_MAX = 86400
+TIMEOUT_DEFAULT = 2.0
 
 
 def parse_pool(text):
@@ -75,9 +76,11 @@ def parse_pool(text):
 def parse_rotate_interval(raw):
     """Auto-switch interval in seconds. Clamped to the allowed window."""
     try:
-        value = int(float(str(raw).strip()))
+        value = float(str(raw).strip())
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError("invalid interval: {0!r}".format(raw)) from exc
+    if not (value == value and value not in (float("inf"), float("-inf"))):
+        raise ValueError("invalid interval: {0!r}".format(raw))
     return min(ROTATE_INTERVAL_MAX, max(ROTATE_INTERVAL_MIN, value))
 
 
@@ -179,7 +182,7 @@ def build_parser():
     parser.add_argument("--confirm-update", action="store_true",
                         help="actually POST the status to the captured endpoint "
                              "(without it every run stays a dry-run)")
-    parser.add_argument("--timeout", type=float, default=20.0)
+    parser.add_argument("--timeout", type=float, default=TIMEOUT_DEFAULT)
     parser.add_argument("--how-to-capture", action="store_true",
                         help="print how to capture the update endpoint and exit")
     return parser

@@ -196,13 +196,20 @@ def test_next_rotation_empty_pool_refused():
         ws.next_rotation([], 0)
 
 
-def test_parse_rotate_interval_clamps_and_rejects():
-    assert ws.parse_rotate_interval("300") == 300
-    assert ws.parse_rotate_interval("5") == ws.ROTATE_INTERVAL_MIN
-    assert ws.parse_rotate_interval("999999") == ws.ROTATE_INTERVAL_MAX
+@pytest.mark.parametrize("module", [ws, wsg], ids=["cli", "gui"])
+def test_parse_rotate_interval_clamps_and_preserves_fractional_seconds(module):
+    assert module.ROTATE_INTERVAL_DEFAULT == 0.5
+    assert module.parse_rotate_interval("0.5") == 0.5
+    assert module.parse_rotate_interval("1.25") == 1.25
+    assert module.parse_rotate_interval("0.25") == module.ROTATE_INTERVAL_MIN
+    assert module.parse_rotate_interval("999999") == module.ROTATE_INTERVAL_MAX
     for bad in ("", "abc", "nan", "inf", None):
         with pytest.raises(ValueError):
-            ws.parse_rotate_interval(bad)
+            module.parse_rotate_interval(bad)
+
+
+def test_web_status_cli_timeout_defaults_to_two_seconds():
+    assert ws.build_parser().parse_args(["--status", "hello"]).timeout == 2.0
 
 
 def test_perform_update_refused_until_confirmed():
