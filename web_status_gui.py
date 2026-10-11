@@ -16,6 +16,7 @@ import random
 import socket
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
 from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
 from pathlib import Path
@@ -72,6 +73,11 @@ WEB_STATUS_LOG_NAME = "web_status.log"
 WEB_STATUS_LOG_MAX_BYTES = 512 * 1024
 WEB_STATUS_LOG_BACKUPS = 3
 WEB_STATUS_LOG_GUI_LINES = 200
+WEB_STATUS_LOG_DETAIL_MAX_CHARS = 1000
+WEB_STATUS_LOG_FAILURE_EVENTS = frozenset((
+    "session_verification_failed",
+    "status_update_failed",
+))
 WEB_STATUS_LOG_EVENTS = {
     "session_verification_started": "Session verification started",
     "session_verification_succeeded": "Session verification succeeded",
@@ -90,17 +96,128 @@ WEB_STATUS_LOG_EVENTS = {
 _WEB_STATUS_LOG_LOCK = threading.Lock()
 
 
+def _sanitize_web_status_detail(value, secrets=()):
+    """Bound diagnostics and remove cookie, token, and caller-known secret values."""
+    text = str(value)
+    for secret in sorted((str(item) for item in secrets if item),
+                         key=len, reverse=True):
+        if len(secret) <= 3:
+            text = re.sub(r"(?<!\w){0}(?!\w)".format(re.escape(secret)),
+                          "[redacted]", text)
+        else:
+            text = text.replace(secret, "[redacted]")
+    text = re.sub(
+        r"(?im)(\b(?:cookie|set-cookie|authorization)\s*:\s*)[^\r\n]*",
+        r"\1[redacted]", text)
+    text = re.sub(
+        r"(?i)(\b(?:php\s*session\s*id|phpsessid|session[_-]?id|csrf(?:[_-]?token)?|"
+        r"access[_-]?token|auth[_-]?token|authorization|token|password|passwd|secret)\b"
+        r"[\"']?\s*[:=]\s*)(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^&\s,;}}\]]+)",
+        r"\1[redacted]", text)
+    text = re.sub(r"[\x00-\x1f\x7f]+", " ", text)
+    text = re.sub(r"\s+", " ", text).replace("|", "/").strip()
+    if len(text) > WEB_STATUS_LOG_DETAIL_MAX_CHARS:
+        text = text[:WEB_STATUS_LOG_DETAIL_MAX_CHARS - 14].rstrip() + " [truncated]"
+    return text
+
+
+def _web_status_response_keys(data):
+    """Return a small, safe summary of untrusted JSON object keys."""
+    safe = []
+    for key in data:
+        if isinstance(key, str) and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]{0,39}", key):
+            if re.search(r"(?i)cookie|csrf|token|password|secret|session", key):
+                safe.append("[sensitive-key]")
+            else:
+                safe.append(key)
+        else:
+            safe.append("[other-key]")
+    return ",".join(sorted(set(safe))[:12]) or "none"
+
+
+def _web_status_value_summary(value, secrets=()):
+    if isinstance(value, str):
+        return "string({0} chars): {1}".format(
+            len(value), _sanitize_web_status_detail(value, secrets=secrets))
+    if isinstance(value, (bool, int, float)) or value is None:
+        return "{0}: {1}".format(type(value).__name__, value)
+    if isinstance(value, (dict, list, tuple)):
+        return "{0}({1} items)".format(type(value).__name__, len(value))
+    return type(value).__name__
+
+
+def _session_cookie_redaction_values(cookie):
+    if not cookie:
+        return ()
+    value = str(cookie).strip()
+    result = [value]
+    if "=" in value:
+        raw = value.split("=", 1)[1].strip()
+        if raw:
+            result.append(raw)
+    return tuple(result)
+
+
+def _web_status_request_error(stage, exc, secrets=()):
+    """Describe a failed HTTP request without recording response headers or secrets."""
+    if isinstance(exc, urllib.error.HTTPError):
+        parts = ["{0}: HTTPError HTTP {1}".format(stage, exc.code)]
+        if exc.reason:
+            parts.append("reason={0}".format(exc.reason))
+        headers = exc.headers or {}
+        for name, label in (("Content-Type", "content_type"),
+                            ("Retry-After", "retry_after")):
+            value = headers.get(name)
+            if value:
+                parts.append("{0}={1}".format(label, value))
+        try:
+            body = exc.read(4096).decode("utf-8", "replace")
+            if body:
+                try:
+                    parsed = json.loads(body)
+                except ValueError:
+                    parts.append("response_body={0} chars (not JSON)".format(len(body)))
+                else:
+                    if isinstance(parsed, dict):
+                        parts.append("response_keys={0}".format(
+                            _web_status_response_keys(parsed)))
+                        if parsed.get("error"):
+                            parts.append("server_error={0}".format(
+                                _web_status_value_summary(
+                                    parsed.get("error"), secrets=secrets)))
+                    else:
+                        parts.append("response_json_type={0}".format(
+                            type(parsed).__name__))
+        except Exception:
+            parts.append("response_body=unavailable")
+        return _sanitize_web_status_detail("; ".join(parts), secrets=secrets)
+    if isinstance(exc, urllib.error.URLError):
+        reason = exc.reason
+        description = "{0}: URLError reason={1}".format(stage, reason)
+    else:
+        description = "{0}: {1}: {2}".format(
+            stage, type(exc).__name__, exc)
+    return _sanitize_web_status_detail(description, secrets=secrets)
+
+
 def web_status_log_path():
     return BASE / WEB_STATUS_LOG_NAME
 
 
-def _web_status_log_entry(event, now=None):
+def _web_status_log_entry(event, now=None, detail=None, secrets=()):
     try:
         label = WEB_STATUS_LOG_EVENTS[event]
     except (KeyError, TypeError) as exc:
         raise ValueError("unknown activity") from exc
     timestamp = now or datetime.datetime.now().astimezone()
-    return "{0:%Y-%m-%d %H:%M:%S %z} | {1}".format(timestamp, label)
+    entry = "{0:%Y-%m-%d %H:%M:%S %z} | {1}".format(timestamp, label)
+    if detail is not None:
+        if event not in WEB_STATUS_LOG_FAILURE_EVENTS:
+            raise ValueError("details are only allowed for failure events")
+        sanitized = _sanitize_web_status_detail(detail, secrets=secrets)
+        if sanitized:
+            entry += " | " + sanitized
+    return entry
 
 
 def load_web_status_log(path=None):
@@ -113,9 +230,9 @@ def load_web_status_log(path=None):
                 if line.strip()]
 
 
-def append_web_status_log(event, path=None, now=None):
-    """Append one allowlisted event; callers cannot add status or session data."""
-    entry = _web_status_log_entry(event, now)
+def append_web_status_log(event, path=None, now=None, detail=None, secrets=()):
+    """Append one allowlisted event with bounded, redacted failure diagnostics."""
+    entry = _web_status_log_entry(event, now, detail=detail, secrets=secrets)
     log_path = Path(path) if path is not None else web_status_log_path()
     encoded = (entry + "\n").encode("utf-8")
     with _WEB_STATUS_LOG_LOCK:
@@ -297,26 +414,63 @@ def perform_update(opener, status, timeout, confirm=False):
         return False, ("update refused: endpoint captured from home.php but not "
                        "confirmed end to end yet; pass --confirm-update to send "
                        "for real (dry-run preview only).")
-    html = fetch_profile(opener, "", timeout)
+    try:
+        html = fetch_profile(opener, "", timeout)
+    except Exception as exc:
+        return False, _web_status_request_error(
+            "GET /home.php", exc, secrets=(status,))
     csrf = extract_csrf(html)
     if not csrf:
         return False, ("update refused: no CSRF token on the profile page "
-                       "(session expired or not signed in).")
-    reply = _post(opener, WEB_UPDATE_URL, {"status": status, "csrf": csrf}, timeout)
+                       "(session expired or not signed in); profile_chars={0}.".format(
+                           len(html)))
+    try:
+        reply = _post(opener, WEB_UPDATE_URL,
+                      {"status": status, "csrf": csrf}, timeout)
+    except Exception as exc:
+        return False, _web_status_request_error(
+            "POST /ajax/update_status.php", exc, secrets=(status, csrf))
+    response_context = []
+    status_code = getattr(reply, "status_code", None)
+    content_type = getattr(reply, "content_type", None)
+    if status_code is not None:
+        response_context.append("http_status={0}".format(status_code))
+    if content_type:
+        response_context.append("content_type={0}".format(content_type))
+    if response_context:
+        response_context = ["response " + ", ".join(response_context)]
+    response_context.append("response_chars={0}".format(len(reply)))
+    context = "; ".join(response_context)
     try:
         data = json.loads(reply)
-    except ValueError:
-        return False, "update refused: unrecognized server reply ({0}).".format(
-            reply[:60])
+    except (TypeError, ValueError) as exc:
+        parser_detail = type(exc).__name__
+        if isinstance(exc, json.JSONDecodeError):
+            parser_detail += " ({0}, line={1}, column={2}, char={3})".format(
+                exc.msg, exc.lineno, exc.colno, exc.pos)
+        return False, "update refused: invalid JSON server reply; {0}; {1}.".format(
+            parser_detail, context)
     if not isinstance(data, dict):
-        return False, "update refused: invalid server response format."
+        return False, ("update refused: expected a JSON object but received {0}; "
+                       "{1}.").format(type(data).__name__, context)
     if data.get("error"):
-        return False, "update refused by the server (error response)."
+        return False, ("update refused by the server; response_keys={0}; "
+                       "error={1}; {2}.").format(
+                           _web_status_response_keys(data),
+                           _web_status_value_summary(
+                               data.get("error"), secrets=(status, csrf)),
+                           context)
     # Camfrog's profile form treats a non-empty response string as success and
     # writes it back into the status field. It does not require the literal "ok".
     response = data.get("response")
     if not isinstance(response, str) or not response.strip():
-        return False, "update unconfirmed: server did not acknowledge success."
+        response_type = "missing" if "response" not in data else type(response).__name__
+        response_chars = (len(response) if isinstance(response, str) else "n/a")
+        return False, ("update unconfirmed: server did not acknowledge success; "
+                       "response_type={0}; response_chars={1}; response_keys={2}; "
+                       "{3}.").format(
+                           response_type, response_chars,
+                           _web_status_response_keys(data), context)
     return True, "status update acknowledged by server."
 
 
@@ -704,7 +858,23 @@ def _post(opener, url, fields, timeout):
     request = urllib.request.Request(url, data=data, headers=dict(
         BROWSER_HEADERS, Referer=LOGIN_PAGE_URL))
     with opener.open(request, timeout=timeout) as response:
-        return response.read().decode("utf-8", "replace").strip()
+        body = response.read().decode("utf-8", "replace").strip()
+        headers = getattr(response, "headers", None)
+        content_type = headers.get("Content-Type") if headers is not None else None
+        return WebStatusReply(
+            body, status_code=getattr(response, "status", None)
+            or (response.getcode() if hasattr(response, "getcode") else None),
+            content_type=content_type)
+
+
+class WebStatusReply(str):
+    """Text response with only non-sensitive HTTP metadata used for diagnostics."""
+
+    def __new__(cls, value, status_code=None, content_type=None):
+        reply = super().__new__(cls, value)
+        reply.status_code = status_code
+        reply.content_type = content_type
+        return reply
 
 
 def attempt_login(opener, login, password, timeout):
@@ -1188,12 +1358,14 @@ class WebStatusManager:
         self.log_view.configure(state="disabled")
         self.log_view.see("end")
 
-    def _record_activity(self, event):
+    def _record_activity(self, event, detail=None, secrets=()):
         try:
-            entry = append_web_status_log(event)
+            entry = append_web_status_log(
+                event, detail=detail, secrets=secrets)
         except (OSError, ValueError) as exc:
             try:
-                entry = _web_status_log_entry(event)
+                entry = _web_status_log_entry(
+                    event, detail=detail, secrets=secrets)
             except ValueError:
                 return
             if hasattr(self, "note"):
@@ -1307,17 +1479,28 @@ class WebStatusManager:
 
     def _verify_session(self, login, timeout, on_done):
         """Probe PHPSESSID session in a worker; on_done runs on success."""
+        failure_detail = []
+        cookie_secrets = _session_cookie_redaction_values(
+            getattr(self, "cookie_paste", ""))
 
         def do():
             import urllib.request
 
-            jar = self._session_jar()
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-            html = fetch_profile(opener, login, timeout)
-            verdict, detail = summarize_session(html)
-            if verdict != "signed-in":
-                raise ValueError(detail)
-            return detail
+            try:
+                jar = self._session_jar()
+                opener = urllib.request.build_opener(
+                    urllib.request.HTTPCookieProcessor(jar))
+                html = fetch_profile(opener, login, timeout)
+                verdict, detail = summarize_session(html)
+                if verdict != "signed-in":
+                    raise ValueError(detail)
+                return detail
+            except Exception as exc:
+                diagnostic = _web_status_request_error(
+                    "session verification GET /home.php", exc,
+                    secrets=(login,) + cookie_secrets)
+                failure_detail[:] = [diagnostic]
+                raise RuntimeError(diagnostic) from exc
 
         self._record_activity("session_verification_started")
 
@@ -1327,7 +1510,11 @@ class WebStatusManager:
 
         self._run_bg(
             do, force=True, on_done=verified,
-            on_error=lambda: self._record_activity("session_verification_failed"))
+            on_error=lambda: self._record_activity(
+                "session_verification_failed",
+                detail=failure_detail[0] if failure_detail else
+                "session verification worker failed without diagnostic details",
+                secrets=cookie_secrets))
 
     def login_via_browser(self):
         """One-click login: the real browser solves the CAPTCHA and the
@@ -1561,22 +1748,32 @@ class WebStatusManager:
         frame = frames[frame_index]
         slot_index = index % len(pool)
         step_delay = WEB_MARQUEE_STEP_SECONDS if marquee else interval
+        cookie_secrets = _session_cookie_redaction_values(
+            getattr(self, "cookie_paste", ""))
+        diagnostic_secrets = (frame, login) + cookie_secrets
+        failure_detail = []
 
         def do():
             if not live:
                 return "cycle #{0}/{1} (dry-run): {2}".format(
                     index + 1, len(pool), frame)
-            import urllib.request
-
             try:
+                import urllib.request
+
                 jar = self._session_jar()
-            except (OSError, ValueError) as exc:
-                raise ValueError("cycle #{0}/{1} stopped: {2}".format(
-                    index + 1, len(pool), exc)) from exc
-            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
-            ok, message = perform_update(opener, frame, timeout, confirm=True)
-            if not ok:
-                raise RuntimeError(message)
+                opener = urllib.request.build_opener(
+                    urllib.request.HTTPCookieProcessor(jar))
+                ok, message = perform_update(opener, frame, timeout, confirm=True)
+                if not ok:
+                    diagnostic = _sanitize_web_status_detail(
+                        message, secrets=diagnostic_secrets)
+                    failure_detail[:] = [diagnostic]
+                    raise RuntimeError(diagnostic)
+            except Exception as exc:
+                diagnostic = _web_status_request_error(
+                    "live status update", exc, secrets=diagnostic_secrets)
+                failure_detail[:] = [diagnostic]
+                raise RuntimeError(diagnostic) from exc
             return "cycle #{0}/{1}: {2}".format(index + 1, len(pool), message)
 
         def advance():
@@ -1615,7 +1812,14 @@ class WebStatusManager:
             self.session_ready = False
             self.chrome_mode = False
             self._invalidate_pending_start()
-            self._record_activity("status_update_failed" if live else "rotation_stopped")
+            if live:
+                self._record_activity(
+                    "status_update_failed",
+                    detail=failure_detail[0] if failure_detail else
+                    "live status update worker failed without diagnostic details",
+                    secrets=diagnostic_secrets)
+            else:
+                self._record_activity("rotation_stopped")
 
         self._run_bg(
             do, force=True, on_done=lambda: (

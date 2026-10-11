@@ -519,7 +519,81 @@ def test_failed_live_marquee_update_stops_without_scheduling_another_frame(
     assert manager.root.scheduled == []
     log = (tmp_path / "web_status.log").read_text(encoding="utf-8")
     assert "Live status update failed" in log
-    assert "server refused" not in log
+    assert "server refused" in log
+    assert "hello" not in log
+
+
+def test_failed_live_http_error_logs_details_without_cookie_status_or_set_cookie(
+        monkeypatch, tmp_path):
+    import io
+    import urllib.error
+
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager(cookie_paste="PHPSESSID=private-cookie-value")
+    manager.switching = True
+    manager.root = _Root()
+    manager._session_jar = lambda: object()
+    monkeypatch.setattr(wsg.urllib.request, "build_opener", lambda *args: object())
+    error = urllib.error.HTTPError(
+        wsg.WEB_UPDATE_URL, 429, "Too Many Requests",
+        {"Retry-After": "10", "Content-Type": "application/json",
+         "Set-Cookie": "PHPSESSID=header-cookie-value"},
+        io.BytesIO(b'{"error":"slow down"}'))
+    monkeypatch.setattr(wsg, "perform_update",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        try:
+            fn()
+        except Exception:
+            if on_error:
+                on_error()
+        else:
+            if on_done:
+                on_done()
+
+    manager._run_bg = run_bg
+    manager._cycle("Seaza", ["private status text"], 0.5, 2.0, True, 0)
+
+    log = (tmp_path / "web_status.log").read_text(encoding="utf-8")
+    assert "HTTP 429" in log
+    assert "Too Many Requests" in log
+    assert "retry_after=10" in log
+    assert "slow down" in log
+    assert "private-cookie-value" not in log
+    assert "header-cookie-value" not in log
+    assert "private status text" not in log
+
+
+def test_web_status_failure_log_redacts_secret_fields_and_limits_detail(tmp_path):
+    path = tmp_path / "web_status.log"
+    secret_detail = (
+        "HTTP 403; PHPSESSID=server-cookie-value; csrf=csrf-value; "
+        "status=private status text; response={\"csrf\":\"json-csrf-value\", "
+        "\"authorization\":\"Bearer auth-secret-value\"}\n"
+        "Set-Cookie: PHPSESSID=header-cookie-value\nretry_after=5")
+
+    entry = wsg.append_web_status_log(
+        "status_update_failed", path, detail=secret_detail,
+        secrets=("server-cookie-value", "csrf-value", "private status text"))
+
+    assert "HTTP 403" in entry
+    for secret in ("server-cookie-value", "csrf-value", "json-csrf-value",
+                   "auth-secret-value", "private status text",
+                   "header-cookie-value"):
+        assert secret not in entry
+    assert "[redacted]" in entry
+    assert "retry_after=5" in entry
+    assert "\n" not in entry
+    assert len(entry) <= len("2026-10-11 00:00:00 +0000 | Live status update failed | ") \
+        + wsg.WEB_STATUS_LOG_DETAIL_MAX_CHARS
+
+
+def test_failure_details_are_not_accepted_for_non_failure_events(tmp_path):
+    with pytest.raises(ValueError, match="only allowed for failure events"):
+        wsg.append_web_status_log(
+            "status_update_succeeded", tmp_path / "web_status.log",
+            detail="diagnostic text")
 
 
 def test_web_status_log_persists_only_allowlisted_activity(tmp_path):

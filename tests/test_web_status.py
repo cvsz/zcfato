@@ -645,6 +645,42 @@ def test_perform_update_refuses_unacknowledged_server_reply(monkeypatch, reply):
     assert "refused" in message or "unconfirmed" in message
 
 
+def test_perform_update_reports_safe_response_diagnostics(monkeypatch):
+    csrf = "90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0"
+    monkeypatch.setattr(wsg, "fetch_profile", lambda *a: "var csrf = '{0}';".format(csrf))
+    monkeypatch.setattr(
+        wsg, "_post",
+        lambda *a: '{"error":"denied: status=private status; csrf=CSRF_VALUE",'
+        '"ok":false}'.replace("CSRF_VALUE", csrf))
+
+    ok, message = wsg.perform_update(object(), "private status", 2.0, confirm=True)
+
+    assert not ok
+    assert "response_keys=error,ok" in message
+    assert "denied" in message
+    assert "response_chars=" in message
+    assert "private status" not in message
+    assert csrf not in message
+
+
+def test_perform_update_includes_http_metadata_for_unconfirmed_reply(monkeypatch):
+    monkeypatch.setattr(wsg, "fetch_profile",
+                        lambda *a: "var csrf = '90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0';")
+    monkeypatch.setattr(
+        wsg, "_post",
+        lambda *a: wsg.WebStatusReply(
+            '{"response":""}', status_code=503,
+            content_type="application/json"))
+
+    ok, message = wsg.perform_update(object(), "status", 2.0, confirm=True)
+
+    assert not ok
+    assert "http_status=503" in message
+    assert "content_type=application/json" in message
+    assert "response_type=str" in message
+    assert "response_chars=0" in message
+
+
 @pytest.mark.parametrize("module", [ws, wsg], ids=["cli", "gui"])
 @pytest.mark.parametrize("reply", ['{"response":"new status"}', '{"response":"ok"}'])
 def test_perform_update_accepts_profile_ui_success_response(monkeypatch, module, reply):
