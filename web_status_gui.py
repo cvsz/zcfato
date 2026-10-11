@@ -1180,6 +1180,148 @@ def run_cli_headless(argv, show=None):
     return code
 
 
+_CLIPBOARD_WIDGET_CLASSES = {
+    "Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox", "Text",
+}
+_CLIPBOARD_EDITABLE_CLASSES = {
+    "Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox", "Text",
+}
+
+
+def _windows_open_clipboard(clipboard, attempts=20, interval=0.025):
+    """Retry briefly while another Windows process holds the clipboard."""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            clipboard.OpenClipboard(None)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(interval)
+    raise OSError("Could not open the Windows clipboard: {0}".format(
+        type(last_error).__name__ if last_error else "unknown error")) from last_error
+
+
+def _read_clipboard_text(root):
+    """Read text through Win32 first, with Tk as a portable fallback."""
+    clipboard_error = None
+    if os.name == "nt":
+        try:
+            import win32clipboard
+            import win32con
+        except ImportError:
+            pass
+        else:
+            try:
+                _windows_open_clipboard(win32clipboard)
+                try:
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                        value = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+                        return value if isinstance(value, str) else str(value)
+                    if win32clipboard.IsClipboardFormatAvailable(win32con.CF_TEXT):
+                        value = win32clipboard.GetClipboardData(win32con.CF_TEXT)
+                        if isinstance(value, bytes):
+                            value = value.decode("mbcs", errors="replace")
+                        return value if isinstance(value, str) else str(value)
+                finally:
+                    win32clipboard.CloseClipboard()
+            except Exception as exc:
+                clipboard_error = exc
+
+    try:
+        return str(root.clipboard_get())
+    except Exception as exc:
+        if clipboard_error is not None:
+            raise OSError("Could not read the system clipboard ({0}).".format(
+                type(clipboard_error).__name__)) from clipboard_error
+        raise OSError("Could not read text from the system clipboard.") from exc
+
+
+def _clipboard_widget_class(widget):
+    try:
+        return widget.winfo_class()
+    except Exception:
+        return ""
+
+
+def _clipboard_widget_editable(widget):
+    if _clipboard_widget_class(widget) not in _CLIPBOARD_EDITABLE_CLASSES:
+        return False
+    try:
+        return str(widget.cget("state")) not in {"disabled", "readonly"}
+    except Exception:
+        return True
+
+
+class WebStatusClipboardController:
+    """Bind reliable paste handling and a right-click Paste menu to GUI fields."""
+
+    def __init__(self, root, on_error=None):
+        import tkinter as tk
+
+        self.root = root
+        self.on_error = on_error
+        self.target = None
+        self.menu = tk.Menu(root, tearoff=False)
+        self.menu.add_command(label="Paste", command=self.paste_target)
+
+    def install(self, parent):
+        for widget in parent.winfo_children():
+            if _clipboard_widget_class(widget) in _CLIPBOARD_WIDGET_CLASSES:
+                for sequence in ("<Control-v>", "<Control-V>", "<Shift-Insert>"):
+                    widget.bind(sequence, self.handle, add="+")
+                widget.bind("<Button-3>", self.show_menu, add="+")
+            self.install(widget)
+
+    def handle(self, event):
+        self.target = event.widget
+        self.paste(self.target)
+        return "break"
+
+    def paste_target(self):
+        self.paste(self.target)
+
+    def paste(self, widget):
+        if widget is None or not _clipboard_widget_editable(widget):
+            return False
+        try:
+            value = _read_clipboard_text(self.root)
+            if not value:
+                raise ValueError("The system clipboard does not contain text.")
+            widget_class = _clipboard_widget_class(widget)
+            if widget_class == "Text":
+                if widget.tag_ranges("sel"):
+                    widget.delete("sel.first", "sel.last")
+                widget.insert("insert", value)
+            else:
+                if widget.selection_present():
+                    widget.delete("sel.first", "sel.last")
+                widget.insert("insert", value)
+            return True
+        except Exception as exc:
+            if self.on_error:
+                self.on_error(exc)
+            return False
+
+    def show_menu(self, event):
+        self.target = event.widget
+        if not _clipboard_widget_editable(self.target):
+            return "break"
+        self.target.focus_set()
+        try:
+            self.menu.tk_popup(event.x_root, event.y_root)
+        except Exception as exc:
+            if self.on_error:
+                self.on_error(exc)
+        finally:
+            try:
+                self.menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+
 class WebStatusManager:
     def __init__(self, cookies_default=""):
         import tkinter as tk
@@ -1355,9 +1497,17 @@ class WebStatusManager:
             self.note.set(log_load_warning)
         self.ttk.Label(self.root, textvariable=self.note, anchor="w",
                        padding=(10, 0, 10, 8), wraplength=450).pack(fill="x")
+        self.clipboard_controller = WebStatusClipboardController(
+            self.root, on_error=self._clipboard_error)
+        self.clipboard_controller.install(self.root)
         self.root.after(120, self._poll)
 
     # ---- helpers
+    def _clipboard_error(self, exc):
+        if hasattr(self, "note"):
+            self.note.set("Paste failed: {0}: {1}".format(
+                type(exc).__name__, exc))
+
     def chrome_import(self):
         """Auto-import the session from Chrome's store (nothing saved to disk)."""
         def do():

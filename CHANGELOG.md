@@ -14,6 +14,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Fixed
 - Web Status now accepts the non-empty status response used by Camfrog's profile form, so live marquee updates do not stop after the first frame.
+- Web Status input fields now handle Ctrl+V and Shift+Insert through the Windows text clipboard, with a right-click Paste menu as a fallback.
 - Marquee **Loop** now repeats its frame list until the configured status interval, then advances to the next status.
 - The feature build now removes a stale root-level `dist/web-status.exe` from standalone PyInstaller builds before checking the expected executable set.
 
