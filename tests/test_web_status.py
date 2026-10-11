@@ -7,6 +7,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools import web_status as ws  # noqa: E402
+import web_status_gui as wsg  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -624,7 +625,10 @@ def test_chrome_aes_key_missing_file(tmp_path):
         ws.chrome_aes_key(str(tmp_path / "nothing"))
 
 
-@pytest.mark.parametrize("reply", ['{}', '[]', 'null', '{"response":""}', '{"response":"unknown"}', '{"error":true,"response":"denied"}'])
+@pytest.mark.parametrize("reply", [
+    '{}', '[]', 'null', '{"response":""}', '{"response":"   "}',
+    '{"response":null}', '{"error":true,"response":"denied"}',
+])
 def test_perform_update_refuses_unacknowledged_server_reply(monkeypatch, reply):
     monkeypatch.setattr(ws, "fetch_profile",
                         lambda *a: "var csrf = '90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0';")
@@ -632,6 +636,18 @@ def test_perform_update_refuses_unacknowledged_server_reply(monkeypatch, reply):
     ok, message = ws.perform_update(object(), "new status", 1.0, confirm=True)
     assert not ok
     assert "refused" in message or "unconfirmed" in message
+
+
+@pytest.mark.parametrize("module", [ws, wsg], ids=["cli", "gui"])
+@pytest.mark.parametrize("reply", ['{"response":"new status"}', '{"response":"ok"}'])
+def test_perform_update_accepts_profile_ui_success_response(monkeypatch, module, reply):
+    monkeypatch.setattr(module, "fetch_profile",
+                        lambda *a: "var csrf = '90d230418b54c662c347d84f32f663e0a94fc5abd9d705a0';")
+    monkeypatch.setattr(module, "_post", lambda *a: reply)
+
+    ok, message = module.perform_update(object(), "new status", 1.0, confirm=True)
+
+    assert ok, message
 
 
 def test_live_update_requires_verified_session_before_post(monkeypatch):

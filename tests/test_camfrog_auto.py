@@ -400,6 +400,35 @@ def test_do_status_runs_marquee_then_settles_on_full_text(cfg, monkeypatch):
     assert r.hist.find(THAI) is not None
 
 
+def test_do_status_infinite_loop_repeats_frames_until_status_interval(cfg, monkeypatch):
+    clock = {"now": 0.0}
+    monkeypatch.setattr(c.time, "monotonic", lambda: clock["now"])
+    cfg["status"]["history"]["enabled"] = False
+    cfg["status"]["history"]["use_as_source"] = False
+    cfg["status"]["language_cycle"] = []
+    cfg["status"]["messages"] = ["AAA status that is long enough", "BBB next status long enough"]
+    cfg["status"]["interval_seconds"] = 3.0
+    cfg["status"]["marquee"].update(
+        enabled=True, scroll=True, width=10, stride=2, step_seconds=0.5,
+        cycles=1, max_frames=5, infinite_loop=True)
+    r = c.Runner(cfg)
+    r.status_edit, r.apply_btn = object(), None
+    sent = []
+    monkeypatch.setattr(c.Runner, "send",
+                        lambda self, ctrl, text, btn=None: sent.append(text) or True)
+    r.last_status = -1e9
+
+    for instant in (0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0):
+        clock["now"] = instant
+        r.do_status(instant)
+
+    assert len(sent) == 7
+    assert sent[0] == sent[5]
+    assert sent[6] != sent[0]
+    assert r.status_i == 1
+    assert r.marq is not None
+
+
 def test_marquee_waits_after_slow_ui_update(cfg, monkeypatch):
     clock = {"now": 100.0}
     monkeypatch.setattr(c.time, "monotonic", lambda: clock["now"])

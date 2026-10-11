@@ -34,8 +34,8 @@ Missing keys use built-in defaults. This reference covers the source CLI configu
 | `status.marquee.scroll` | `false` | `false` = one whole pool line per tick (lines rotate 1..N and wrap); `true` = frame scrolling below |
 | `status.marquee.width` / `stride` | `28` / `2` | Window size (8–80, ≤ `max_length`) / Thai-safe clusters advanced per frame |
 | `status.marquee.step_seconds` | `0.5` | Seconds between frames (**min 0.3**); the runner wakes at the frame deadline to avoid extra poll delay |
-| `status.marquee.cycles` / `max_frames` | `1` / `80` | Loops (1–5) and hard cap on frames per switch (5–300); then settles on the full text |
-| `status.marquee.infinite_loop` | `false` | `true` = continuous loop (no settle), frames cycle up to `max_frames` then repeat; `cycles` ignored |
+| `status.marquee.cycles` / `max_frames` | `1` / `80` | Finite loops (1–5) and maximum generated ticker frames per status (5–300); finite scrolling then settles on the full text |
+| `status.marquee.infinite_loop` | `false` | `true` = repeat the frame list until `status.interval_seconds` expires, then advance to the next status; `cycles` ignored |
 | `status.marquee.separator` | `   •   ` | Gap shown between end and restart of the ticker |
 | `status.history.enabled` / `file` | `true` / `status_history.json` | Save every status you set |
 | `status.history.use_as_source` | `false` | `true` = next status is picked from history (`status.schedules` are then ignored) |

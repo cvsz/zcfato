@@ -34,8 +34,8 @@ key ที่ไม่ใส่จะใช้ค่าเริ่มต้น 
 | `status.marquee.scroll` | `false` | `false` = ส่งทีละ 1 บรรทัดเต็มต่อรอบ (วน 1..N) `true` = เลื่อนทีละเฟรมตามด้านล่าง |
 | `status.marquee.width` / `stride` | `28` / `2` | ความกว้างหน้าต่าง / จำนวนกลุ่มอักษรที่เลื่อนต่อเฟรม |
 | `status.marquee.step_seconds` | `0.5` | วินาทีต่อเฟรม (**ขั้นต่ำ 0.3**); ตัวรันจะตื่นตามกำหนดเฟรมเพื่อลดเวลารอเกิน |
-| `status.marquee.cycles` / `max_frames` | `1` / `80` | จำนวนรอบ และเพดานเฟรมต่อการสลับ จากนั้นหยุดที่ข้อความเต็ม |
-| `status.marquee.infinite_loop` | `false` | `true` = เลื่อนวนลูปไม่หยุด (ไม่หยุดที่ข้อความเต็ม) เฟรมวนซ้ำถึง `max_frames` แล้วเริ่มใหม่ `cycles` จะถูกละเว้น |
+| `status.marquee.cycles` / `max_frames` | `1` / `80` | จำนวนรอบแบบจำกัด และจำนวนเฟรม ticker สูงสุดต่อสถานะ (5–300); แบบจำกัดจะจบที่ข้อความเต็ม |
+| `status.marquee.infinite_loop` | `false` | `true` = วนชุดเฟรมซ้ำจนถึง `status.interval_seconds` แล้วเปลี่ยนข้อความถัดไป; ละเว้น `cycles` |
 | `status.marquee.separator` | `   •   ` | ช่องว่างระหว่างท้ายข้อความกับจุดเริ่มใหม่ |
 | `status.history.enabled` / `file` | `true` / `status_history.json` | เก็บทุก status ที่ตั้ง |
 | `status.history.use_as_source` | `false` | `true` = เลือก status ถัดไปจากประวัติ (`schedules` จะไม่ถูกใช้) |

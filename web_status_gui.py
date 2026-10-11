@@ -310,9 +310,10 @@ def perform_update(opener, status, timeout, confirm=False):
         return False, "update refused: invalid server response format."
     if data.get("error"):
         return False, "update refused by the server (error response)."
-    # The observed API success acknowledgement is {"response": "ok"}.
-    # No missing, empty, or unrecognized response may be treated as success.
-    if data.get("response") != "ok":
+    # Camfrog's profile form treats a non-empty response string as success and
+    # writes it back into the status field. It does not require the literal "ok".
+    response = data.get("response")
+    if not isinstance(response, str) or not response.strip():
         return False, "update unconfirmed: server did not acknowledge success."
     return True, "status update acknowledged by server."
 
