@@ -199,7 +199,7 @@ def test_next_rotation_empty_pool_refused():
 
 @pytest.mark.parametrize("module", [ws, wsg], ids=["cli", "gui"])
 def test_parse_rotate_interval_clamps_and_preserves_fractional_seconds(module):
-    assert module.ROTATE_INTERVAL_DEFAULT == 0.5
+    assert module.ROTATE_INTERVAL_DEFAULT == 8.0
     assert module.parse_rotate_interval("0.5") == 0.5
     assert module.parse_rotate_interval("1.25") == 1.25
     assert module.parse_rotate_interval("0.25") == module.ROTATE_INTERVAL_MIN
