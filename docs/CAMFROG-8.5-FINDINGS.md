@@ -42,8 +42,10 @@ Related historical artifact: [static reverse-engineering notes for Camfrog Statu
   `Internet Explorer_Server` named `camfrog://wb-log-room-data.inside/`. **Input** = second `AtlAxWinLic140` id `1002` (index 1) >
   `Internet Explorer_Server` named `camfrog://wb-edit-data.inside/` > Pane id `edit` (a web editable box, no Edit/RichEdit control).
 - Private-message windows have the same two panes but `wb-log-im-data`; `autoreply.log_kind: "room"` (default) refuses to attach to them.
-- Log items in UIA: `Image` (avatar), `Hyperlink` (nick, with a `Text` child), `Text` (time), `Text` (message). `parse_web_log()`
-  turns them into `nick: message`; join/leave notices (no Hyperlink) are ignored.
+- Older UIA captures expose `Image` (avatar), `Hyperlink` (nick), and `Text` (time/message), which `parse_web_log()` can read.
+  A current private-message pane instead exposed only `Text` UIA nodes and no `Hyperlink`, so this UIA-only path returned no
+  messages. The reader now gets the embedded MSHTML document with `WM_HTML_GETOBJECT` and extracts message rows from
+  `span.msg-user` (`nickname-field`, `msg-time`, and `msgid`); it retains the older UIA parser as a fallback.
 - Sending: no text control exists, so the tool brings the room to front, clicks the box, pastes (clipboard restored), presses Enter,
   and aborts if the room is not the foreground window at any step.
 - Still unverified: whether UIA exposes element **names** for the web text (the dumps redact names). Run `python camfrog_auto.py chat-probe`:

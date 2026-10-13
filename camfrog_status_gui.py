@@ -8,6 +8,7 @@ import json
 import logging
 import logging.handlers
 import os
+import ntpath
 import re
 import sqlite3
 import subprocess
@@ -19,6 +20,23 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional, Union
+
+
+def system_taskkill_path():
+    """Return taskkill.exe from Windows' system directory, never from PATH/cwd."""
+    if os.name != "nt":
+        return "taskkill.exe"
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_system_directory = kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = (ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint)
+    get_system_directory.restype = ctypes.c_uint
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_system_directory(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return os.path.join(buffer.value, "taskkill.exe")
 
 
 class SingleInstanceGuard:
@@ -991,47 +1009,98 @@ def read_pid(cfg):
     except Exception:
         return None
 
+def _process_query_api():
+    """Return kernel32 process-query APIs with pointer-safe Windows types."""
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (
+        wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD))
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32, wintypes
+
+
 def pid_alive(pid):
     if not pid:
         return False
     if os.name == "nt":
-        k = ctypes.windll.kernel32
-        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
+        try:
+            pid = int(pid)
+            if not 0 < pid <= 0xFFFFFFFF:
+                return False
+            kernel32, wintypes = _process_query_api()
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            try:
+                code = wintypes.DWORD()
+                ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                return bool(ok) and code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except (OSError, TypeError, ValueError, OverflowError):
             return False
-        code = ctypes.c_ulong()
-        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
-        k.CloseHandle(h)
-        return bool(ok) and code.value == 259  # STILL_ACTIVE
     try:
         os.kill(pid, 0)
         return True
     except OSError:
         return False
 
+
 def pid_image(pid):
     """Executable path of a process (Windows), or None when unknown."""
     try:
-        k = ctypes.windll.kernel32
-        h = k.OpenProcess(0x1000, False, pid)
-        if not h:
+        pid = int(pid)
+        if not 0 < pid <= 0xFFFFFFFF:
             return None
-        buf, n = ctypes.create_unicode_buffer(1024), ctypes.c_ulong(1024)
-        ok = k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n))
-        k.CloseHandle(h)
-        return buf.value if ok else None
-    except Exception:
+        kernel32, wintypes = _process_query_api()
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buffer))
+            ok = kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size))
+            return buffer.value if ok else None
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, TypeError, ValueError, OverflowError, AttributeError):
         return None
 
+
 def pid_is_ours(pid, image=None):
-    """Guard against PID reuse: a stale pid file must never make `stop` kill a stranger."""
+    """Only trust this executable or its Python worker interpreter."""
     if os.name != "nt":
         return True
     image = image if image is not None else pid_image(pid)
     if not image:
-        return True  # cannot tell: keep the old behaviour
-    name = Path(image).name.lower()
-    return "camfrog" in name or name.startswith("python") or name == Path(sys.executable).name.lower()
+        return False
+    candidate = ntpath.normcase(ntpath.normpath(str(image)))
+    executables = [sys.executable]
+    base_executable = getattr(sys, "_base_executable", None)
+    if not getattr(sys, "frozen", False) and base_executable:
+        executables.append(base_executable)
+    expected = set()
+    for executable in executables:
+        current = ntpath.normcase(ntpath.normpath(str(executable)))
+        expected.add(current)
+        current_name = ntpath.basename(current).casefold()
+        if current_name in {"python.exe", "pythonw.exe"}:
+            sibling = "pythonw.exe" if current_name == "python.exe" else "python.exe"
+            expected.add(ntpath.normcase(
+                ntpath.join(ntpath.dirname(current), sibling)))
+    return candidate in expected
+
 
 def running_pid(cfg):
     pid = read_pid(cfg)
@@ -1144,7 +1213,7 @@ def cmd_stop(cfg):
     forced = False
     if pid_alive(pid):
         try:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+            subprocess.run([system_taskkill_path(), "/PID", str(pid), "/T", "/F"],
                            capture_output=True, check=False, timeout=10)
             forced = True
         except (OSError, subprocess.TimeoutExpired):
@@ -1495,7 +1564,7 @@ def set_clipboard_text(root, text):
         return
     root.clipboard_clear()
     root.clipboard_append(text)
-    root.update()
+    root.update_idletasks()
 
 
 def get_clipboard_text(root):
@@ -1608,10 +1677,12 @@ class ClipboardController:
         import tkinter as tk
 
         self.root = root
-        self.translate = translate or (lambda text: text)
+        self.translate = translate or (lambda text: str(text).partition("|")[0])
         self.on_error = on_error
         self.target = None
         self.widgets = []
+        import weakref
+        self._installed_widgets = weakref.WeakSet()
         self.menu = tk.Menu(root, tearoff=False)
         for label, action in (("Cut|ตัด", "cut"), ("Copy|คัดลอก", "copy"),
                               ("Paste|วาง", "paste")):
@@ -1621,21 +1692,68 @@ class ClipboardController:
         self.menu.add_command(label=self.translate("Select all|เลือกทั้งหมด"),
                               command=lambda: self.select_all(self.target))
 
+    def refresh_menu(self):
+        """Refresh localized labels after the GUI language changes."""
+        labels = ("Cut|ตัด", "Copy|คัดลอก", "Paste|วาง",
+                  "Select all|เลือกทั้งหมด")
+        for index, label in enumerate(labels):
+            self.menu.entryconfigure(index if index < 3 else 4,
+                                     label=self.translate(label))
+
     def install(self, parent):
+        """Bind editors recursively, including controls added after the first build."""
         for widget in parent.winfo_children():
             widget_class = _widget_class(widget)
-            if widget_class in _WIDGET_CLASSES:
+            if widget_class in _WIDGET_CLASSES and widget not in self._installed_widgets:
+                self._installed_widgets.add(widget)
                 self.widgets.append(widget)
+                if widget_class in {"Text", "Listbox"}:
+                    try:
+                        widget.configure(
+                            background="#ffffff" if widget_class == "Text" else "#fffdfa",
+                            foreground="#283648", selectbackground="#8b672b",
+                            selectforeground="#fffdfa", insertbackground="#283648",
+                            highlightbackground="#d5c8ac", highlightcolor="#8b672b")
+                    except Exception:
+                        pass
                 for sequence, action in (
                     ("<Control-c>", "copy"), ("<Control-x>", "cut"),
                     ("<Control-v>", "paste"), ("<Control-Insert>", "copy"),
                     ("<Shift-Delete>", "cut"), ("<Shift-Insert>", "paste"),
                 ):
                     widget.bind(sequence, lambda event, op=action: self.handle(event, op), add="+")
+                # The generic key binding also recognizes Windows virtual-key
+                # codes and control characters when a Thai/non-Latin layout
+                # reports an unknown keysym for Ctrl+A/C/V/X.
+                widget.bind("<Control-KeyPress>", self.handle_control_key, add="+")
                 widget.bind("<Control-a>", self._select_all_event, add="+")
                 widget.bind("<Button-3>", self.show_menu, add="+")
                 widget.bind("<Shift-F10>", self.show_menu, add="+")
             self.install(widget)
+
+    def handle_control_key(self, event):
+        """Dispatch Ctrl+A/C/V/X consistently across keyboard layouts."""
+        keysym = str(getattr(event, "keysym", "")).lower()
+        char = str(getattr(event, "char", "") or "")
+        try:
+            keycode = int(getattr(event, "keycode", -1))
+        except (TypeError, ValueError):
+            keycode = -1
+        shortcuts = {
+            "a": ({"a", "\x01"}, 65, None),
+            "c": ({"c", "\x03"}, 67, "copy"),
+            "v": ({"v", "\x16"}, 86, "paste"),
+            "x": ({"x", "\x18"}, 88, "cut"),
+        }
+        key = next((name for name, (chars, code, _action) in shortcuts.items()
+                    if keysym == name or char in chars or keycode == code), None)
+        if key is None:
+            return None
+        self.target = event.widget
+        _chars, _code, action = shortcuts[key]
+        if action is None:
+            return self._select_all_event(event)
+        return self.handle(event, action)
 
     def perform(self, widget, action):
         if widget is None:
@@ -1840,6 +1958,7 @@ def build_app():
             self.config_path = Path(config_path).resolve()
             self.runtime_config_path = DATA_DIR / RUNTIME_CONFIG
             self.root = tk.Tk()
+            self.root.configure(background="#f4f1e8")
             self.app_name = {"random": "Random Status", "marquee": "Marquee Status"}.get(
                 STATUS_MODE, "Status Changer")
             self.root.title(f"Camfrog {self.app_name}")
@@ -1942,10 +2061,17 @@ def build_app():
             LANG = "th" if self.language_box.get() == "TH" else "en"
             self.language_preference = LANG
             self._build()
+            if hasattr(self, "clipboard_controller"):
+                self.clipboard_controller.widgets.clear()
+                self.clipboard_controller.target = None
+                self.clipboard_controller.refresh_menu()
+                self.clipboard_controller.install(self.root)
             self.schedule_save()
 
         def _translate_clipboard(self, text):
-            en, _, th = text.partition("||")
+            en, separator, th = text.partition("||")
+            if not separator:
+                en, _, th = text.partition("|")
             th, en = th.strip(), en.strip()
             return th if LANG == "th" and th else en
 
@@ -1962,35 +2088,36 @@ def build_app():
                 child.destroy()
             self.entry_widgets = {"random": [], "marquee": []}
             style = ttk.Style(root)
+            root.configure(background="#f4f1e8")
             try:
                 style.theme_use("clam")
             except tk.TclError:
                 pass
-            style.configure("TFrame", background="#edf2f5")
-            style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
-            style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
-            style.configure("TRadiobutton", background="#edf2f5", foreground="#233548")
-            style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
-            style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
+            style.configure("TFrame", background="#f4f1e8")
+            style.configure("TLabel", background="#f4f1e8", foreground="#283648", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TRadiobutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TLabelframe", background="#f4f1e8", bordercolor="#d5c8ac")
+            style.configure("TLabelframe.Label", background="#f4f1e8", foreground="#8b672b",
                             font=("Segoe UI", 9, "bold"))
             style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
-                            background="#d9e8f0", foreground="#1a3a52")
-            style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
+                            background="#ebe5d9", foreground="#283648")
+            style.map("TButton", background=[("active", "#d6e9e8"), ("pressed", "#d5c8ac")])
             style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
-                            foreground="#152b3a")
-            style.configure("TNotebook", background="#edf2f5")
+                            foreground="#283648")
+            style.configure("TNotebook", background="#f4f1e8")
             style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
-            style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
-                      foreground=[("selected", "#096c7b")])
-            style.configure("Brand.TLabel", font=("Segoe UI", 10, "bold"), foreground="#126c68")
+            style.map("TNotebook.Tab", background=[("selected", "#fffdfa")],
+                      foreground=[("selected", "#8b672b")])
+            style.configure("Brand.TLabel", font=("Segoe UI", 10, "bold"), foreground="#8b672b")
             style.configure("State.TLabel", font=("Segoe UI", 9, "bold"))
-            style.configure("State.OK.TLabel", font=("Segoe UI", 9, "bold"), foreground="#138a55")
-            style.configure("State.STOP.TLabel", font=("Segoe UI", 9, "bold"), foreground="#a52834")
-            style.configure("Hint.TLabel", font=("Segoe UI", 8), foreground="#53636d")
+            style.configure("State.OK.TLabel", font=("Segoe UI", 9, "bold"), foreground="#28744c")
+            style.configure("State.STOP.TLabel", font=("Segoe UI", 9, "bold"), foreground="#9f3740")
+            style.configure("Hint.TLabel", font=("Segoe UI", 8), foreground="#626d7a")
             style.configure("Mode.TNotebook", tabmargins=(0, 5, 0, 0))
             style.configure("Mode.TNotebook.Tab", padding=(12, 7), font=("Segoe UI", 9, "bold"))
             style.configure("Action.TButton", padding=(8, 5), font=("Segoe UI", 9, "bold"))
-            style.configure("Card.TFrame", background="#ffffff", padding=(2, 2))
+            style.configure("Card.TFrame", background="#fffdfa", padding=(2, 2))
             style.configure("Entry.TEntry", padding=(2, 2))
             outer = ttk.Frame(root, padding=(12, 10, 12, 10))
             outer.pack(fill="both", expand=True)
@@ -2032,7 +2159,7 @@ def build_app():
             self.tabs.bind("<<NotebookTabChanged>>", self._tab_changed)
 
             self.note = ttk.Label(outer, text="", font=("Segoe UI", 8), anchor="w",
-                                  foreground="#53636d", wraplength=420)
+                                  foreground="#626d7a", wraplength=420)
             self.note.pack(fill="x", pady=(7, 5))
             options = ttk.Frame(outer)
             options.pack(fill="x", pady=(0, 5))
@@ -2065,11 +2192,11 @@ def build_app():
                 timing = ttk.Frame(page, style="Card.TFrame", padding=4)
                 timing.pack(fill="x", pady=(0, 4))
                 ttk.Label(timing, text=self._tr("Switch every", "เปลี่ยนทุก"),
-                          background="#f4f7f7").pack(side="left", padx=(4, 0))
+                          background="#ebe5d9").pack(side="left", padx=(4, 0))
                 ttk.Spinbox(timing, textvariable=self.interval, from_=RANDOM_INTERVAL_MIN,
                             to=RANDOM_INTERVAL_MAX, increment=30, width=6).pack(
                                 side="left", padx=(3, 5))
-                ttk.Label(timing, text="s", background="#f4f7f7").pack(side="left")
+                ttk.Label(timing, text="s", background="#ebe5d9").pack(side="left")
             else:
                 ttk.Label(page, text=self._tr("Marquee status pool", "ชุดสถานะเลื่อน"),
                           font=("Segoe UI", 9, "bold")).pack(anchor="w", pady=(0, 3))
@@ -2081,12 +2208,12 @@ def build_app():
                 speed = ttk.Frame(page, style="Card.TFrame", padding=4)
                 speed.pack(fill="x", pady=(0, 4))
                 ttk.Label(speed, text=self._tr("Step", "จังหวะ"),
-                          background="#f4f7f7").pack(side="left", padx=(4, 0))
+                          background="#ebe5d9").pack(side="left", padx=(4, 0))
                 ttk.Spinbox(speed, textvariable=self.step, from_=MARQUEE_STEP_MIN,
                             to=10, increment=0.1, width=4).pack(side="left", padx=(3, 5))
-                ttk.Label(speed, text="s", background="#f4f7f7").pack(side="left")
+                ttk.Label(speed, text="s", background="#ebe5d9").pack(side="left")
                 ttk.Label(speed, text=self._tr("Stride", "ก้าว"),
-                          background="#f4f7f7").pack(side="left", padx=(5, 2))
+                          background="#ebe5d9").pack(side="left", padx=(5, 2))
                 ttk.Spinbox(speed, textvariable=self.stride, from_=1, to=10,
                             increment=1, width=2).pack(side="left")
                 ttk.Checkbutton(speed, text=self._tr("Loop", "วนลูป"),
@@ -2100,7 +2227,7 @@ def build_app():
             entries.pack(fill="both", expand=True, pady=(4, 0))
             for index, var in enumerate(self._fields_for_mode(mode)):
                 ttk.Label(entries, text=f"{index + 1:02d}", width=3,
-                          background="#f4f7f7", foreground="#53636d").grid(
+                          background="#ebe5d9", foreground="#626d7a").grid(
                     row=index, column=0, sticky="w", pady=1, padx=(4, 8))
                 entry = ttk.Entry(entries, textvariable=var, style="Entry.TEntry")
                 entry.grid(row=index, column=1, sticky="ew", pady=1, padx=(0, 4))
@@ -2197,7 +2324,7 @@ def build_app():
                                                       "บันทึกการตั้งค่า Status Changer แล้ว"))
                 return config
             except (OSError, sqlite3.Error, ValueError, KeyError) as exc:
-                self.note.configure(text=str(exc), foreground="#a52834")
+                self.note.configure(text=str(exc), foreground="#9f3740")
                 return None
 
         def _save_pools(self):
@@ -2216,7 +2343,7 @@ def build_app():
                     text=self._tr(
                         "Dry run is on; this status was not sent. Enable Send statuses live to Camfrog to apply it.",
                         "เปิดโหมดทดลองอยู่ จึงยังไม่ได้ส่งสถานะ ให้เปิด ส่งสถานะจริงไป Camfrog ก่อน"),
-                    foreground="#53636d")
+                    foreground="#626d7a")
                 return
 
             chosen = None
@@ -2239,7 +2366,7 @@ def build_app():
             if not chosen:
                 self.note.configure(text=self._tr("Enter a status text to apply.",
                                                   "กรอกข้อความสถานะที่จะใช้"),
-                                    foreground="#a52834")
+                                    foreground="#9f3740")
                 return
 
             if isinstance(chosen, dict):
@@ -2276,7 +2403,7 @@ def build_app():
                 if worker_pid:
                     self.note.configure(text=self._tr("Status worker is already running.",
                                                       "ตัวเปลี่ยนสถานะกำลังทำงานอยู่"),
-                                         foreground="#138a55")
+                                         foreground="#28744c")
                     return
                 self._start_worker(config)
             else:
@@ -2285,7 +2412,7 @@ def build_app():
                                   self._tr("Status worker stopped.", "หยุดตัวเปลี่ยนสถานะแล้ว"))
                 else:
                     self.note.configure(text=self._tr("Status rotation disabled.",
-                                                      "ปิดการเปลี่ยนสถานะแล้ว"), foreground="#53636d")
+                                                      "ปิดการเปลี่ยนสถานะแล้ว"), foreground="#626d7a")
 
         def _start_worker(self, config):
             runtime = runtime_config(config)
@@ -2319,7 +2446,7 @@ def build_app():
             if self.busy:
                 return False
             self.busy = True
-            self.note.configure(text=self._tr("Working…", "กำลังทำงาน…"), foreground="#53636d")
+            self.note.configure(text=self._tr("Working…", "กำลังทำงาน…"), foreground="#626d7a")
 
             def worker():
                 try:
@@ -2335,7 +2462,7 @@ def build_app():
                 return True
             except RuntimeError as exc:
                 self.busy = False
-                self.note.configure(text=str(exc), foreground="#a52834")
+                self.note.configure(text=str(exc), foreground="#9f3740")
                 return False
 
         def poll_task_results(self):
@@ -2348,7 +2475,7 @@ def build_app():
             except Exception as exc:
                 logging.exception("Could not process Status Changer task result")
                 if self.root.winfo_exists():
-                    self.note.configure(text=str(exc), foreground="#a52834")
+                    self.note.configure(text=str(exc), foreground="#9f3740")
             try:
                 self.task_poll_job = self.root.after(100, self.poll_task_results)
             except tk.TclError:
@@ -2356,7 +2483,7 @@ def build_app():
 
         def finish_task(self, text, ok, on_done=None):
             self.busy = False
-            self.note.configure(text=text, foreground="#138a55" if ok else "#a52834")
+            self.note.configure(text=text, foreground="#28744c" if ok else "#9f3740")
             self.refresh_state()
             close_after_task = self.close_requested
             self.close_requested = False
@@ -2383,7 +2510,7 @@ def build_app():
                 self.close_requested = True
                 self.note.configure(text=self._tr(
                     "Finishing the current task before exit…",
-                    "รอให้งานปัจจุบันเสร็จแล้วปิดโปรแกรม…"), foreground="#53636d")
+                    "รอให้งานปัจจุบันเสร็จแล้วปิดโปรแกรม…"), foreground="#626d7a")
                 return
             try:
                 config = load_cfg(self.config_path)
@@ -2391,7 +2518,7 @@ def build_app():
                 if running_pid(runtime):
                     self.note.configure(text=self._tr(
                         "Stopping the status worker before exit…",
-                        "กำลังหยุดตัวเปลี่ยนสถานะก่อนออก…"), foreground="#53636d")
+                        "กำลังหยุดตัวเปลี่ยนสถานะก่อนออก…"), foreground="#626d7a")
                     started = self.run_task(
                         lambda: self._stop_worker(runtime),
                         self._tr("Status worker stopped.", "หยุดตัวเปลี่ยนสถานะแล้ว"),
@@ -2418,7 +2545,7 @@ def build_app():
                 self.note.configure(text=self._tr(
                     "Worker did not confirm shutdown. The window stays open so you can retry.",
                     "worker ยังไม่ยืนยันว่าหยุดแล้ว หน้าต่างยังเปิดไว้ให้ลองใหม่"),
-                    foreground="#a52834")
+                    foreground="#9f3740")
 
         def _finalize_close(self):
             if self.save_job is not None:

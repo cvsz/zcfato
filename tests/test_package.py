@@ -121,8 +121,9 @@ def test_doctor_bat_runs_once_and_matches_build_selection():
     doc = (root / "doctor.bat").read_text(encoding="utf-8")
     bld = (root / "build.bat").read_text(encoding="utf-8")
     assert "||" not in doc  # the old `py ... || python ...` ran doctor twice on failure
-    cand = "for %%V in (3.12 3.13 3.11 3.14) do ("
-    assert cand in doc and cand in bld
+    selection = 'py -3.12-64 -c "import sys"'
+    assert selection in doc and selection in bld
+    assert 'set "PYSEL=py -3.12-64"' in doc and 'set "PYSEL=py -3.12-64"' in bld
 
 
 def test_missing_window_is_a_clean_error_not_a_traceback(tmp_path, monkeypatch):

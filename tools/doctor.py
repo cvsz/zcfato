@@ -27,26 +27,23 @@ def interpreter_info():
 
 
 def diagnose(info):
-    """Return a list of (EN, TH) problems that make pywin32 wheels unavailable."""
+    """Return build-environment problems for the supported Windows runtime."""
     out, v = [], info["version"]
     if not info["windows"]:
         out.append(("This tool targets Windows; run build.bat on Windows.",
                     "เครื่องมือนี้สำหรับ Windows เท่านั้น"))
+    if v[:2] != (3, 12):
+        out.append((f"Python 3.12 is required; found {v[0]}.{v[1]}. Install CPython 3.12 64-bit.",
+                    f"ต้องใช้ Python 3.12 แต่พบ {v[0]}.{v[1]} ให้ติดตั้ง CPython 3.12 แบบ 64-bit"))
+    if info["bits"] != 64:
+        out.append(("A 64-bit Python 3.12 interpreter is required.",
+                    "ต้องใช้ Python 3.12 แบบ 64-bit"))
     if info["impl"] != "CPython":
-        out.append((f"{info['impl']} is not supported by pywin32 wheels. Use CPython.",
-                    f"{info['impl']} ไม่มี pywin32 wheel ให้ใช้ CPython"))
+        out.append((f"{info['impl']} is not supported. Use CPython 3.12.",
+                    f"ไม่รองรับ {info['impl']} ให้ใช้ CPython 3.12"))
     if info["free_threaded"]:
-        out.append(("Free-threaded Python (the 't' build) has no pywin32 wheels. Install the normal build.",
-                    "Python แบบ free-threaded (รุ่น 't') ไม่มี pywin32 wheel ให้ติดตั้งรุ่นปกติ"))
-    if info["bits"] == 32 and (3, 9) <= v[:2] <= (3, 13):
-        out.append(("32-bit Python 3.9-3.13 has no pywin32 wheel (only 64-bit/ARM64). Install 64-bit Python.",
-                    "Python 32-bit รุ่น 3.9-3.13 ไม่มี pywin32 wheel ให้ติดตั้ง Python 64-bit"))
-    if v[:2] < (3, 8):
-        out.append((f"Python {v[0]}.{v[1]} is too old. Install Python 3.13 (64-bit).",
-                    f"Python {v[0]}.{v[1]} เก่าเกินไป ให้ติดตั้ง Python 3.13 (64-bit)"))
-    if v[:2] >= (3, 16):
-        out.append((f"Python {v[0]}.{v[1]} is newer than the pywin32 wheels known to exist (up to 3.15). Use Python 3.13.",
-                    f"Python {v[0]}.{v[1]} ใหม่กว่า pywin32 ที่มี (ถึง 3.15) ให้ใช้ Python 3.13"))
+        out.append(("Free-threaded Python is not supported. Install the standard CPython 3.12 build.",
+                    "ไม่รองรับ Python แบบ free-threaded ให้ติดตั้ง CPython 3.12 รุ่นปกติ"))
     return out
 
 
@@ -116,7 +113,7 @@ def main(argv):
                   "          pip โหลด pywin32 ไม่ได้ (ออฟไลน์/proxy/mirror?) ลอง: python -m pip install --upgrade pip")
             problems.append(("download", "download"))
     if problems:
-        print("\nFIX / วิธีแก้:  winget install Python.Python.3.13   (64-bit)  then delete the .venv folder and run build.bat")
+        print("\nFIX / วิธีแก้:  winget install Python.Python.3.12   (64-bit)  then delete the .venv folder and run build.bat")
         return 1
     print("\nNo problems found / ไม่พบปัญหา")
     return 0

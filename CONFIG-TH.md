@@ -18,11 +18,11 @@ key ที่ไม่ใส่จะใช้ค่าเริ่มต้น 
 | `safety.stop_file` | `STOP` | สร้างไฟล์นี้เพื่อหยุด (ลบเองตอนเริ่มรอบใหม่) |
 | `safety.pid_file` | `camfrog_auto.pid` | ไฟล์ PID สำหรับโหมดเบื้องหลัง/กันรันซ้ำ |
 | `safety.require_foreground` | `true` | ไม่กด Enter ถ้า Camfrog ไม่อยู่หน้าสุด |
-| `safety.restore_previous_window` | `true` | ส่งเสร็จแล้วคืนโฟกัสให้หน้าต่างที่คุณใช้อยู่ |
+| `safety.restore_previous_window` | `true` | ส่งเสร็จแล้วคืนโฟกัสให้หน้าต่างเดิม ตั้ง `false` เพื่อค้างหน้าต่างแชต Camfrog ไว้ด้านหน้า IM auto-reply จะเลื่อนข้อความ echo ฝั่งเครื่องเข้าพื้นที่แชตไม่ว่าค่านี้จะเป็นอะไร |
 | `safety.max_consecutive_failures` | `5` | หยุดเมื่อล้มเหลวติดกัน N ครั้ง |
 | `status.enabled` | `true` | หมุน status |
 | `status.edit` / `apply_button` | selectors / `null` | selector จาก `discover` ถ้าใส่ `apply_button` จะกดปุ่มแทน Enter |
-| `status.background_enter_target` | `edit` | ตัวเลือกทดลอง `combo`: เมื่อ `safety.require_foreground` เป็น `false` ให้ส่ง Enter ไปที่ ComboBox แม่ (`CComboBoxTS` ที่ยืนยันแล้ว) แทนช่อง Edit ลูก อาจเลี่ยงเสียง error ของ Windows แต่**ยังไม่ยืนยันว่าบันทึก status ได้** ไม่มีทางสำรองถ้าไม่เจอ parent ทดสอบด้วย Apply Now ตรวจสถานะใน Camfrog ถ้าไม่สำเร็จให้กลับเป็น `edit` ไม่มีผลเมื่อตั้ง apply button ไว้หรือเปิดโหมด foreground |
+| `status.background_enter_target` | `edit` | เมื่อ Camfrog ไม่ได้อยู่หน้าสุด worker จะส่ง Enter ไปยัง `CComboBoxTS` แม่ของ Edit ที่ตรวจสอบแล้วโดยอัตโนมัติ; ค่า `combo` บังคับใช้เส้นทางเบื้องหลังแม้ Camfrog อยู่หน้าสุด ระบบอ่านข้อความกลับจาก Edit ก่อนส่ง ต้องเปิด Camfrog ค้างไว้ใน Windows session ของผู้ใช้เดิม ถ้าปิดโปรเซส Camfrog จะเปลี่ยนสถานะไม่ได้ |
 | `status.interval_seconds` | `600` | ขั้นต่ำ 0.3 |
 | `status.retry_seconds` | `30` | รอก่อนลองส่งใหม่เมื่อล้มเหลว (1–3600) |
 | `status.set_on_start` | `true` | ตั้ง status แรกทันที |

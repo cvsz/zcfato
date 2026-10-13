@@ -25,7 +25,7 @@ def test_verify_feature_hashes_accepts_all_expected_files(tmp_path, monkeypatch)
     files = {}
     lines = []
     for name in ("room-control", "chat-im-private", "status-random",
-                 "status-marquee", "im-autoreply", "music-dj", "web-status"):
+                 "status-marquee", "status-changer", "im-autoreply", "music-dj", "web-status"):
         path = dist / name / (name + ".exe")
         path.parent.mkdir()
         path.write_bytes(("test-" + name).encode())

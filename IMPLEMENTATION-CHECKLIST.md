@@ -26,7 +26,8 @@ Use this checklist after creating a repository from `ztemplate`, or as an audit 
 - [ ] Verify the effective controls:
 
   ```bash
-  python3 scripts/github_admin.py --repo OWNER/REPO --verify
+  python3 scripts/github_admin.py --repo OWNER/REPOSITORY --branch DEFAULT_BRANCH \
+    --required-check "EXACT_CHECK_NAME" --verify
   ```
 
 - [ ] Require pull-request review and CODEOWNERS approval.

@@ -14,14 +14,35 @@ all cookies and return them as `name=value; ...` for cookie_from_paste().
 No network beyond localhost and camfrog.com. No third-party packages.
 """
 import base64
+import hashlib
+import hmac
+import http.client
 import json
-import random
+import os
+import shutil
 import socket
 import subprocess
 import tempfile
 import time
-import urllib.request
+import urllib.parse
 from pathlib import Path
+
+
+def system_taskkill_path():
+    """Return taskkill.exe from Windows' system directory, never from PATH/cwd."""
+    if os.name != "nt":
+        return "taskkill.exe"
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_system_directory = kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = (ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint)
+    get_system_directory.restype = ctypes.c_uint
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_system_directory(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return os.path.join(buffer.value, "taskkill.exe")
 
 BROWSER_CANDIDATES = (
     r"C:\Program Files\Google\Chrome\Application\chrome.exe",
@@ -41,17 +62,36 @@ def find_browser():
     return None
 
 
-def _free_port():
-    for _ in range(40):
-        port = random.randint(49152, 59999)
-        with socket.socket() as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+def _close_browser_process(process):
+    """Close the dedicated login browser process tree without touching other browsers."""
+    if process is None:
+        return
+    try:
+        if process.poll() is not None:
+            return
+        if os.name == "nt":
             try:
-                sock.bind(("127.0.0.1", port))
-                return port
-            except OSError:
-                continue
-    return 0
+                subprocess.run(
+                    [system_taskkill_path(), "/PID", str(process.pid), "/T", "/F"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    check=False, timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
+                pass
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _free_port():
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
 
 
 # ---------------------------------------------------------------- devtools ws
@@ -59,39 +99,72 @@ class _WebSocket:
     """Minimal RFC 6455 client: one connection, text frames, no extensions."""
 
     def __init__(self, url):
-        if not url.startswith("ws://"):
-            raise ValueError("only ws:// devtools URLs are supported")
-        hostport, _, path = url[5:].partition("/")
-        host, _, port = hostport.partition(":")
-        self.sock = socket.create_connection((host, int(port or 80)), timeout=10)
-        key = base64.b64encode(bytes(random.getrandbits(8) for _ in range(16)))
+        try:
+            endpoint = urllib.parse.urlsplit(url)
+            port = endpoint.port
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid local DevTools websocket URL") from exc
+        host = (endpoint.hostname or "").casefold()
+        if (endpoint.scheme.casefold() != "ws"
+                or host not in {"127.0.0.1", "localhost", "::1"}
+                or not port or endpoint.username or endpoint.password):
+            raise ValueError("only loopback ws:// DevTools URLs are supported")
+        self.sock = socket.create_connection((host, port), timeout=10)
+        self.buf = b""
+        key = base64.b64encode(os.urandom(16))
+        path = endpoint.path or "/"
+        if endpoint.query:
+            path += "?" + endpoint.query
         handshake = (
-            "GET /{path} HTTP/1.1\r\n"
-            "Host: {host}:{port}\r\n"
+            "GET {path} HTTP/1.1\r\n"
+            "Host: {host_header}\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
             "Sec-WebSocket-Key: {key}\r\n"
             "Sec-WebSocket-Version: 13\r\n\r\n"
-        ).format(path=path, host=host, port=port or 80, key=key.decode())
-        self.sock.sendall(handshake.encode())
-        self._read_http_headers()
-        self.buf = b""
+        ).format(path=path, host_header=endpoint.netloc, key=key.decode())
+        try:
+            self.sock.sendall(handshake.encode())
+            self._read_http_headers(key)
+        except Exception:
+            self.close()
+            raise
 
-    def _read_http_headers(self):
+    def _read_http_headers(self, key):
         data = b""
         while b"\r\n\r\n" not in data:
             block = self.sock.recv(4096)
             if not block:
                 raise OSError("devtools websocket closed during handshake")
             data += block
+            if len(data) > 65536:
+                raise OSError("devtools websocket handshake headers are too large")
         head, self.buf = data.split(b"\r\n\r\n", 1)
-        if b" 101 " not in head.split(b"\r\n")[0]:
+        lines = head.decode("iso-8859-1").split("\r\n")
+        status = lines[0].split()
+        headers = {}
+        for line in lines[1:]:
+            name, separator, value = line.partition(":")
+            if separator:
+                headers[name.strip().casefold()] = value.strip()
+        connection_tokens = {
+            token.strip().casefold()
+            for token in headers.get("connection", "").split(",")
+        }
+        expected_accept = base64.b64encode(hashlib.sha1(
+            key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
+            usedforsecurity=False).digest()).decode("ascii")
+        if (len(status) < 2 or status[1] != "101"
+                or headers.get("upgrade", "").casefold() != "websocket"
+                or "upgrade" not in connection_tokens
+                or not hmac.compare_digest(
+                    headers.get("sec-websocket-accept", ""), expected_accept)):
             raise OSError("devtools websocket handshake refused")
 
     def send_text(self, text):
         payload = text.encode("utf-8")
         header = bytearray([0x81])  # FIN + text
-        mask = bytes(random.getrandbits(8) for _ in range(4))
+        mask = os.urandom(4)
         n = len(payload)
         if n < 126:
             header.append(0x80 | n)
@@ -140,7 +213,7 @@ class _WebSocket:
             return json.loads(payload.decode("utf-8", "replace"))
 
     def _send_frame(self, opcode, payload):
-        mask = bytes(random.getrandbits(8) for _ in range(4))
+        mask = os.urandom(4)
         header = bytearray([0x80 | opcode, 0x80 | len(payload)])
         self.sock.sendall(bytes(header) + mask
                           + bytes(b ^ mask[i % 4] for i, b in enumerate(payload)))
@@ -153,14 +226,46 @@ class _WebSocket:
 
 
 def _http_json(url):
-    with urllib.request.urlopen(url, timeout=5) as response:
+    try:
+        endpoint = urllib.parse.urlsplit(url)
+        port = endpoint.port
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid local DevTools HTTP URL") from exc
+    if (endpoint.scheme.casefold() != "http"
+            or (endpoint.hostname or "").casefold() != "127.0.0.1"
+            or not port or endpoint.username or endpoint.password):
+        raise ValueError("only loopback DevTools HTTP URLs are supported")
+    # Use a direct HTTP connection so redirects cannot escape loopback.
+    target = endpoint.path or "/"
+    if endpoint.query:
+        target += "?" + endpoint.query
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+    try:
+        connection.request("GET", target, headers={"Connection": "close"})
+        response = connection.getresponse()
+        if response.status != 200:
+            raise OSError("local DevTools endpoint returned HTTP {0}".format(
+                response.status))
         return json.loads(response.read().decode("utf-8", "replace"))
+    finally:
+        connection.close()
 
 
 def _find_page_target(port):
     targets = _http_json("http://127.0.0.1:{0}/json/list".format(port))
     for target in targets:
-        if target.get("type") == "page" and target.get("webSocketDebuggerUrl"):
+        if target.get("type") != "page" or not target.get("webSocketDebuggerUrl"):
+            continue
+        try:
+            endpoint = urllib.parse.urlsplit(target["webSocketDebuggerUrl"])
+            target_port = endpoint.port
+        except (TypeError, ValueError):
+            continue
+        if (endpoint.scheme.casefold() == "ws"
+                and (endpoint.hostname or "").casefold()
+                in {"127.0.0.1", "localhost", "::1"}
+                and target_port == int(port)
+                and not endpoint.username and not endpoint.password):
             return target["webSocketDebuggerUrl"]
     raise OSError("no browser page target found")
 
@@ -183,25 +288,35 @@ def browser_login(timeout=WAIT_TIMEOUT, on_status=None, browser=None,
     """Open the login page in a private browser session and harvest cookies.
 
     Returns (cookie_string, profile_dir). cookie_string is `name=value; ...`
-    for cookie_from_paste(). Raises OSError/RuntimeError on failure.
+    for cookie_from_paste(). The browser is closed by default; its temporary
+    profile is also removed unless `keep_browser` is true. A supplied profile
+    directory is never deleted. Raises OSError/RuntimeError on failure.
     """
     browser = browser or find_browser()
     if not browser:
         raise OSError("no Chrome or Edge found on this computer")
     port = _free_port()
+    temporary_profile = profile_dir is None
     tmp = Path(profile_dir) if profile_dir else Path(
         tempfile.mkdtemp(prefix="camfrog-login-"))
     tmp.mkdir(parents=True, exist_ok=True)
-    subprocess.Popen(
-        [browser, "--remote-debugging-port={0}".format(port),
-         "--user-data-dir={0}".format(tmp), "--no-first-run",
-         "--no-default-browser-check", "--new-window", LOGIN_PAGE],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        creationflags=0x08000000, close_fds=True)
-    if on_status:
-        on_status("browser opened")
+    process = None
     ws = None
     try:
+        spawn = {
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if os.name == "nt":
+            spawn["creationflags"] = 0x08000000
+        process = subprocess.Popen(
+            [browser, "--remote-debugging-port={0}".format(port),
+             "--user-data-dir={0}".format(tmp), "--no-first-run",
+             "--no-default-browser-check", "--new-window", LOGIN_PAGE],
+            **spawn)
+        if on_status:
+            on_status("browser opened")
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             try:
@@ -211,7 +326,8 @@ def browser_login(timeout=WAIT_TIMEOUT, on_status=None, browser=None,
                     "result", {}).get("cookies", [])
                 if any(c.get("name") == SESSION_COOKIE and "camfrog" in (c.get("domain") or "")
                        for c in cookies):
-                    return _cookies_to_string(cookies), str(tmp)
+                    return _cookies_to_string(cookies), (
+                        str(tmp) if keep_browser or not temporary_profile else None)
                 time.sleep(1.5)
             except (OSError, ValueError, TimeoutError):
                 try:
@@ -226,6 +342,10 @@ def browser_login(timeout=WAIT_TIMEOUT, on_status=None, browser=None,
             ws.close()
         except Exception:
             pass
+        if not keep_browser:
+            _close_browser_process(process)
+            if temporary_profile:
+                shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _cookies_to_string(cookies):

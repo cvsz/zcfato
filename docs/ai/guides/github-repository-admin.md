@@ -7,21 +7,32 @@ Repository files alone cannot enforce GitHub branch protection or repository-lev
 The repository includes an idempotent helper:
 
 ```bash
-python3 scripts/github_admin.py
+python3 scripts/github_admin.py \
+  --repo OWNER/REPOSITORY \
+  --branch DEFAULT_BRANCH \
+  --required-check "EXACT_CHECK_NAME"
 ```
 
-The default invocation is dry-run only.
+The target repository, branch, and required-check names are explicit; the helper has no hard-coded repository or status checks. Replace every placeholder with values read from the target repository's settings and Actions checks. Repeat `--required-check` for every required context. A dry-run does not require `gh` authentication.
 
 Apply and immediately verify:
 
 ```bash
-python3 scripts/github_admin.py --apply
+python3 scripts/github_admin.py \
+  --repo OWNER/REPOSITORY \
+  --branch DEFAULT_BRANCH \
+  --required-check "EXACT_CHECK_NAME" \
+  --apply
 ```
 
 Verify without mutation:
 
 ```bash
-python3 scripts/github_admin.py --verify
+python3 scripts/github_admin.py \
+  --repo OWNER/REPOSITORY \
+  --branch DEFAULT_BRANCH \
+  --required-check "EXACT_CHECK_NAME" \
+  --verify
 ```
 
 Requirements:
@@ -32,7 +43,7 @@ Requirements:
 
 ## Enforced policy
 
-The helper configures `main` to require:
+The helper configures the explicitly supplied branch to require:
 
 - pull requests before merge;
 - at least one approving review;
@@ -41,9 +52,7 @@ The helper configures `main` to require:
 - approval after the latest push;
 - conversation resolution;
 - strict/up-to-date required status checks;
-- `repository-baseline`;
-- `Analyze GitHub Actions`;
-- `dependency-review`;
+- each exact status-check name supplied with `--required-check`;
 - administrator enforcement;
 - no force pushes;
 - no branch deletion.

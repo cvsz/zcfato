@@ -286,7 +286,7 @@ def build_app():
                 row=5, column=2, columnspan=2, sticky="w")
             ttk.Label(f, text=bi("Variables: {sender} {me} {time} {date}. Replies starting with / are blocked.|"
                                  "ตัวแปร: {sender} {me} {time} {date} คำตอบที่ขึ้นต้นด้วย / จะถูกบล็อก"),
-                      foreground="#666").grid(row=6, column=0, columnspan=4, sticky="w", pady=4)
+                      foreground="#626d7a").grid(row=6, column=0, columnspan=4, sticky="w", pady=4)
             bar = ttk.Frame(f)
             bar.grid(row=7, column=0, columnspan=4, sticky="e")
             ttk.Button(bar, text="OK", command=self.ok).pack(side="left", padx=4)
@@ -321,27 +321,28 @@ def build_app():
     class App:
         def __init__(self, cfg_path):
             self.root = tk.Tk()
+            self.root.configure(background="#f4f1e8")
             style = ttk.Style(self.root)
             try:
                 style.theme_use("clam")
             except tk.TclError:
                 pass
-            style.configure("TFrame", background="#edf2f5")
-            style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
-            style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
-            style.configure("TRadiobutton", background="#edf2f5", foreground="#233548")
-            style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
-            style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
+            style.configure("TFrame", background="#f4f1e8")
+            style.configure("TLabel", background="#f4f1e8", foreground="#283648", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TRadiobutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TLabelframe", background="#f4f1e8", bordercolor="#d5c8ac")
+            style.configure("TLabelframe.Label", background="#f4f1e8", foreground="#8b672b",
                             font=("Segoe UI", 9, "bold"))
             style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
-                            background="#d9e8f0", foreground="#1a3a52")
-            style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
+                            background="#ebe5d9", foreground="#283648")
+            style.map("TButton", background=[("active", "#d6e9e8"), ("pressed", "#d5c8ac")])
             style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
-                            foreground="#152b3a")
-            style.configure("TNotebook", background="#edf2f5")
+                            foreground="#283648")
+            style.configure("TNotebook", background="#f4f1e8")
             style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
-            style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
-                      foreground=[("selected", "#096c7b")])
+            style.map("TNotebook.Tab", background=[("selected", "#fffdfa")],
+                      foreground=[("selected", "#8b672b")])
             self.root.geometry("800x560")
             self.root.minsize(660, 460)
             self.model = ConfigModel(cfg_path)
@@ -413,7 +414,7 @@ def build_app():
                 self.auto_apply_var = tk.BooleanVar(master=self.root, value=True)
             ttk.Checkbutton(bar, text=bi("Auto-apply valid changes|ใช้ค่าที่ถูกต้องอัตโนมัติ"),
                             variable=self.auto_apply_var, command=self.auto_apply_toggled).pack(side="right")
-            self.msg = ttk.Label(bar, text="", foreground="#444")
+            self.msg = ttk.Label(bar, text="", foreground="#626d7a")
             self.msg.pack(side="left", padx=12)
             self.nb = ttk.Notebook(self.root)
             self.nb.pack(fill="both", expand=True, padx=8)
@@ -496,7 +497,7 @@ def build_app():
                 w = ttk.Entry(parent, textvariable=var, width=width)
             w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
             if hint:
-                ttk.Label(parent, text=bi(hint), foreground="#666").grid(row=row, column=2, sticky="w")
+                ttk.Label(parent, text=bi(hint), foreground="#626d7a").grid(row=row, column=2, sticky="w")
             self.binds.append((path, kind, var, label))
             return var
 
@@ -524,7 +525,7 @@ def build_app():
             self.stats_lbl = ttk.Label(f, text="")
             self.stats_lbl.pack(anchor="w", pady=6)
             ttk.Label(f, text=bi("Closing this window does not stop the bot. Dry-run only logs what it would send.|"
-                                 "ปิดหน้าต่างนี้ไม่หยุดบอท โหมดทดลองแค่บันทึกว่าจะส่งอะไร"), foreground="#666").pack(anchor="w")
+                                 "ปิดหน้าต่างนี้ไม่หยุดบอท โหมดทดลองแค่บันทึกว่าจะส่งอะไร"), foreground="#626d7a").pack(anchor="w")
             lf = ttk.Frame(f)
             lf.pack(fill="both", expand=True, pady=6)
             self.log = tk.Text(lf, state="disabled", wrap="none", height=18, font=("Consolas", 9))
@@ -559,7 +560,7 @@ def build_app():
             ttk.Button(row, text=bi("Discover controls -> controls.txt|ดึง control -> controls.txt"),
                        command=lambda: self.helper("discover")).pack(side="left", padx=6)
             ttk.Label(row, text=bi("Windows only. Copy values from controls.txt into the boxes below.|"
-                                   "เฉพาะ Windows คัดลอกค่าจาก controls.txt มาใส่ช่องด้านล่าง"), foreground="#666").pack(side="left")
+                                   "เฉพาะ Windows คัดลอกค่าจาก controls.txt มาใส่ช่องด้านล่าง"), foreground="#626d7a").pack(side="left")
             if APP_PROFILE == "full":
                 self.selector_group(f, "Status box selector|selector ช่องสถานะ", ("status", "edit"))
                 self.selector_group(f, "Status apply button (optional)|ปุ่มยืนยันสถานะ (ไม่จำเป็น)", ("status", "apply_button"), True)
@@ -659,14 +660,14 @@ def build_app():
             e.pack(side="left", padx=4)
             e.bind("<Return>", lambda _e: self.test_rule())
             ttk.Button(lf, text=bi("Test|ทดสอบ"), command=self.test_rule).pack(side="left")
-            self.tout = ttk.Label(lf, text="", foreground="#0a5")
+            self.tout = ttk.Label(lf, text="", foreground="#28744c")
             self.tout.pack(side="left", padx=8)
 
         def tab_im_reply(self, f):
             ttk.Label(f, text=bi(
                 "IM shares your own nickname and chat selectors from Setup; only listed nicks can be answered.|"
                 "IM ใช้นิคของคุณและ selector จากหน้า Setup ร่วมกัน และตอบได้เฉพาะนิคในรายการ"),
-                foreground="#555", wraplength=900).pack(anchor="w", pady=(0, 4))
+                foreground="#626d7a", wraplength=900).pack(anchor="w", pady=(0, 4))
             columns = ttk.Frame(f)
             columns.pack(fill="x")
             left = ttk.LabelFrame(columns, text=bi("Private IM|แชทส่วนตัว"), padding=4)
@@ -692,7 +693,7 @@ def build_app():
             ttk.Label(f, text=bi(
                 "When IM is enabled, allow at least one nickname. Keep window kinds at im unless im-probe confirms mtim.|"
                 "เมื่อเปิด IM ต้องใส่นิคอย่างน้อยหนึ่งชื่อ ใช้ชนิดหน้าต่าง im จนกว่า im-probe จะยืนยัน mtim"),
-                foreground="#666", wraplength=900).pack(anchor="w", pady=(2, 0))
+                foreground="#626d7a", wraplength=900).pack(anchor="w", pady=(2, 0))
             rule_box = ttk.LabelFrame(f, text=bi("IM rules (first match wins)|กฎ IM (กฎแรกที่ตรงจะทำงาน)"), padding=4)
             rule_box.pack(fill="both", expand=True, pady=(6, 2))
             tf = ttk.Frame(rule_box)
@@ -723,11 +724,11 @@ def build_app():
             entry.pack(side="left", padx=4)
             entry.bind("<Return>", lambda _e: self.test_im_rule())
             ttk.Button(tester, text=bi("Test IM|ทดสอบ IM"), command=self.test_im_rule).pack(side="left")
-            self.tiout = ttk.Label(tester, text="", foreground="#0a5")
+            self.tiout = ttk.Label(tester, text="", foreground="#28744c")
             self.tiout.pack(side="left", padx=8)
 
         def tab_history(self, f):
-            self.hist_note = ttk.Label(f, text="", foreground="#b60")
+            self.hist_note = ttk.Label(f, text="", foreground="#8b672b")
             self.hist_note.pack(anchor="w")
             self.htree = ttk.Treeview(f, columns=("lang", "n", "text"), show="headings", height=14)
             for c, w, h in (("lang", 50, "lang"), ("n", 60, "uses"), ("text", 700, "text")):
@@ -846,7 +847,7 @@ def build_app():
 
         # ---- actions
         def say(self, text, bad=False):
-            self.msg.configure(text=text, foreground="#b00" if bad else "#060")
+            self.msg.configure(text=text, foreground="#a3303a" if bad else "#28744c")
 
         def attach_autosave_hooks(self):
             vars_ = [var for _path, _kind, var, _label in self.binds]
@@ -1093,10 +1094,10 @@ def build_app():
             cfg = self.model.cfg
             pid = ca.running_pid(cfg)
             self.state_lbl.configure(text=(ca.t("state_running", pid=pid) if pid else ca.t("state_stopped")),
-                                     foreground="#060" if pid else "#a00")
+                                     foreground="#28744c" if pid else "#a3303a")
             live = (not cfg["dry_run"]) if not hasattr(self, "live_var") else self.live_var.get()
             self.mode_lbl.configure(text=bi("LIVE|โหมดจริง") if live else bi("DRY-RUN|โหมดทดลอง"),
-                                    foreground="#c00" if live else "#06a")
+                                    foreground="#9f3740" if live else "#8b672b")
             self.btn_start.state(["disabled"] if pid else ["!disabled"])
             self.btn_stop.state(["!disabled"] if pid else ["disabled"])
             s = read_stats(cfg)
@@ -1180,23 +1181,23 @@ def build_app():
         def test_rule(self):
             cfg, errs = self.collect()
             if errs:
-                self.tout.configure(text=errs[0], foreground="#b00")
+                self.tout.configure(text=errs[0], foreground="#a3303a")
                 return
             try:
-                self.tout.configure(text=explain(cfg, self.tn.get().strip(), self.tm.get()).replace("\n", "  |  "), foreground="#0a5")
+                self.tout.configure(text=explain(cfg, self.tn.get().strip(), self.tm.get()).replace("\n", "  |  "), foreground="#28744c")
             except re.error as e:
-                self.tout.configure(text=str(e), foreground="#b00")
+                self.tout.configure(text=str(e), foreground="#a3303a")
 
         def test_im_rule(self):
             cfg, errs = self.collect()
             if errs:
-                self.tiout.configure(text=errs[0], foreground="#b00")
+                self.tiout.configure(text=errs[0], foreground="#a3303a")
                 return
             try:
                 result = explain(cfg, self.tin.get().strip(), self.tim.get(), im=True)
-                self.tiout.configure(text=result.replace("\n", "  |  "), foreground="#0a5")
+                self.tiout.configure(text=result.replace("\n", "  |  "), foreground="#28744c")
             except re.error as e:
-                self.tiout.configure(text=str(e), foreground="#b00")
+                self.tiout.configure(text=str(e), foreground="#a3303a")
 
         # ---- history
         def hist_obj(self):

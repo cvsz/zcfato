@@ -142,27 +142,76 @@ def test_status_schedule_pool(cfg):
 
 def test_pid_helpers():
     assert c.pid_alive(os.getpid()) and not c.pid_alive(None) and not c.pid_alive(99999999)
+    if os.name == "nt":
+        assert c.pid_image(os.getpid())
+        created = c.pid_creation_time(os.getpid())
+        assert created is not None
+        assert c.pid_is_ours(os.getpid(), expected_creation_time=created)
 
 
 def test_single_instance_and_stop(cfg, tmp_path, monkeypatch):
     monkeypatch.setattr(c, "BASE", tmp_path)
     pf = tmp_path / cfg["safety"]["pid_file"]
     pf.write_text(str(os.getppid()))                 # another live process
+    monkeypatch.setattr(c, "acquire_run_mutex", lambda: False)
     assert c.run_guarded(cfg) == 3
     pf.write_text("99999999")                        # stale pid
     assert c.cmd_stop(cfg) == 0 and not pf.exists()
     assert c.cmd_state(cfg) == 1
 
 
+def test_im_failed_send_remains_pending_but_unconfirmed_send_is_consumed(cfg, monkeypatch):
+    cfg["dry_run"] = False
+    cfg["autoreply"]["own_nickname"] = "Seaza"
+    cfg["autoreply_im"].update(
+        enabled=True, dry_run=False, only_nicknames=["zdevz"], prefix="[auto] ",
+        delay_range_seconds=[0, 0],
+        rules=[{"pattern": "hello", "reply": "Hi {sender}", "lang": "en",
+                "cooldown_seconds": 0}],
+    )
+    r = c.Runner(cfg)
+    state = {"hist": object(), "win": object(), "inp": object(), "prev": []}
+    r.im_wins = {1: state}
+    monkeypatch.setattr(c, "read_chat", lambda *_args: "zdevz: hello")
+    monkeypatch.setattr(c.random, "uniform", lambda *_args: 0)
+    monkeypatch.setattr(c.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(c, "commit", lambda *_args: False)
+
+    with pytest.raises(RuntimeError, match="reply commit failed"):
+        r.do_im(True)
+    assert state["prev"] == []  # retry this message on the next worker tick
+
+    monkeypatch.setattr(c, "commit", lambda *_args: True)
+    monkeypatch.setattr(c, "confirm_im_reply_echo", lambda *_args: False)
+    with pytest.raises(RuntimeError, match="not confirmed"):
+        r.do_im(True)
+    assert state["prev"] == ["zdevz: hello"]  # avoid a duplicate if delivery was ambiguous
+
+
+def test_confirmed_im_echo_is_revealed_in_local_history(cfg, monkeypatch):
+    revealed = []
+    history = object()
+    monkeypatch.setattr(c, "read_chat", lambda *_args: "Seaza: Hi zdevz")
+    monkeypatch.setattr(
+        c, "reveal_chat_message",
+        lambda history, nickname, message: revealed.append((history, nickname, message)) or True,
+    )
+
+    assert c.confirm_im_reply_echo(history, [], "Seaza", "Hi zdevz", timeout=0)
+    assert revealed == [(history, "Seaza", "Hi zdevz")]
+
+
 def test_stop_confirms_process_exit_after_taskkill(cfg, tmp_path, monkeypatch):
     monkeypatch.setattr(c, "BASE", tmp_path)
     pid_file = tmp_path / cfg["safety"]["pid_file"]
     stop_file = tmp_path / cfg["safety"]["stop_file"]
-    pid_file.write_text("4242")
+    pid_file.write_text(json.dumps({"pid": 4242, "creation_time": 123}), encoding="utf-8")
     alive = {"value": True}
     monkeypatch.setattr(c, "running_pid", lambda _cfg: 4242)
     monkeypatch.setattr(c, "pid_alive", lambda _pid: alive["value"])
-    monkeypatch.setattr(c, "pid_is_ours", lambda _pid, image=None: True)
+    monkeypatch.setattr(c, "pid_is_ours", lambda _pid, image=None, expected_creation_time=None:
+                        expected_creation_time == 123)
+    monkeypatch.setattr(c, "worker_mutex_active", lambda: alive["value"])
     monkeypatch.setattr(c.time, "sleep", lambda _seconds: None)
 
     def taskkill(*_args, **_kwargs):
@@ -177,10 +226,12 @@ def test_stop_keeps_pid_and_stop_files_if_process_survives(cfg, tmp_path, monkey
     monkeypatch.setattr(c, "BASE", tmp_path)
     pid_file = tmp_path / cfg["safety"]["pid_file"]
     stop_file = tmp_path / cfg["safety"]["stop_file"]
-    pid_file.write_text("4242")
+    pid_file.write_text(json.dumps({"pid": 4242, "creation_time": 123}), encoding="utf-8")
     monkeypatch.setattr(c, "running_pid", lambda _cfg: 4242)
     monkeypatch.setattr(c, "pid_alive", lambda _pid: True)
-    monkeypatch.setattr(c, "pid_is_ours", lambda _pid, image=None: True)
+    monkeypatch.setattr(c, "pid_is_ours", lambda _pid, image=None, expected_creation_time=None:
+                        expected_creation_time == 123)
+    monkeypatch.setattr(c, "worker_mutex_active", lambda: True)
     monkeypatch.setattr(c.time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(c.subprocess, "run", lambda *_args, **_kwargs: None)
     assert c.cmd_stop(cfg) == 1

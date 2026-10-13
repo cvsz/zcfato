@@ -2,7 +2,8 @@
 
 Usage:
   python tools/release.py              # tag from camfrog_auto.APP_VERSION, upload assets
-  python tools/release.py --dry-run    # print the plan, change nothing
+  python tools/release.py --release v2.xx.x  # tag v2.xx.x, upload assets
+  python tools/release.py --dry-run      # print the plan, change nothing
 
 Run full-build.bat on the exact clean `main` commit after its PR checks pass.
 The tag is pinned to that commit. The release is created with the authenticated
@@ -36,6 +37,7 @@ FEATURE_EXES = {
     "chat-im-private.exe": DIST / "chat-im-private" / "chat-im-private.exe",
     "status-random.exe": DIST / "status-random" / "status-random.exe",
     "status-marquee.exe": DIST / "status-marquee" / "status-marquee.exe",
+    "status-changer.exe": DIST / "status-changer" / "status-changer.exe",
     "im-autoreply.exe": DIST / "im-autoreply" / "im-autoreply.exe",
     "music-dj.exe": DIST / "music-dj" / "music-dj.exe",
     "web-status.exe": DIST / "web-status" / "web-status.exe",
@@ -48,10 +50,20 @@ OTHER_ASSETS = {
 
 def app_version():
     src = (ROOT / "camfrog_auto.py").read_text(encoding="utf-8")
-    match = re.search(r'^APP_VERSION = "([^"]+)"', src, re.M)
+    match = re.search(r'^APP_VERSION = "([^\"]+)\"', src, re.M)
     if not match:
         raise SystemExit("APP_VERSION not found in camfrog_auto.py")
     return match.group(1)
+
+
+def release_version(args):
+    """Return the version to use for the release, or None for default."""
+    if not args:
+        return None
+    version = args[0]
+    if version.startswith("v2.") and re.match(r"^v2\\.(\\d+)\\.(\\d+)$", version):
+        return version
+    raise SystemExit(f"Invalid version format: {version}. Use format: v2.xx.x")
 
 
 def flat_sums(assets):
@@ -161,7 +173,7 @@ def verify_remote_tag(tag, target):
 
 
 def verify_feature_hashes():
-    """Verify the seven packaged EXEs against the build-produced SHA256SUMS."""
+    """Verify the packaged feature EXEs against the build-produced SHA256SUMS."""
     manifest = DIST / "SHA256SUMS.txt"
     if not manifest.is_file():
         raise SystemExit("missing dist/SHA256SUMS.txt; run a full build first")
@@ -177,7 +189,7 @@ def verify_feature_hashes():
             raise SystemExit("unexpected or duplicate SHA256SUMS entry: " + name)
         found[name] = parts[0].lower()
     if set(found) != set(expected):
-        raise SystemExit("SHA256SUMS.txt does not cover exactly seven feature EXEs")
+        raise SystemExit("SHA256SUMS.txt does not cover exactly the expected feature EXEs")
     for name, path in expected.items():
         h = hashlib.sha256()
         with path.open("rb") as source:
@@ -196,9 +208,14 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--tag", default=None, help="override vX.Y.Z (must match APP_VERSION)")
+    parser.add_argument("--release", nargs="?", const=None, help="release version v2.xx.x")
     args = parser.parse_args(argv)
 
-    version = app_version()
+    if args.release is not None:
+        version = release_version([args.release])
+    else:
+        version = app_version()
+    
     tag = args.tag or "v{0}".format(version)
     if tag != "v{0}".format(version):
         raise SystemExit("release tag must match APP_VERSION to prevent mismatched releases")

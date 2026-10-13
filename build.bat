@@ -9,13 +9,8 @@ rem ============================================================
 rem Select supported 64-bit Python
 rem ============================================================
 set "PYSEL="
-
-for %%V in (3.12 3.13 3.11 3.14) do (
-    if not defined PYSEL (
-        py -%%V-64 -c "import sys" >nul 2>&1
-        if not errorlevel 1 set "PYSEL=py -%%V-64"
-    )
-)
+py -3.12-64 -c "import sys" >nul 2>&1
+if not errorlevel 1 set "PYSEL=py -3.12-64"
 
 if not defined PYSEL set "PYSEL=python"
 
@@ -91,11 +86,13 @@ echo === PYTHON COMPILE CHECK ===
     im_autoreply_gui.py ^
     status_random_gui.py ^
     status_marquee_gui.py ^
+    status_changer_gui.py ^
     chat_im_private_gui.py ^
     room_control_entry.py ^
     chat_im_private_entry.py ^
     status_random_entry.py ^
     status_marquee_entry.py ^
+    status_changer_entry.py ^
     im_autoreply_entry.py ^
     music_dj_entry.py ^
     camfrog_tray.py ^
@@ -165,6 +162,7 @@ if exist "dist\room-control\room-control.exe" del /q "dist\room-control\room-con
 if exist "dist\chat-im-private\chat-im-private.exe" del /q "dist\chat-im-private\chat-im-private.exe"
 if exist "dist\status-random\status-random.exe" del /q "dist\status-random\status-random.exe"
 if exist "dist\status-marquee\status-marquee.exe" del /q "dist\status-marquee\status-marquee.exe"
+if exist "dist\status-changer\status-changer.exe" del /q "dist\status-changer\status-changer.exe"
 if exist "dist\im-autoreply\im-autoreply.exe" del /q "dist\im-autoreply\im-autoreply.exe"
 if exist "dist\music-dj\music-dj.exe" del /q "dist\music-dj\music-dj.exe"
 if exist "dist\web-status\web-status.exe" del /q "dist\web-status\web-status.exe"
@@ -248,6 +246,18 @@ if errorlevel 1 goto :fail
 
 
 echo.
+echo === BUILD COMBINED STATUS CHANGER ===
+
+"%VENV_PY%" -m PyInstaller ^
+    --noconfirm --clean --onefile --windowed ^
+    --distpath dist\status-changer --workpath build\status-changer ^
+    --name status-changer %ICONARG% ^
+    --collect-all pywinauto --collect-submodules comtypes ^
+    status_changer_entry.py
+if errorlevel 1 goto :fail
+
+
+echo.
 echo === BUILD PRIVATE IM AUTO-REPLY ===
 
 "%VENV_PY%" -m PyInstaller ^
@@ -302,13 +312,14 @@ if not exist "dist\room-control\room-control.exe" goto :fail
 if not exist "dist\chat-im-private\chat-im-private.exe" goto :fail
 if not exist "dist\status-random\status-random.exe" goto :fail
 if not exist "dist\status-marquee\status-marquee.exe" goto :fail
+if not exist "dist\status-changer\status-changer.exe" goto :fail
 if not exist "dist\im-autoreply\im-autoreply.exe" goto :fail
 if not exist "dist\web-status\web-status.exe" goto :fail
 if not exist "dist\music-dj\music-dj.exe" goto :fail
 if not exist "dist\SHA256SUMS.txt" goto :fail
 if not exist "%FEATURE_NAME%-windows.zip" goto :fail
 if not exist "app.ico" goto :skip_icon_copy
-for %%D in (room-control chat-im-private status-random status-marquee im-autoreply music-dj web-status) do (
+for %%D in (room-control chat-im-private status-random status-marquee status-changer im-autoreply music-dj web-status) do (
     copy /y "app.ico" "dist\%%D\app.ico" >nul
     if errorlevel 1 goto :fail
 )
@@ -321,6 +332,7 @@ echo dist\room-control\room-control.exe
 echo dist\chat-im-private\chat-im-private.exe
 echo dist\status-random\status-random.exe
 echo dist\status-marquee\status-marquee.exe
+echo dist\status-changer\status-changer.exe
 echo dist\im-autoreply\im-autoreply.exe
 echo dist\music-dj\music-dj.exe
 echo dist\web-status\web-status.exe
@@ -339,12 +351,12 @@ rem Error handlers
 
 echo.
 echo pywin32 has no wheel for this Python.
-echo Install Python 3.13 64-bit, delete .venv, then run build.bat again.
+echo Install CPython 3.12 64-bit, delete .venv, then run build.bat again.
 echo.
 echo ไม่มี pywin32 สำหรับ Python ตัวนี้
-echo ติดตั้ง Python 3.13 แบบ 64-bit ลบ .venv แล้วรัน build.bat ใหม่
+echo ติดตั้ง CPython 3.12 แบบ 64-bit ลบ .venv แล้วรัน build.bat ใหม่
 echo.
-echo winget install Python.Python.3.13
+echo winget install Python.Python.3.12
 
 goto :fail
 
@@ -352,9 +364,9 @@ goto :fail
 :nopython
 echo.
 echo Python not found or unusable.
-echo Install Python 3.13 64-bit:
+echo Install CPython 3.12 64-bit:
 echo.
-echo winget install Python.Python.3.13
+echo winget install Python.Python.3.12
 echo.
 echo ไม่พบ Python หรือ Python ไม่รองรับ
 

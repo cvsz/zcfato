@@ -8,12 +8,14 @@ import json
 import logging
 import logging.handlers
 import os
+import ntpath
 import random
 import re
 import subprocess
 import sys
 import time
 import unicodedata
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -22,6 +24,23 @@ import sqlite3
 import queue
 import threading
 from types import SimpleNamespace
+
+
+def system_taskkill_path():
+    """Return taskkill.exe from Windows' system directory, never from PATH/cwd."""
+    if os.name != "nt":
+        return "taskkill.exe"
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_system_directory = kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = (ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint)
+    get_system_directory.restype = ctypes.c_uint
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_system_directory(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return os.path.join(buffer.value, "taskkill.exe")
 
 
 # ============================================================
@@ -97,6 +116,8 @@ S = {
                   "ไม่พบหน้าต่าง Camfrog (ตรวจ window_title_regex)"),
     "no_ctrl": ("control not found: {spec} (matches={n})", "ไม่พบ control: {spec} (พบ {n} รายการ)"),
     "status_set": ("status set: {text}", "ตั้ง status แล้ว: {text}"),
+    "status_slot_set": ("status slot {slot}/{total} set: {text}",
+                        "ตั้งสถานะช่อง {slot}/{total} แล้ว: {text}"),
     "status_fail": ("status commit failed", "ตั้ง status ไม่สำเร็จ"),
     "reply_fail": ("reply commit failed", "ส่งข้อความตอบไม่สำเร็จ"),
     "replied": ("replied to {nick}: {text}", "ตอบ {nick} แล้ว: {text}"),
@@ -298,7 +319,8 @@ DEFAULTS = {
         "schedules": [],
         "language_cycle": [],
         "marquee": {"enabled": False, "scroll": False, "width": 28, "stride": 2, "step_seconds": 0.5,
-                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80, "infinite_loop": False},
+                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80,
+                    "infinite_loop": False, "loop_slots": False},
         "history": {"enabled": True, "file": "status_history.json", "max_items": 50,
                     "record": True, "use_as_source": False, "seed_from_messages": True,
                     "mode": "rotate"},
@@ -659,8 +681,10 @@ def is_own_gui_window(win) -> bool:
 
 def get_window(cfg: dict):
     from pywinauto import Desktop  # lazy: `check` works without pywinauto
+    # Allow status control discovery in minimized/hidden Camfrog windows. The
+    # configured selector must still match before a candidate is accepted.
     wins = Desktop(backend="uia").windows(
-        title_re=cfg["window_title_regex"], visible_only=True)
+        title_re=cfg["window_title_regex"], visible_only=False)
     wins = [w for w in wins if not is_own_gui_window(w)]
     if not wins:
         raise RuntimeError(t("no_window"))
@@ -994,6 +1018,12 @@ def _background_enter(ctrl, target="edit"):
     if not handle:
         raise LookupError("Status combo has no HWND; cannot try combo Enter")
     u = ctypes.windll.user32
+    try:
+        u.PostMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint,
+                                   ctypes.c_size_t, ctypes.c_ssize_t)
+        u.PostMessageW.restype = ctypes.c_int
+    except (AttributeError, TypeError):
+        pass
     if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
         raise RuntimeError("Could not post Enter key-down to status control")
     if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
@@ -1001,36 +1031,58 @@ def _background_enter(ctrl, target="edit"):
 
 
 def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,
-           restore: bool = False, background_enter_target: str = "edit") -> bool:
-    """Write text, verify read-back, confirm Camfrog is foreground, send, restore focus."""
+           restore: bool = False, background_enter_target: str = "edit",
+           background_if_not_foreground: bool = False) -> bool:
+    """Write and submit status text, requiring an actual Edit read-back before Enter."""
     if dry:
         log.info(t("dry_send", text=shown(text)))
         return True
     if is_web(ctrl):
         return commit_web(win, ctrl, text, require_fg, restore)
-    if not write_text(ctrl, text):
-        log.error(t("mismatch"))
-        return False
     user32 = ctypes.windll.user32
-    prev = user32.GetForegroundWindow() if restore else 0
-    
-    needs_foreground = require_fg and apply_btn is None
+    foreground = user32.GetForegroundWindow()
+    window_is_foreground = foreground == getattr(win, "handle", None)
+    # Keep Camfrog out of the foreground when the user is working elsewhere.
+    # A non-foreground status update is submitted to the verified parent combo.
+    background_submit = apply_btn is None and (
+        background_enter_target == "combo" or not require_fg or
+        (background_if_not_foreground and not window_is_foreground))
+    submit_target = background_enter_target
+    if (background_if_not_foreground and not window_is_foreground
+            and submit_target == "edit"):
+        submit_target = "combo"
+    needs_foreground = require_fg and apply_btn is None and not background_submit
+    prev = foreground if restore and needs_foreground else 0
     if needs_foreground and not foreground_ok(win):
         log.error(t("not_fg"))
+        return False
+    if needs_foreground:
+        ctrl.set_focus()
+        if user32.GetForegroundWindow() != win.handle:
+            log.error(t("not_fg"))
+            return False
+    # Set each already-built marquee frame through UI Automation. Synthetic
+    # WM_CHAR input is not reliably reflected by this custom Camfrog Edit's
+    # Value pattern, so read-back rejects the frame before Enter is sent.
+    if not write_text(ctrl, text):
+        log.error(t("mismatch"))
         return False
 
     if apply_btn is not None:
         press_button(apply_btn)
     else:
-        if require_fg:
-            ctrl.set_focus()
-            if user32.GetForegroundWindow() != win.handle:  # focus stolen: do not type
+        if not background_submit:
+            if user32.GetForegroundWindow() != win.handle:  # focus stolen: do not submit
                 log.error(t("not_fg"))
                 return False
+            # Use a foreground key event so Camfrog's parent combo handles
+            # Enter normally. Posting raw key messages to the child Edit can
+            # trigger a Windows ding on every marquee frame on some builds.
             ctrl.type_keys("{ENTER}")
         else:
-            _background_enter(ctrl, background_enter_target)
-    if prev and prev != win.handle and user32.IsWindow(prev):
+            _background_enter(ctrl, submit_target)
+    if (prev and prev != win.handle and user32.IsWindow(prev)
+            and user32.GetForegroundWindow() != prev):
         time.sleep(0.15)
         user32.SetForegroundWindow(prev)  # best effort: give focus back to what you were doing
     return True
@@ -1238,18 +1290,46 @@ def read_pid(cfg):
         return None
 
 
+def _process_query_api():
+    """Return kernel32 process-query APIs with pointer-safe Windows types."""
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (
+        wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD))
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32, wintypes
+
+
 def pid_alive(pid):
     if not pid:
         return False
     if os.name == "nt":
-        k = ctypes.windll.kernel32
-        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
+        try:
+            pid = int(pid)
+            if not 0 < pid <= 0xFFFFFFFF:
+                return False
+            kernel32, wintypes = _process_query_api()
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            try:
+                code = wintypes.DWORD()
+                ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                return bool(ok) and code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except (OSError, TypeError, ValueError, OverflowError):
             return False
-        code = ctypes.c_ulong()
-        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
-        k.CloseHandle(h)
-        return bool(ok) and code.value == 259  # STILL_ACTIVE
     try:
         os.kill(pid, 0)
         return True
@@ -1260,27 +1340,47 @@ def pid_alive(pid):
 def pid_image(pid):
     """Executable path of a process (Windows), or None when unknown."""
     try:
-        k = ctypes.windll.kernel32
-        h = k.OpenProcess(0x1000, False, pid)
-        if not h:
+        pid = int(pid)
+        if not 0 < pid <= 0xFFFFFFFF:
             return None
-        buf, n = ctypes.create_unicode_buffer(1024), ctypes.c_ulong(1024)
-        ok = k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n))
-        k.CloseHandle(h)
-        return buf.value if ok else None
-    except Exception:
+        kernel32, wintypes = _process_query_api()
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buffer))
+            ok = kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size))
+            return buffer.value if ok else None
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, TypeError, ValueError, OverflowError, AttributeError):
         return None
 
 
 def pid_is_ours(pid, image=None):
-    """Guard against PID reuse: a stale pid file must never make `stop` kill a stranger."""
+    """Only trust this executable or its Python worker interpreter."""
     if os.name != "nt":
         return True
     image = image if image is not None else pid_image(pid)
     if not image:
-        return True  # cannot tell: keep the old behaviour
-    name = Path(image).name.lower()
-    return "camfrog" in name or name.startswith("python") or name == Path(sys.executable).name.lower()
+        return False
+    candidate = ntpath.normcase(ntpath.normpath(str(image)))
+    executables = [sys.executable]
+    base_executable = getattr(sys, "_base_executable", None)
+    if not getattr(sys, "frozen", False) and base_executable:
+        executables.append(base_executable)
+    expected = set()
+    for executable in executables:
+        current = ntpath.normcase(ntpath.normpath(str(executable)))
+        expected.add(current)
+        current_name = ntpath.basename(current).casefold()
+        if current_name in {"python.exe", "pythonw.exe"}:
+            sibling = "pythonw.exe" if current_name == "python.exe" else "python.exe"
+            expected.add(ntpath.normcase(
+                ntpath.join(ntpath.dirname(current), sibling)))
+    return candidate in expected
 
 
 def running_pid(cfg):
@@ -1528,6 +1628,7 @@ class Runner:
 
     def apply_cfg(self, cfg):
         cfg = apply_app_profile(cfg)
+        normalize_marquee_loop(cfg)
         self.cfg = cfg
         self.dry = cfg["dry_run"]
         self.stop_file = BASE / cfg["safety"]["stop_file"]
@@ -1608,7 +1709,9 @@ class Runner:
         target = (self.cfg["status"].get("background_enter_target", "edit")
                   if ctrl is getattr(self, "status_edit", None) and win is None else "edit")
         return commit(win or self.win, ctrl, text, self.dry, s["require_foreground"], btn,
-                      s["restore_previous_window"], target)
+                      s["restore_previous_window"], target,
+                      background_if_not_foreground=(
+                          ctrl is getattr(self, "status_edit", None) and win is None))
 
     def resolve(self):
         try:
@@ -1791,9 +1894,25 @@ class Runner:
         item = random.choice(pool) if st["random"] else pool[self.status_i % len(pool)]
         return pick_status(item, st["language_mode"], self.status_i)
 
-    def choose_status(self):
-        """Pick the next status (raw template). Language cycle switches TH/EN automatically."""
+    def choose_status(self, sequence_index=None, sequence_pool=None):
+        """Pick a status, optionally pinned to its Marquee slot index."""
         st = self.cfg["status"]
+        if sequence_index is not None:
+            pool = sequence_pool if sequence_pool is not None else self.status_pool()
+            if not pool:
+                return None
+            # Marquee is a slot sequence. Pick directly from the captured pool
+            # so history or language filters cannot redirect slot N.
+            item = pool[sequence_index % len(pool)]
+            cycle = st["language_cycle"]
+            if cycle:
+                desired = cycle[self.lang_i % len(cycle)]
+                self.lang_i += 1
+                if isinstance(item, dict) and item.get(desired):
+                    return item[desired]
+                if isinstance(item, str) and detect_lang(item) == desired:
+                    return item
+            return pick_status(item, st["language_mode"], sequence_index)
         h, cyc = st["history"], st["language_cycle"]
         desired = cyc[self.lang_i % len(cyc)] if cyc else None
         raw = None
@@ -1805,17 +1924,36 @@ class Runner:
             self.lang_i += 1
         return raw
 
+    def _finish_status(self, active, displayed):
+        """Complete one status and advance the Marquee slot cursor exactly once."""
+        self.marq = None
+        slot_index = active.get("slot_index")
+        if slot_index is None:
+            self.status_i += 1
+        else:
+            self.status_i = slot_index + 1
+        self.stats["statuses"] += 1
+        self.current_text = active["raw"]
+        if slot_index is None:
+            log.info(t("status_set", text=shown(displayed)))
+        else:
+            log.info(t("status_slot_set", slot=slot_index + 1,
+                       total=active["slot_count"], text=shown(displayed)))
+
     def build_frames(self, text):
         st, mq = self.cfg["status"], self.cfg["status"]["marquee"]
         limit = st["max_length"]
         final = clip(text, limit)
         if not mq["enabled"] or not mq.get("scroll", False):
             return [final]  # per-line rotation: one whole line per tick
-        inf = mq.get("infinite_loop", False)
+        # GUI Loop cycles through status slots. Preserve frame looping only for
+        # legacy configs that have not opted into slot looping.
+        frame_loop = bool(mq.get("infinite_loop", False)
+                          and not mq.get("loop_slots", False))
         frames = [clip(f, limit) for f in marquee_frames(
-            text, mq["width"], mq["stride"], mq["separator"], mq["cycles"], mq["max_frames"], inf)]
-        if not inf and (not frames or frames[-1] != final):
-            frames.append(final)  # settle on full text unless infinite loop
+            text, mq["width"], mq["stride"], mq["separator"], mq["cycles"], mq["max_frames"], frame_loop)]
+        if not frame_loop and (not frames or frames[-1] != final):
+            frames.append(final)  # finish this status before advancing to the next slot
         return frames
 
     def do_status(self, now):
@@ -1825,30 +1963,47 @@ class Runner:
                 log.warning(t("no_ctrl", spec={"section": "status.edit"}, n=0))
                 self._next_status_warn = now + 60
             return
+        mq = st["marquee"]
+        sequence = bool(mq.get("enabled") and not st.get("random", False))
         active = self.marq
-        if active is not None and active.get("loop") and now >= active["deadline"]:
-            self.marq = None
-            self.status_i += 1
-            self.stats["statuses"] += 1
-            self.current_text = active["raw"]
-            log.info(t("status_set", text=shown(active["frames"][-1])))
+        if active is not None and active.get("loop_frames") and now >= active["deadline"]:
+            self._finish_status(active, active["frames"][-1])
         if self.marq is None:
-            if now - self.last_status < st["interval_seconds"]:
+            pool = None
+            if sequence:
+                pool = self.status_pool()
+                if not pool:
+                    return
+                if self.status_i >= len(pool):
+                    if mq.get("loop_slots", False):
+                        self.status_i = 0
+                    else:
+                        return
+            switch_delay = (max(MARQUEE_STEP_MIN,
+                                float(mq["step_seconds"])) if sequence
+                            else st["interval_seconds"])
+            if now - self.last_status < switch_delay:
                 return
-            raw = self.choose_status()
+            slot_index = self.status_i if sequence else None
+            raw = self.choose_status(slot_index, pool) if sequence else self.choose_status()
+            if raw is None:
+                return
             text = expand(raw, own=self.cfg["autoreply"]["own_nickname"])
             if not text.strip():
                 log.warning(t("status_blank"))
                 self.last_status = now
                 return
             frames = self.build_frames(text)
-            mq = st["marquee"]
-            loop = bool(mq.get("infinite_loop") and mq.get("scroll")
-                        and len(frames) > 1)
+            loop_frames = bool(mq.get("infinite_loop") and not mq.get("loop_slots")
+                               and mq.get("scroll") and len(frames) > 1)
             self.marq = {"raw": raw, "frames": frames, "i": 0, "next": now,
-                         "loop": loop, "deadline": now + st["interval_seconds"],
+                         "loop_frames": loop_frames,
+                         "deadline": now + st["interval_seconds"],
                          "history_recorded": False}
-            if loop:
+            if sequence:
+                self.marq["slot_index"] = slot_index
+                self.marq["slot_count"] = len(pool)
+            if loop_frames:
                 self.last_status = now
         m = self.marq
         if now < m["next"]:
@@ -1865,7 +2020,7 @@ class Runner:
         if len(m["frames"]) > 1:
             self.stats["marquee_frames"] += 1
         m["i"] += 1
-        if m["loop"]:
+        if m["loop_frames"]:
             if m["i"] >= len(m["frames"]):
                 m["i"] = 0
             m["next"] = time.monotonic() + max(
@@ -1873,12 +2028,10 @@ class Runner:
             log.debug(t("status_set", text=shown(frame)))
             return
         if m["i"] >= len(m["frames"]):
-            self.marq = None
-            self.status_i += 1
-            self.stats["statuses"] += 1
-            self.current_text = m["raw"]
+            self._finish_status(m, frame)
+            # Marquee slot changes are paced by Step, regardless of Scroll.
+            # Random retains its separate Every interval.
             self.last_status = now
-            log.info(t("status_set", text=shown(frame)))
         else:
             # Schedule from completion of the UI send, not the tick start. UIA
             # writes can be slow; using `now` here could make delayed sends run
@@ -2106,7 +2259,8 @@ class Runner:
                     if fails >= limit:
                         log.error(t("too_many"))
                         return 1
-                    time.sleep(min(30, 2 ** fails))
+                    if self._wait_for_stop(min(30, 2 ** fails)):
+                        continue
                     try:
                         self.resolve()
                     except Exception as e:
@@ -2122,6 +2276,16 @@ class Runner:
             return 0
         finally:
             self.write_stats(time.monotonic(), force=True)
+
+    def _wait_for_stop(self, seconds):
+        """Wait for retry backoff, checking the stop marker at short intervals."""
+        deadline = time.monotonic() + max(0.0, seconds)
+        while not self.stop_file.exists():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.1, remaining))
+        return True
 
 
 def run_guarded(cfg, cfg_path=None):
@@ -2595,7 +2759,8 @@ def cmd_status(cfg, text):
     btn = find(win, st["apply_button"]) if st["apply_button"] else None
     text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
     ok = commit(win, ctrl, text, cfg["dry_run"], sf["require_foreground"], btn,
-                sf["restore_previous_window"], st.get("background_enter_target", "edit"))
+                sf["restore_previous_window"], st.get("background_enter_target", "edit"),
+                background_if_not_foreground=True)
     print(t("ok") if ok else t("failed"))
     return 0 if ok else 1
 
@@ -2948,7 +3113,8 @@ DEFAULTS = {
         "schedules": [],
         "language_cycle": [],
         "marquee": {"enabled": False, "scroll": False, "width": 28, "stride": 2, "step_seconds": 0.5,
-                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80, "infinite_loop": False},
+                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80,
+                    "infinite_loop": False, "loop_slots": False},
         "history": {"enabled": True, "file": "camfrog_status_changer_history.json", "max_items": 50,
                     "record": True, "use_as_source": False, "seed_from_messages": True,
                     "mode": "rotate"},
@@ -3085,12 +3251,24 @@ def messages_from_slots(values):
     return result
 
 
+def normalize_marquee_loop(config):
+    """Interpret the legacy Marquee Loop flag as looping through status slots."""
+    marquee = config.get("status", {}).get("marquee", {})
+    if not marquee.get("enabled"):
+        return config
+    if marquee.get("loop_slots") or marquee.get("infinite_loop"):
+        marquee["loop_slots"] = True
+        marquee["infinite_loop"] = False
+    return config
+
+
 def runtime_config(config):
     """Build isolated worker settings with PID and stop files owned by this app."""
     runtime = copy.deepcopy(config)
     status = runtime.setdefault("status", {})
     status["random"] = False
     status.setdefault("marquee", {})["enabled"] = True
+    normalize_marquee_loop(runtime)
     runtime["autoreply"]["enabled"] = False
     runtime.setdefault("autoreply_im", {})["enabled"] = False
     runtime["stats"]["file"] = "camfrog_status_changer_stats.json"
@@ -3145,7 +3323,8 @@ def _commit_frames(config, frames):
         step = 0.3
     for i, frame in enumerate(frames):
         ok = commit(win, ctrl, frame, config["dry_run"], sf["require_foreground"], btn,
-                    sf["restore_previous_window"], st.get("background_enter_target", "edit"))
+                    sf["restore_previous_window"], st.get("background_enter_target", "edit"),
+                    background_if_not_foreground=True)
         if not ok:
             print(t("failed"))
             return 1
@@ -3200,8 +3379,7 @@ def cmd_start(cfg, args):
                          env=child_env())
     time.sleep(2.5)
     if p.poll() is not None:
-        print(t("bg_failed", code=p.returncode, log=logf))
-        return 1
+        raise RuntimeError(t("bg_failed", code=p.returncode, log=logf))
     print(t("bg_started", pid=p.pid, log=logf))
     return 0
 
@@ -3212,7 +3390,8 @@ def worker_cmd(args):
     else:
         python = Path(sys.executable)
         pythonw = python.with_name("pythonw.exe")
-        command = [str(pythonw if pythonw.exists() else python), str(Path(__file__).resolve())]
+        entrypoint = Path(__file__).with_name("status_marquee_entry.py")
+        command = [str(pythonw if pythonw.exists() else python), str(entrypoint.resolve())]
     command.append("--worker")
     cfg_arg = []
     if getattr(args, "config", None):
@@ -3266,7 +3445,7 @@ def cmd_stop(cfg):
     forced = False
     if pid_alive(pid):
         try:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+            subprocess.run([system_taskkill_path(), "/PID", str(pid), "/T", "/F"],
                            capture_output=True, check=False, timeout=10)
             forced = True
         except (OSError, subprocess.TimeoutExpired):
@@ -3323,7 +3502,7 @@ def set_clipboard_text(root, text):
         return
     root.clipboard_clear()
     root.clipboard_append(text)
-    root.update()
+    root.update_idletasks()
 
 
 def get_clipboard_text(root):
@@ -3436,10 +3615,12 @@ class ClipboardController:
         import tkinter as tk
 
         self.root = root
-        self.translate = translate or (lambda text: text)
+        self.translate = translate or (lambda text: str(text).partition("|")[0])
         self.on_error = on_error
         self.target = None
         self.widgets = []
+        import weakref
+        self._installed_widgets = weakref.WeakSet()
         self.menu = tk.Menu(root, tearoff=False)
         for label, action in (("Cut|ตัด", "cut"), ("Copy|คัดลอก", "copy"),
                               ("Paste|วาง", "paste")):
@@ -3449,21 +3630,68 @@ class ClipboardController:
         self.menu.add_command(label=self.translate("Select all|เลือกทั้งหมด"),
                               command=lambda: self.select_all(self.target))
 
+    def refresh_menu(self):
+        """Refresh localized labels after the GUI language changes."""
+        labels = ("Cut|ตัด", "Copy|คัดลอก", "Paste|วาง",
+                  "Select all|เลือกทั้งหมด")
+        for index, label in enumerate(labels):
+            self.menu.entryconfigure(index if index < 3 else 4,
+                                     label=self.translate(label))
+
     def install(self, parent):
+        """Bind editors recursively, including controls added after the first build."""
         for widget in parent.winfo_children():
             widget_class = _widget_class(widget)
-            if widget_class in _WIDGET_CLASSES:
+            if widget_class in _WIDGET_CLASSES and widget not in self._installed_widgets:
+                self._installed_widgets.add(widget)
                 self.widgets.append(widget)
+                if widget_class in {"Text", "Listbox"}:
+                    try:
+                        widget.configure(
+                            background="#ffffff" if widget_class == "Text" else "#fffdfa",
+                            foreground="#283648", selectbackground="#8b672b",
+                            selectforeground="#fffdfa", insertbackground="#283648",
+                            highlightbackground="#d5c8ac", highlightcolor="#8b672b")
+                    except Exception:
+                        pass
                 for sequence, action in (
                     ("<Control-c>", "copy"), ("<Control-x>", "cut"),
                     ("<Control-v>", "paste"), ("<Control-Insert>", "copy"),
                     ("<Shift-Delete>", "cut"), ("<Shift-Insert>", "paste"),
                 ):
                     widget.bind(sequence, lambda event, op=action: self.handle(event, op), add="+")
+                # The generic key binding also recognizes Windows virtual-key
+                # codes and control characters when a Thai/non-Latin layout
+                # reports an unknown keysym for Ctrl+A/C/V/X.
+                widget.bind("<Control-KeyPress>", self.handle_control_key, add="+")
                 widget.bind("<Control-a>", self._select_all_event, add="+")
                 widget.bind("<Button-3>", self.show_menu, add="+")
                 widget.bind("<Shift-F10>", self.show_menu, add="+")
             self.install(widget)
+
+    def handle_control_key(self, event):
+        """Dispatch Ctrl+A/C/V/X consistently across keyboard layouts."""
+        keysym = str(getattr(event, "keysym", "")).lower()
+        char = str(getattr(event, "char", "") or "")
+        try:
+            keycode = int(getattr(event, "keycode", -1))
+        except (TypeError, ValueError):
+            keycode = -1
+        shortcuts = {
+            "a": ({"a", "\x01"}, 65, None),
+            "c": ({"c", "\x03"}, 67, "copy"),
+            "v": ({"v", "\x16"}, 86, "paste"),
+            "x": ({"x", "\x18"}, 88, "cut"),
+        }
+        key = next((name for name, (chars, code, _action) in shortcuts.items()
+                    if keysym == name or char in chars or keycode == code), None)
+        if key is None:
+            return None
+        self.target = event.widget
+        _chars, _code, action = shortcuts[key]
+        if action is None:
+            return self._select_all_event(event)
+        return self.handle(event, action)
 
     def perform(self, widget, action):
         if widget is None:
@@ -3525,6 +3753,7 @@ def build_app():
             self.config_path = Path(config_path).resolve()
             self.runtime_config_path = DATA_DIR / RUNTIME_CONFIG
             self.root = tk.Tk()
+            self.root.configure(background="#f4f1e8")
             self.app_name = "Marquee Status"
             self.root.title(f"Camfrog {self.app_name}")
             self.root.geometry("430x610")
@@ -3536,7 +3765,10 @@ def build_app():
                 pass
             self.busy = False
             self.close_requested = False
+            self.stop_in_progress = False
+            self.pending_stop = False
             self.task_results = queue.Queue()
+            self.stop_results = queue.Queue()
             self.task_poll_job = None
             self.state_job = None
             self.save_job = None
@@ -3557,8 +3789,9 @@ def build_app():
                 MARQUEE_STEP_MIN, self.config["status"]["marquee"]["step_seconds"])))
             self.stride = tk.StringVar(value=str(self.config["status"]["marquee"].get(
                 "stride", MARQUEE_STRIDE_DEFAULT)))
-            self.infinite_loop = tk.BooleanVar(value=bool(
-                self.config["status"]["marquee"].get("infinite_loop", False)))
+            marquee = self.config["status"]["marquee"]
+            self.loop_slots = tk.BooleanVar(value=bool(
+                marquee.get("loop_slots", False) or marquee.get("infinite_loop", False)))
             self.scroll_frames = tk.BooleanVar(value=bool(
                 self.config["status"]["marquee"].get("scroll", False)))
             self.combo_enter = tk.BooleanVar(value=(
@@ -3604,10 +3837,17 @@ def build_app():
             LANG = "th" if self.language_box.get() == "TH" else "en"
             self.language_preference = LANG
             self._build()
+            if hasattr(self, "clipboard_controller"):
+                self.clipboard_controller.widgets.clear()
+                self.clipboard_controller.target = None
+                self.clipboard_controller.refresh_menu()
+                self.clipboard_controller.install(self.root)
             self.schedule_save()
 
         def _translate_clipboard(self, text):
-            en, _, th = text.partition("||")
+            en, separator, th = text.partition("||")
+            if not separator:
+                en, _, th = text.partition("|")
             th, en = th.strip(), en.strip()
             return th if LANG == "th" and th else en
 
@@ -3624,35 +3864,36 @@ def build_app():
                 child.destroy()
             self.entry_widgets = {"random": [], "marquee": []}
             style = ttk.Style(root)
+            root.configure(background="#f4f1e8")
             try:
                 style.theme_use("clam")
             except tk.TclError:
                 pass
-            style.configure("TFrame", background="#edf2f5")
-            style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
-            style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
-            style.configure("TRadiobutton", background="#edf2f5", foreground="#233548")
-            style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
-            style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
+            style.configure("TFrame", background="#f4f1e8")
+            style.configure("TLabel", background="#f4f1e8", foreground="#283648", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TRadiobutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TLabelframe", background="#f4f1e8", bordercolor="#d5c8ac")
+            style.configure("TLabelframe.Label", background="#f4f1e8", foreground="#8b672b",
                             font=("Segoe UI", 9, "bold"))
             style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
-                            background="#d9e8f0", foreground="#1a3a52")
-            style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
+                            background="#ebe5d9", foreground="#283648")
+            style.map("TButton", background=[("active", "#d6e9e8"), ("pressed", "#d5c8ac")])
             style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
-                            foreground="#152b3a")
-            style.configure("TNotebook", background="#edf2f5")
+                            foreground="#283648")
+            style.configure("TNotebook", background="#f4f1e8")
             style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
-            style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
-                      foreground=[("selected", "#096c7b")])
-            style.configure("Brand.TLabel", font=("Segoe UI", 10, "bold"), foreground="#126c68")
+            style.map("TNotebook.Tab", background=[("selected", "#fffdfa")],
+                      foreground=[("selected", "#8b672b")])
+            style.configure("Brand.TLabel", font=("Segoe UI", 10, "bold"), foreground="#8b672b")
             style.configure("State.TLabel", font=("Segoe UI", 9, "bold"))
-            style.configure("State.OK.TLabel", font=("Segoe UI", 9, "bold"), foreground="#138a55")
-            style.configure("State.STOP.TLabel", font=("Segoe UI", 9, "bold"), foreground="#a52834")
-            style.configure("Hint.TLabel", font=("Segoe UI", 8), foreground="#53636d")
+            style.configure("State.OK.TLabel", font=("Segoe UI", 9, "bold"), foreground="#28744c")
+            style.configure("State.STOP.TLabel", font=("Segoe UI", 9, "bold"), foreground="#9f3740")
+            style.configure("Hint.TLabel", font=("Segoe UI", 8), foreground="#626d7a")
             style.configure("Mode.TNotebook", tabmargins=(0, 5, 0, 0))
             style.configure("Mode.TNotebook.Tab", padding=(12, 7), font=("Segoe UI", 9, "bold"))
             style.configure("Action.TButton", padding=(8, 5), font=("Segoe UI", 9, "bold"))
-            style.configure("Card.TFrame", background="#ffffff", padding=(2, 2))
+            style.configure("Card.TFrame", background="#fffdfa", padding=(2, 2))
             style.configure("Entry.TEntry", padding=(2, 2))
             outer = ttk.Frame(root, padding=(12, 10, 12, 10))
             outer.pack(fill="both", expand=True)
@@ -3683,7 +3924,7 @@ def build_app():
             self.tabs.bind("<<NotebookTabChanged>>", self._tab_changed)
 
             self.note = ttk.Label(outer, text="", font=("Segoe UI", 8), anchor="w",
-                                  foreground="#53636d", wraplength=420)
+                                  foreground="#626d7a", wraplength=420)
             self.note.pack(fill="x", pady=(7, 5))
             options = ttk.Frame(outer)
             options.pack(fill="x", pady=(0, 5))
@@ -3695,7 +3936,7 @@ def build_app():
             ).pack(side="left")
             ttk.Checkbutton(
                 options,
-                text=self._tr("Try combo Enter (test)", "ลอง Enter ที่ combo"),
+                text=self._tr("Use background status updates", "ส่งสถานะเบื้องหลัง"),
                 variable=self.combo_enter,
                 command=self.schedule_save,
             ).pack(side="left", padx=(8, 0))
@@ -3714,16 +3955,16 @@ def build_app():
                 speed = ttk.Frame(page, style="Card.TFrame", padding=4)
                 speed.pack(fill="x", pady=(0, 4))
                 ttk.Label(speed, text=self._tr("Step", "จังหวะ"),
-                          background="#f4f7f7").pack(side="left", padx=(4, 0))
+                          background="#ebe5d9").pack(side="left", padx=(4, 0))
                 ttk.Spinbox(speed, textvariable=self.step, from_=MARQUEE_STEP_MIN,
                             to=10, increment=0.1, width=4).pack(side="left", padx=(3, 5))
-                ttk.Label(speed, text="s", background="#f4f7f7").pack(side="left")
+                ttk.Label(speed, text="s", background="#ebe5d9").pack(side="left")
                 ttk.Label(speed, text=self._tr("Stride", "ก้าว"),
-                          background="#f4f7f7").pack(side="left", padx=(5, 2))
+                          background="#ebe5d9").pack(side="left", padx=(5, 2))
                 ttk.Spinbox(speed, textvariable=self.stride, from_=1, to=10,
                             increment=1, width=2).pack(side="left")
-                ttk.Checkbutton(speed, text=self._tr("Loop", "วนลูป"),
-                                variable=self.infinite_loop,
+                ttk.Checkbutton(speed, text=self._tr("Loop slots", "วนช่อง 1–10"),
+                                variable=self.loop_slots,
                                 command=self.schedule_save).pack(side="left", padx=(8, 0))
                 ttk.Checkbutton(speed, text=self._tr("Scroll", "เลื่อน"),
                                 variable=self.scroll_frames,
@@ -3733,7 +3974,7 @@ def build_app():
             entries.pack(fill="both", expand=True, pady=(4, 0))
             for index, var in enumerate(self._fields_for_mode(mode)):
                 ttk.Label(entries, text=f"{index + 1:02d}", width=3,
-                          background="#f4f7f7", foreground="#53636d").grid(
+                          background="#ebe5d9", foreground="#626d7a").grid(
                     row=index, column=0, sticky="w", pady=1, padx=(4, 8))
                 entry = ttk.Entry(entries, textvariable=var, style="Entry.TEntry")
                 entry.grid(row=index, column=1, sticky="ew", pady=1, padx=(0, 4))
@@ -3747,18 +3988,20 @@ def build_app():
             for col in range(4):
                 actions.columnconfigure(col, weight=1, uniform="action")
             for index, (title_en, title_th, command, colour, active) in enumerate((
-                ("1. Discovery", "1. ค้นหา Control", self.discover, "#1769c2", "#125397"),
-                ("2. Apply", "2. ใช้ทันที", self.apply_now, "#17682a", "#10521d"),
-                ("3. Start", "3. เริ่ม", lambda: self.set_enabled(self.mode, True), "#006d78", "#00535c"),
-                ("4. Stop", "4. หยุด", lambda: self.set_enabled(self.mode, False), "#d72d32", "#a81b22"),
+                ("1. Discovery", "1. ค้นหา Control", self.discover, "#ebe5d9", "#d6e9e8"),
+                ("2. Apply", "2. ใช้ทันที", self.apply_now, "#d6e9e8", "#d5c8ac"),
+                ("3. Start", "3. เริ่ม", lambda: self.set_enabled(self.mode, True), "#8b672b", "#76541f"),
+                ("4. Stop", "4. หยุด", lambda: self.set_enabled(self.mode, False), "#9f3740", "#e79595"),
             )):
                 button = tk.Button(
                     actions, text=self._tr(title_en, title_th), command=command,
-                    font=("Segoe UI", 10, "bold"), bg=colour, fg="#ffffff",
-                    activebackground=active, activeforeground="#ffffff",
+                    font=("Segoe UI", 10, "bold"), bg=colour,
+                    fg="#283648" if index < 2 else "#ffffff",
+                    activebackground=active,
+                    activeforeground="#283648" if index < 2 else "#ffffff",
                     relief="flat", bd=0, padx=5, pady=6,
-                    cursor="hand2", highlightthickness=2, highlightbackground="#d5dbe0",
-                    highlightcolor="#102b45", takefocus=True,
+                    cursor="hand2", highlightthickness=2, highlightbackground="#d5c8ac",
+                    highlightcolor="#283648", takefocus=True,
                 )
                 button.grid(row=0, column=index,
                             padx=(0, 4) if index < 3 else (0, 0),
@@ -3781,7 +4024,7 @@ def build_app():
         def check_update(self):
             self.note.configure(text=self._tr("Checking for updates...",
                                               "กำลังตรวจอัปเดต..."),
-                                foreground="#53636d")
+                                foreground="#626d7a")
 
             def work():
                 try:
@@ -3799,7 +4042,7 @@ def build_app():
         def _update_done(self, state, message):
             self.note.configure(
                 text=message,
-                foreground="#a52834" if state == "failed" else "#138a55")
+                foreground="#9f3740" if state == "failed" else "#28744c")
             if state == "ready":
                 self.root.after(1200, self.root.destroy)
 
@@ -3834,7 +4077,8 @@ def build_app():
             try:
                 mq["step_seconds"] = max(MARQUEE_STEP_MIN, float(self.step.get()))
                 mq["stride"] = max(1, int(float(self.stride.get())))
-                mq["infinite_loop"] = bool(self.infinite_loop.get())
+                mq["loop_slots"] = bool(self.loop_slots.get())
+                mq["infinite_loop"] = False
                 mq["scroll"] = bool(self.scroll_frames.get())
             except ValueError as exc:
                 raise ValueError(self._tr("Enter valid marquee speed values.",
@@ -3868,7 +4112,7 @@ def build_app():
                                                       "บันทึกการตั้งค่า Status Changer แล้ว"))
                 return config
             except (OSError, sqlite3.Error, ValueError, KeyError) as exc:
-                self.note.configure(text=str(exc), foreground="#a52834")
+                self.note.configure(text=str(exc), foreground="#9f3740")
                 return None
 
         def _save_pools(self):
@@ -3889,7 +4133,7 @@ def build_app():
                     text=self._tr(
                         "Dry run is on; this status was not sent. Enable Send statuses live to Camfrog to apply it.",
                         "เปิดโหมดทดลองอยู่ จึงยังไม่ได้ส่งสถานะ ให้เปิด ส่งสถานะจริงไป Camfrog ก่อน"),
-                    foreground="#53636d")
+                    foreground="#626d7a")
                 return
 
             chosen = None
@@ -3912,7 +4156,7 @@ def build_app():
             if not chosen:
                 self.note.configure(text=self._tr("Enter a status text to apply.",
                                                   "กรอกข้อความสถานะที่จะใช้"),
-                                    foreground="#a52834")
+                                    foreground="#9f3740")
                 return
 
             if isinstance(chosen, dict):
@@ -3944,10 +4188,13 @@ def build_app():
             self.run_task(do, self._tr("Controls discovered", "ดึง control แล้ว"))
 
         def set_enabled(self, mode, enabled):
-            if self.busy:
-                return
             self.mode = mode
             if not enabled:
+                if self.stop_in_progress:
+                    self.note.configure(text=self._tr(
+                        "A stop request is already running.",
+                        "กำลังดำเนินการหยุด worker อยู่แล้ว"), foreground="#626d7a")
+                    return
                 # Stop is an emergency/operator action: do not validate or save
                 # unsaved form data first. Invalid input must never block Stop.
                 try:
@@ -3955,15 +4202,26 @@ def build_app():
                     runtime = runtime_config(config)
                     worker_pid = running_pid(runtime)
                 except (OSError, sqlite3.Error, ValueError, KeyError) as exc:
-                    self.note.configure(text=str(exc), foreground="#a52834")
+                    self.note.configure(text=str(exc), foreground="#9f3740")
                     return
                 if worker_pid:
-                    self.run_task(lambda: self._stop_worker(runtime),
-                                  self._tr("Status worker stopped.", "หยุดตัวเปลี่ยนสถานะแล้ว"))
+                    self._start_stop_task(
+                        runtime,
+                        self._tr("Status worker stopped.", "หยุดตัวเปลี่ยนสถานะแล้ว"))
+                elif self.busy:
+                    # Start may be between process creation and PID read-back.
+                    self.pending_stop = True
+                    self.note.configure(text=self._tr(
+                        "Stop queued until the current task finishes.",
+                        "รับคำสั่งหยุดแล้ว จะตรวจอีกครั้งเมื่องานปัจจุบันเสร็จ"),
+                        foreground="#626d7a")
                 else:
                     self.note.configure(text=self._tr("Status rotation is not running.",
                                                       "ไม่ได้เปิดการเปลี่ยนสถานะอยู่"),
-                                        foreground="#53636d")
+                                        foreground="#626d7a")
+                return
+
+            if self.busy or self.stop_in_progress:
                 return
 
             config = self.save_settings(enabled=True, mode=mode)
@@ -3973,7 +4231,7 @@ def build_app():
             if running_pid(runtime):
                 self.note.configure(text=self._tr("Status worker is already running.",
                                                   "ตัวเปลี่ยนสถานะกำลังทำงานอยู่"),
-                                    foreground="#138a55")
+                                    foreground="#28744c")
                 return
             self._start_worker(config)
 
@@ -4006,10 +4264,10 @@ def build_app():
             return cmd_stop(runtime)
 
         def run_task(self, function, done_text, on_done=None):
-            if self.busy:
+            if self.busy or self.stop_in_progress:
                 return False
             self.busy = True
-            self.note.configure(text=self._tr("Working…", "กำลังทำงาน…"), foreground="#53636d")
+            self.note.configure(text=self._tr("Working…", "กำลังทำงาน…"), foreground="#626d7a")
 
             def worker():
                 try:
@@ -4025,7 +4283,34 @@ def build_app():
                 return True
             except RuntimeError as exc:
                 self.busy = False
-                self.note.configure(text=str(exc), foreground="#a52834")
+                self.note.configure(text=str(exc), foreground="#9f3740")
+                return False
+
+        def _start_stop_task(self, runtime, done_text, on_done=None):
+            """Run the potentially slow shutdown wait outside the GUI task lane."""
+            if self.stop_in_progress:
+                return False
+            self.stop_in_progress = True
+            self.note.configure(text=self._tr("Stopping worker…", "กำลังหยุด worker…"),
+                                foreground="#626d7a")
+
+            def worker():
+                try:
+                    result = self._stop_worker(runtime)
+                    text = done_text if result in (None, 0) else self._tr(
+                        "Command failed.", "คำสั่งไม่สำเร็จ")
+                    ok = result in (None, 0)
+                except Exception as exc:
+                    text, ok = str(exc), False
+                self.stop_results.put((text, ok, on_done))
+
+            try:
+                threading.Thread(target=worker, daemon=True,
+                                 name="camfrog-marquee-stop").start()
+                return True
+            except RuntimeError as exc:
+                self.stop_in_progress = False
+                self.note.configure(text=str(exc), foreground="#9f3740")
                 return False
 
         def poll_task_results(self):
@@ -4038,7 +4323,17 @@ def build_app():
             except Exception as exc:
                 logging.exception("Could not process Status Changer task result")
                 if self.root.winfo_exists():
-                    self.note.configure(text=str(exc), foreground="#a52834")
+                    self.note.configure(text=str(exc), foreground="#9f3740")
+            try:
+                while True:
+                    text, ok, on_done = self.stop_results.get_nowait()
+                    self.finish_stop_task(text, ok, on_done)
+            except queue.Empty:
+                pass
+            except Exception as exc:
+                logging.exception("Could not process Status Changer stop result")
+                if self.root.winfo_exists():
+                    self.note.configure(text=str(exc), foreground="#9f3740")
             try:
                 self.task_poll_job = self.root.after(100, self.poll_task_results)
             except tk.TclError:
@@ -4046,13 +4341,32 @@ def build_app():
 
         def finish_task(self, text, ok, on_done=None):
             self.busy = False
-            self.note.configure(text=text, foreground="#138a55" if ok else "#a52834")
+            self.note.configure(text=text, foreground="#28744c" if ok else "#9f3740")
             self.refresh_state()
             close_after_task = self.close_requested
             self.close_requested = False
             if on_done:
                 on_done(ok)
             if close_after_task:
+                self.pending_stop = False
+                try:
+                    if self.root.winfo_exists():
+                        self.close_app()
+                except tk.TclError:
+                    pass
+            elif self.pending_stop:
+                self.pending_stop = False
+                self.set_enabled("marquee", False)
+
+        def finish_stop_task(self, text, ok, on_done=None):
+            self.stop_in_progress = False
+            self.note.configure(text=text, foreground="#28744c" if ok else "#9f3740")
+            self.refresh_state()
+            close_after_stop = self.close_requested
+            self.close_requested = False
+            if on_done:
+                on_done(ok)
+            if close_after_stop and ok:
                 try:
                     if self.root.winfo_exists():
                         self.close_app()
@@ -4069,11 +4383,17 @@ def build_app():
 
         def close_app(self):
             """Stop the standalone worker and exit; never leave the UI in the tray."""
+            if self.stop_in_progress:
+                self.close_requested = True
+                self.note.configure(text=self._tr(
+                    "Waiting for the worker to stop before exit…",
+                    "กำลังรอให้ worker หยุดก่อนปิดโปรแกรม…"), foreground="#626d7a")
+                return
             if self.busy:
                 self.close_requested = True
                 self.note.configure(text=self._tr(
                     "Finishing the current task before exit…",
-                    "รอให้งานปัจจุบันเสร็จแล้วปิดโปรแกรม…"), foreground="#53636d")
+                    "รอให้งานปัจจุบันเสร็จแล้วปิดโปรแกรม…"), foreground="#626d7a")
                 return
             try:
                 config = load_cfg(self.config_path)
@@ -4081,14 +4401,13 @@ def build_app():
                 if running_pid(runtime):
                     self.note.configure(text=self._tr(
                         "Stopping the status worker before exit…",
-                        "กำลังหยุดตัวเปลี่ยนสถานะก่อนออก…"), foreground="#53636d")
-                    started = self.run_task(
-                        lambda: self._stop_worker(runtime),
+                        "กำลังหยุดตัวเปลี่ยนสถานะก่อนออก…"), foreground="#626d7a")
+                    self._start_stop_task(
+                        runtime,
                         self._tr("Status worker stopped.", "หยุดตัวเปลี่ยนสถานะแล้ว"),
                         on_done=self._close_after_worker_stop,
                     )
-                    if started:
-                        return
+                    return
             except Exception as exc:
                 logging.exception("Could not prepare a clean Status Changer exit")
                 messagebox.showerror(
@@ -4108,7 +4427,7 @@ def build_app():
                 self.note.configure(text=self._tr(
                     "Worker did not confirm shutdown. The window stays open so you can retry.",
                     "worker ยังไม่ยืนยันว่าหยุดแล้ว หน้าต่างยังเปิดไว้ให้ลองใหม่"),
-                    foreground="#a52834")
+                    foreground="#9f3740")
 
         def _finalize_close(self):
             if self.save_job is not None:
@@ -4272,6 +4591,31 @@ def version_newer(latest, current=APP_VERSION):
     return _version_key(latest) > _version_key(current)
 
 
+def _validate_github_release_url(url):
+    """Accept only HTTPS URLs on GitHub's release and asset hosts."""
+    allowed_hosts = {
+        "github.com", "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid GitHub release URL") from exc
+    if (parsed.scheme.casefold() != "https"
+            or (parsed.hostname or "").casefold() not in allowed_hosts
+            or parsed.username or parsed.password
+            or port not in (None, 443)):
+        raise ValueError("update URL must use HTTPS on a GitHub release host")
+    return str(url)
+
+
+def _validate_github_response_url(response, requested_url):
+    geturl = getattr(response, "geturl", None)
+    final_url = geturl() if callable(geturl) else requested_url
+    _validate_github_release_url(final_url)
+
+
 def github_latest_release(timeout=15.0):
     """(tag, notes, {asset_name: url}) for the newest release, or None."""
     request = urllib.request.Request(
@@ -4306,19 +4650,26 @@ def check_for_update(asset_name, timeout=15.0):
 
 
 def check_release_assets(asset_name, timeout=15.0):
-    """(tag, url, sums_url, notes) for a newer release carrying `asset_name`."""
+    """Return verified GitHub release URLs only when the asset has checksums."""
     release = github_latest_release(timeout)
     if release is None:
         return None
     tag, notes, assets = release
     url = assets.get(asset_name)
-    if url and version_newer(tag):
-        sums_url = assets.get(UPDATE_ASSET_SUMS, "")
-        if not sums_url:  # e.g. release-SHA256SUMS.txt alongside SHA256SUMS.txt
-            sums_url = next((u for n, u in sorted(assets.items())
-                             if n.endswith("SHA256SUMS.txt")), "")
-        return tag, url, sums_url, notes
-    return None
+    if not url or not version_newer(tag):
+        return None
+    sums_url = assets.get(UPDATE_ASSET_SUMS, "")
+    if not sums_url:  # e.g. release-SHA256SUMS.txt alongside SHA256SUMS.txt
+        sums_url = next((value for name, value in sorted(assets.items())
+                         if name.endswith("SHA256SUMS.txt")), "")
+    if not sums_url:
+        return None
+    try:
+        _validate_github_release_url(url)
+        _validate_github_release_url(sums_url)
+    except ValueError:
+        return None
+    return tag, url, sums_url, notes
 
 
 def self_update(asset_name, confirm=None, timeout=15.0):
@@ -4347,26 +4698,30 @@ def _sha256_file(path, chunk=1 << 20):
 
 
 def download_update(url, target, timeout=60.0):
-    """Stream a release asset to `target`. Returns the bytes written."""
+    """Stream a GitHub release asset to `target`. Returns the bytes written."""
+    _validate_github_release_url(url)
     request = urllib.request.Request(
-        url, headers={"User-Agent": "camfrog_auto/{0}".format(APP_VERSION)})
+        url, headers={"User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
     written = 0
-    with urllib.request.urlopen(request, timeout=timeout) as response, \
-            open(target, "wb") as handle:
-        while True:
-            block = response.read(1 << 16)
-            if not block:
-                break
-            handle.write(block)
-            written += len(block)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        _validate_github_response_url(response, url)
+        with open(target, "wb") as handle:
+            while True:
+                block = response.read(1 << 16)
+                if not block:
+                    break
+                handle.write(block)
+                written += len(block)
     return written
 
 
 def verify_against_sums(sums_url, asset_name, local_path, timeout=30.0):
-    """True when local_path matches the release's SHA256SUMS entry."""
+    """True when local_path matches the GitHub release's SHA256SUMS entry."""
+    _validate_github_release_url(sums_url)
     request = urllib.request.Request(
         sums_url, headers={"User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
     with urllib.request.urlopen(request, timeout=timeout) as response:
+        _validate_github_response_url(response, sums_url)
         text = response.read().decode("utf-8", "replace")
     want = ""
     for line in text.splitlines():
@@ -4374,8 +4729,7 @@ def verify_against_sums(sums_url, asset_name, local_path, timeout=30.0):
         if len(parts) != 2:
             continue
         name = parts[1].lstrip("*")
-        # release sums may be flat ("room-control.exe") or dist-relative
-        # ("room-control/room-control.exe"); match either, first hit wins.
+        # Release sums may be flat or dist-relative; match either, first hit wins.
         if name == asset_name or name.endswith("/" + asset_name):
             want = parts[0].lower()
             break
@@ -4391,6 +4745,17 @@ def stage_and_swap_update(url, asset_name, sums_url=None):
     """
     if not getattr(sys, "frozen", False):
         return False, "self-update only applies to the packaged executable."
+    if not sums_url:
+        return False, "release checksum is unavailable; update refused."
+    if not isinstance(asset_name, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,123}\.exe",
+            asset_name, flags=re.IGNORECASE):
+        return False, "invalid update asset name."
+    try:
+        _validate_github_release_url(url)
+        _validate_github_release_url(sums_url)
+    except ValueError as exc:
+        return False, str(exc)
     exe = Path(sys.executable).resolve()
     staged = exe.parent / (asset_name + ".new")
     try:
@@ -4414,6 +4779,6 @@ def stage_and_swap_update(url, asset_name, sums_url=None):
     if os.name == "nt":  # CREATE_NO_WINDOW: no console flash during the swap
         spawn["creationflags"] = 0x08000000
     subprocess.Popen(command, close_fds=True, **spawn)
-    return True, "update downloaded; the app will restart itself with {0}.".format(asset_name)
+    return True, "update is staged; it will replace {0} after the app exits.".format(asset_name)
 
 

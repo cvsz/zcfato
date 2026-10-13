@@ -128,6 +128,33 @@ def test_parse_web_log_partial_head_is_ignored():
     assert ca.parse_web_log([{"type": "Text", "name": "tail of old msg"}]) == []
 
 
+def test_parse_web_dom_rows_current_camfrog_im_shape():
+    rows = [
+        {"class_name": "msg-user animated-message", "children": [
+            {"class_name": "bubble-arrow", "text": ""},
+            {"class_name": "nickname-field", "text": "zdevz"},
+            {"class_name": "msg-time", "text": "10/11/2026 08:24"},
+            {"class_name": "msgid", "text": "hello\nSeaza"},
+        ]},
+        {"class_name": "msg-user animated-message", "children": [
+            {"class_name": "nickname-field", "text": "Seaza"},
+            {"class_name": "msg-time", "text": "10/11/2026 08:25"},
+            {"class_name": "msgid", "text": "Thanks"},
+        ]},
+        {"class_name": "separator-new-text", "children": [
+            {"class_name": "nickname-field", "text": "zdevz"},
+            {"class_name": "msgid", "text": "not a message row"},
+        ]},
+        {"class_name": "msg-user animated-message", "children": [
+            {"class_name": "nickname-field", "text": ""},
+            {"class_name": "msgid", "text": "missing sender"},
+        ]},
+    ]
+
+    assert ca.parse_web_dom_rows(rows) == ["zdevz: hello Seaza", "Seaza: Thanks"]
+    assert ca.parse_web_dom_rows(rows, tail=1) == ["Seaza: Thanks"]
+
+
 def real_room_rows():
     host = lambda top, h, left=489, w=582: row("AtlAxWinLic140", "Pane", left=left, top=top, w=w, h=h, parent="CSplitterCtrlsTS")
     ie = lambda nm, top, h, left=489, w=582: row("Internet Explorer_Server", "Pane", name=nm, left=left, top=top, w=w, h=h, parent="Shell DocObject View")

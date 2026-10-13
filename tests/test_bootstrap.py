@@ -1,4 +1,4 @@
-"""Bootstrap startup tests: run with python3 -m unittest discover -s tests -v."""
+"""Bootstrap startup tests: run with python3 -m unittest discover -s tests -p test_bootstrap.py -v."""
 
 import json
 from pathlib import Path

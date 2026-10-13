@@ -7,19 +7,41 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+- `make validate-template` no longer discovers every test module with `unittest` (which imported pytest-only files and missed pytest function tests); it now runs only the standalone bootstrap unit tests after the repository/link validator.
+- GitHub administration now requires an explicit owner/repository, branch, and required status-check names before mutation or verification; dry-run works without `gh` authentication, branch paths are URL-encoded, and no stale repository/check defaults are embedded.
+- Windows process-tree shutdown now resolves `taskkill.exe` from the Windows system directory instead of the current directory or `PATH`.
+- `full-build.bat` now fails closed when checking Git cleanliness and detects dirty status through a redirected status file, so release artifacts cannot be marked clean because of a broken `FOR /F` parse.
+- IM auto-reply workers now use a per-app Windows mutex, preserve an incoming message for retry when submission fails, scroll a confirmed local echo into the chat viewport, and label it as local-only evidence rather than recipient delivery confirmation.
+- IM Activity Log now records filtered messages and unmatched reply rules; status output includes IM replies.
+- IM Auto-reply now has a live Activity Log tab for GUI actions, worker events, and command failure details; changing the configured log file takes effect immediately after Save.
+- Worker PID records now include process creation time; stale or reused PID entries no longer identify or terminate an unrelated Python process.
+- Fixed a worker-start logging path that referenced undefined mutex identity variables and could crash before the worker loop.
+
+### Changed
+- IM auto-reply now waits 0.5–1.0 seconds before sending by default, while retaining the configured global and per-sender rate limits.
+- CI pins checkout, setup-python, and artifact-upload actions to verified immutable commits, runs the template validator, builds the Camfrog and LINE apps together, and uploads only the LINE executable alongside the Camfrog artifacts.
+
 ### Added
+- Added `status-changer.exe` with separate Random and Marquee tabs plus a combined Activity Log; it reuses existing mode-specific pool databases when found while retaining the legacy standalone executables.
+- Web Status now has a clickable **TH / EN** control that switches interface labels, common status messages, live-send confirmations, and Activity Log event labels between Thai and English.
 - Web Status now has an Activity Log tab and a rotating `web_status.log` containing allowlisted activity only; it never records status text or session cookies.
 - Web Status failure log entries now include bounded error details such as HTTP status, retry timing, response shape, and server error text, with status text and session secrets redacted.
-- Web Status can scroll each populated status slot in 0.5-second frames. **Infinity Loop** starts at slot 1 again after the last populated slot; turn it off to stop after one pass.
+- Web Status rotation-start and live-update-failure log entries now include the selected mode, active delay, loop count, timeout, and populated-slot count; they exclude status text and session secrets.
+- Web Status keeps a configurable loop-round count for normal status rotation; `0` keeps looping until stopped.
 
 ### Fixed
-- Web Status now accepts the non-empty status response used by Camfrog's profile form, so live marquee updates do not stop after the first frame.
-- Web Status input fields now handle Ctrl+V and Shift+Insert through the Windows text clipboard, with a right-click Paste menu as a fallback.
-- Marquee **Loop** now repeats its frame list until the configured status interval, then advances to the next status.
+- Web Status accepts the non-empty status response used by Camfrog's profile form, so live rotation continues after each acknowledged update.
+- Web Status input fields now handle Ctrl+A, Ctrl+C, Ctrl+V, and Shift+Insert across keyboard layouts, with a right-click Paste menu as a fallback.
+- Web Status no longer includes Marquee or per-frame scrolling controls.
+- Live Web Status waits at least 10 seconds between status updates and retries rate limits or transient profile-page errors up to five times with bounded backoff.
+- Live rate-limit handling now honors valid `Retry-After` values from response headers or JSON, including HTTP-date values. A wait longer than 24 hours stops automation instead of retrying early.
+- Stopping Web Status now cancels queued retries and prevents a profile-page read from advancing to a status POST; an already-started POST may still finish.
+- Web Status now uses a brighter ivory and champagne theme with navy text for clearer contrast.
 - The feature build now removes a stale root-level `dist/web-status.exe` from standalone PyInstaller builds before checking the expected executable set.
 
 ### Changed
-- Web Status **Switch every** now defaults to 8 seconds and accepts intervals down to 0.5 seconds; the network timeout defaults to 2 seconds.
+- Web Status **Switch every** now defaults to 10 seconds; Live mode enforces a 10-second minimum. The configurable network timeout now defaults to 15 seconds (minimum 2 seconds).
 
 ## [2.19.2] - 2026-10-11
 

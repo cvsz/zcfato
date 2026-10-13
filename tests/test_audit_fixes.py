@@ -32,6 +32,16 @@ def _iso(tmp_path, monkeypatch):
     c.LANG = "en"
 
 
+def test_full_build_source_clean_marker_fails_closed_and_checks_status_file():
+    batch = (ROOT / "full-build.bat").read_text(encoding="utf-8")
+
+    assert 'set "BUILD_SOURCE_CLEAN=false"' in batch
+    assert 'git status --porcelain --untracked-files=normal > "%BUILD_STATUS_FILE%" 2>nul' in batch
+    assert "if errorlevel 1 goto :build_source_status_done" in batch
+    assert 'for %%A in ("%BUILD_STATUS_FILE%") do if %%~zA EQU 0 set "BUILD_SOURCE_CLEAN=true"' in batch
+    assert "for /f \"delims=\" %%i in ('git status --porcelain" not in batch
+
+
 def test_history_keeps_newcomer_when_full(tmp_path):
     h = c.StatusHistory(tmp_path / "h.json", 5)
     for i in range(5):
@@ -139,12 +149,82 @@ def test_commit_sends_when_focus_stable(monkeypatch):
 
 def test_pid_reuse_guard(monkeypatch):
     monkeypatch.setattr(c.os, "name", "nt")
+    monkeypatch.setattr(c, "pid_creation_time", lambda _pid: 123456)
     assert c.pid_is_ours(1, r"C:\Windows\explorer.exe") is False
-    assert c.pid_is_ours(1, r"C:\x\camfrog-auto.exe") is True
+    monkeypatch.setattr(c.sys, "executable", r"C:\x\camfrog-auto.exe")
+    assert c.pid_is_ours(1, r"C:\x\camfrog-auto.exe", 123456) is True
     monkeypatch.setattr(c.sys, "executable", "room-control.exe")
-    assert c.pid_is_ours(1, "room-control.exe") is True
-    assert c.pid_is_ours(1, r"C:\Python313\pythonw.exe") is True
+    assert c.pid_is_ours(1, "room-control.exe", 123456) is True
+    monkeypatch.setattr(c.sys, "executable", r"C:\venv\Scripts\python.exe")
+    monkeypatch.setattr(c.sys, "_base_executable", r"C:\Python313\python.exe",
+                        raising=False)
+    assert c.pid_is_ours(1, r"C:\venv\Scripts\pythonw.exe", 123456) is True
+    assert c.pid_is_ours(1, r"C:\Python313\pythonw.exe", 123456) is True
+    assert c.pid_is_ours(1, r"C:\Python312\pythonw.exe", 123456) is False
+    assert c.pid_is_ours(1, r"C:\venv\Scripts\python.exe", 654321) is False
+    assert c.pid_is_ours(1, r"C:\venv\Scripts\python.exe") is False
     assert c.pid_is_ours(1, "") is False       # unknown -> fail closed
+
+
+def test_running_pid_rejects_legacy_and_reused_pid_files(monkeypatch, tmp_path):
+    cfg = {"safety": {"pid_file": "worker.pid"}}
+    pidfile = tmp_path / "worker.pid"
+    pidfile.write_text('{"pid":4242,"creation_time":100}', encoding="utf-8")
+    monkeypatch.setattr(c, "BASE", tmp_path)
+    monkeypatch.setattr(c.os, "name", "nt")
+    monkeypatch.setattr(c.sys, "executable", r"C:\venv\Scripts\python.exe")
+    monkeypatch.setattr(c, "pid_alive", lambda _pid: True)
+    monkeypatch.setattr(c, "pid_image", lambda _pid: r"C:\venv\Scripts\python.exe")
+    monkeypatch.setattr(c, "pid_creation_time", lambda _pid: 200)
+    assert c.running_pid(cfg) is None  # same interpreter path, different process lifetime
+
+    pidfile.write_text("4242", encoding="ascii")
+    assert c.read_pid(cfg) == 4242
+    assert c.running_pid(cfg) is None  # legacy records do not authorize a kill
+
+    pidfile.write_text('{"pid":4242,"creation_time":200}', encoding="utf-8")
+    assert c.running_pid(cfg) == 4242
+
+
+class _ApiFunction:
+    def __init__(self, result):
+        self.result = result
+        self.argtypes = None
+        self.restype = None
+        self.calls = []
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        if callable(self.result):
+            return self.result(*args)
+        return self.result
+
+
+def test_pid_alive_uses_pointer_sized_windows_handles(monkeypatch):
+    import ctypes
+    from ctypes import wintypes
+
+    handle = 0x1234567887654321
+    process_api = type("FakeKernel32", (), {})()
+    process_api.OpenProcess = _ApiFunction(handle)
+
+    def get_exit_code(actual_handle, code_pointer):
+        assert actual_handle == handle
+        ctypes.cast(code_pointer, ctypes.POINTER(wintypes.DWORD)).contents.value = 259
+        return 1
+
+    process_api.GetExitCodeProcess = _ApiFunction(get_exit_code)
+    process_api.GetProcessTimes = _ApiFunction(1)
+    process_api.QueryFullProcessImageNameW = _ApiFunction(1)
+    process_api.CloseHandle = _ApiFunction(1)
+    monkeypatch.setattr(c.os, "name", "nt")
+    monkeypatch.setattr(c.ctypes, "WinDLL", lambda *args, **kwargs: process_api,
+                        raising=False)
+
+    assert c.pid_alive(4242) is True
+    assert process_api.OpenProcess.restype is wintypes.HANDLE
+    assert process_api.GetExitCodeProcess.calls[0][0] == handle
+    assert process_api.CloseHandle.calls == [(handle,)]
 
 
 def test_stop_does_not_force_kill_when_process_identity_changes(cfg, monkeypatch, tmp_path):

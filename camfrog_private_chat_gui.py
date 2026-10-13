@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import camfrog_auto as ca
+from clipboard_support import ClipboardController
 
 
 CONFIG_PATH = ca.BASE / "private-chat-config.json"
@@ -77,27 +78,28 @@ class PrivateChatManager:
         self.config = load_private_config(self.config_path)
         self.windows = []
         self.root = self.tk.Tk()
+        self.root.configure(background="#f4f1e8")
         style = self.ttk.Style(self.root)
         try:
             style.theme_use("clam")
         except self.tk.TclError:
             pass
-        style.configure("TFrame", background="#edf2f5")
-        style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
-        style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
-        style.configure("TRadiobutton", background="#edf2f5", foreground="#233548")
-        style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
-        style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
+        style.configure("TFrame", background="#f4f1e8")
+        style.configure("TLabel", background="#f4f1e8", foreground="#283648", font=("Segoe UI", 9))
+        style.configure("TCheckbutton", background="#f4f1e8", foreground="#283648")
+        style.configure("TRadiobutton", background="#f4f1e8", foreground="#283648")
+        style.configure("TLabelframe", background="#f4f1e8", bordercolor="#d5c8ac")
+        style.configure("TLabelframe.Label", background="#f4f1e8", foreground="#8b672b",
                         font=("Segoe UI", 9, "bold"))
         style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
-                        background="#d9e8f0", foreground="#1a3a52")
-        style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
+                        background="#ebe5d9", foreground="#283648")
+        style.map("TButton", background=[("active", "#d6e9e8"), ("pressed", "#d5c8ac")])
         style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
-                        foreground="#152b3a")
-        style.configure("TNotebook", background="#edf2f5")
+                        foreground="#283648")
+        style.configure("TNotebook", background="#f4f1e8")
         style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
-        style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
-                  foreground=[("selected", "#096c7b")])
+        style.map("TNotebook.Tab", background=[("selected", "#fffdfa")],
+                  foreground=[("selected", "#8b672b")])
         self.root.title("Camfrog Private Chat")
         self.root.geometry("460x360")
         self.root.minsize(360, 280)
@@ -120,7 +122,10 @@ class PrivateChatManager:
 
         list_frame = self.ttk.Frame(self.root, padding=(12, 0, 12, 8))
         list_frame.pack(fill="both", expand=True)
-        self.listbox = self.tk.Listbox(list_frame, exportselection=False)
+        self.listbox = self.tk.Listbox(
+            list_frame, exportselection=False, background="#fffdfa", foreground="#283648",
+            selectbackground="#8b672b", selectforeground="#fffdfa",
+            highlightbackground="#d5c8ac", highlightcolor="#8b672b")
         self.listbox.pack(side="left", fill="both", expand=True)
         scrollbar = self.ttk.Scrollbar(list_frame, orient="vertical", command=self.listbox.yview)
         scrollbar.pack(side="right", fill="y")
@@ -136,6 +141,8 @@ class PrivateChatManager:
             side="right", padx=5)
         self.status = self.tk.StringVar(value=f"Private settings: {self.config_path}")
         self.ttk.Label(self.root, textvariable=self.status, anchor="w", padding=(12, 0, 12, 10)).pack(fill="x")
+        self.clipboard_controller = ClipboardController(self.root)
+        self.clipboard_controller.install(self.root)
         self.root.after(200, self.refresh)
 
     def save_filters(self, refresh_after=True, silent=False):

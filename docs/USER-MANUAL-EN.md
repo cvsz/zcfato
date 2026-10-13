@@ -2,18 +2,18 @@
 
 Thai version: `USER-MANUAL-TH.md`.
 
-Six apps, one manual.
+Eight executables, one manual.
 
-Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-autoreply`, `music-dj`, `web-status`. All are Windows-only and need Camfrog open, except `web-status` which works through the website.
+Apps: `room-control`, `chat-im-private`, `status-changer`, `status-random`, `status-marquee`, `im-autoreply`, `music-dj`, `web-status`. All are Windows-only and need Camfrog open, except `web-status` which works through the website.
 
 **Updates.** Every app checks the project's GitHub release when it starts (a banner appears only when something newer exists) and each has a **Check for updates** button; the CLI equivalent is `<app> update`. An update downloads only that app's own file, verifies it against the release's `SHA256SUMS.txt`, and installs it the next time you close the app (`<app>.new` + `camfrog-update.cmd` do the swap). No account, no token, nothing is uploaded. Releases are published with `python tools/release.py`.
 
 ## 1. Install
 
-1. Install 64-bit Python 3.12 or 3.13.
+1. Install standard CPython 3.12 64-bit.
 2. Run `doctor.bat` first. It checks your Python, flags bad setups, and tests the `pywin32` download.
 3. Double-click `build.bat` (or `full-build.bat` for everything including the LINE app). Executables land in `dist\<app>\`.
-4. If the build says `pywin32 ... no matching distribution`, your Python has no wheel: install 64-bit Python 3.13, delete `.venv`, rerun.
+4. If the build says `pywin32 ... no matching distribution`, install CPython 3.12 64-bit, delete `.venv`, and rerun.
 
 ## 2. First run
 
@@ -36,6 +36,9 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 - **Mandatory friend allowlist** (`only_nicknames`): only listed nicknames are ever answered.
 - Stricter limits by default (one reply per friend per hour, 3 per day, 10 per hour). Every reply starts with `[auto] `, and such lines are never answered.
 - Windows already open when the bot starts are never answered.
+- After a live reply, IM Auto-reply looks for the outgoing line in that private chat's local history and scrolls it into the chat viewport. This is local UI evidence only; Camfrog exposes no recipient-delivery acknowledgement here. A send that fails before submission stays pending for the next polling pass; an ambiguous send is not repeated automatically to avoid duplicates. Set `safety.restore_previous_window` to `false` if you want the Camfrog chat window left in front.
+- The **Activity Log** tab follows the configured app log. It records application open/close, config saves/reloads, Start/Stop and helper results, worker lifecycle, IM filters, unmatched rules, previews, replies, and failures with available error details. It refreshes while the GUI is open. The **Log chat text** setting in Advanced controls whether message contents appear in worker entries; turn it off to keep message text out of the log. Each app keeps its own log file and worker.
+- Only one worker can run for this app's data folder. The Activity Log records when an incoming message has no matching reply rule or is filtered.
 
 ## 5. Chat IM Private
 
@@ -43,26 +46,22 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 - **Window title filter** (regex) + **Max windows** limit the list; **Save filters** stores them in this app's own config.
 - **Discover controls** dumps the control tree to `controls.txt` for selector setup.
 
-## 6. Status Random
+## 6. Status Changer: Random, Marquee, and Activity Log
 
-- Ten message slots. The active status is picked from these entries.
-- **Switch every** (seconds, minimum 0.3): how long each status stays before switching. Saved to `status.interval_seconds`.
-- **Start** rotates immediately (first status goes out at once), **Stop** ends rotation. Pools live in `random-data\`, separate from Marquee.
+- `status-changer.exe` puts Random and Marquee in separate tabs with separate ten-slot pools. It reuses existing mode pool databases when it finds their data folders. The legacy `status-random.exe` and `status-marquee.exe` remain available for compatibility.
+- **Random:** each switch picks a status from its ten slots. **Switch every** is in seconds and has a minimum of 0.3 seconds.
+- **Marquee:** **Step** sets seconds per frame and the delay between whole-line slots when Scroll is off (minimum 0.3); **Stride** sets character clusters per frame, and **Scroll** turns frame scrolling on or off. Marquee follows the populated slots in order; History source cannot reorder them. With scrolling on, each populated slot completes its frames before the next slot starts. **Loop slots** restarts at slot 1 after the last populated slot; with it off, the sequence stops after the last slot. Thai vowel/tone clusters stay together. **Switch every** applies to Random only.
+- **Start** applies the selected mode immediately; only one status worker can run at a time. The window shows which mode is active. **Stop** ends that worker.
+- **Activity Log** combines GUI actions with both worker logs. GUI events omit status text; worker logs may include the status that Camfrog received. Use **Open log folder** to inspect the files.
 
-## 7. Status Marquee
+## 7. Status history, schedules, language
 
-- Long statuses scroll across a window of `width` characters: **Step** (seconds per frame, min 0.3), **Stride** (clusters per frame), **Loop** (repeat the ticker until `status.interval_seconds`, then move to the next status). With **Scroll** off (default), each pool line is applied whole, one per tick, rotating 1..N and wrapping. Text that fits within `width` stays static.
-- Every frame is a real status change on Camfrog, so keep frames slow and few. Start with dry-run.
-- Thai-safe: never splits vowel/tone clusters, never emits a blank frame.
-
-## 8. Status history, schedules, language
-
-- Every status you set is saved to history; with `use_as_source` the next status is picked from it (`rotate`/`random`/`most_used`).
+- Every status you set is saved to history; in Random mode, `use_as_source` picks the next status from it (`rotate`/`random`/`most_used`).
 - `status.schedules` uses different pools by time of day; entries need `start`/`end` as `HH:MM`.
 - `status.language_cycle: ["th","en"]` alternates Thai/English on each change. Status items can be `{th, en}` pairs.
 - `"language": "auto"` follows the Windows UI language.
 
-## 9. Music DJ
+## 8. Music DJ
 
 - A room bot that also plays music: it answers song requests from chat and announces what is playing. It needs Camfrog open and `autoreply` enabled (the DJ reuses the chat plumbing); set `dj.enabled`.
 - Chat commands, prefix `!` by default: `!request <song>` (or `!req`, `!song`), `!queue`, `!current` (or `!np`), `!skip`, `!help`. The queue view in the app mirrors the file, with **Skip current** / **Clear queue** owner buttons.
@@ -71,15 +70,16 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 - **Audio backend** `chat` (default) only announces in the chat. `local` additionally plays audio files that Windows MCI can open on this PC and starts the next song automatically when playback finishes — for the room to hear it, route this PC's output into Camfrog's input with a virtual cable or "Stereo Mix". Playback support depends on Windows MCI extension mappings and installed codecs. Set the sound output back to your speakers afterwards if you no longer want the room to hear it.
 - Start with dry-run: the bot then only logs the announcements it would send. Requests still queue, and nothing is typed into the room.
 
-## 10. Web Status (prototype)
+## 9. Web Status (prototype)
 
 Status: login flow mapped; the status-update endpoint was captured from a logged-in `profiles.camfrog.com/home.php` session (POST `{status, csrf}` to `/ajax/update_status.php`) and stays gated. CLI live sends need `--confirm-update`; GUI live Start asks for confirmation.
 
 - No args opens the GUI; any args use the CLI (`web-status.exe --login Seaza --status "..."`). Dry-run is default — no network at all.
-- In Setup, enter up to ten statuses in the numbered single-line fields. **Save to webtext.db** saves each slot beside the app; **Start** also saves the current values and rotates through non-empty slots. **Switch every** defaults to 8 seconds and accepts values down to 0.5; **Timeout** defaults to 2 seconds.
-- GUI input fields support **Ctrl+V** and **Shift+Insert**; right-click an editable field and choose **Paste** if needed.
-- Turn on **Marquee** to scroll each status one frame every 0.5 seconds, then move to the next populated slot. **Infinity Loop** is on by default; after the last populated slot it starts again at slot 1. Turn it off to stop after one pass. With Marquee off, **Switch every** controls the slot rotation interval.
-- **Activity Log** shows and appends activity events to `web_status.log` beside the app. Failed operations include bounded diagnostics such as the HTTP status, retry delay, response shape, or server error message. Status text, passwords, cookies, CSRF values, and sensitive response headers are redacted.
+- Web Status opens in Thai. Click **TH / EN** at the top of the window to switch interface labels, common status messages, live-send confirmations, and Activity Log event labels between Thai and English. Technical diagnostic details remain in English. New log entries use the selected language; existing entries change language in the GUI when you switch.
+- In Setup, enter up to ten statuses in the numbered single-line fields. **Save to webtext.db** saves each slot beside the app; **Start** also saves the current values and rotates through non-empty slots. **Switch every** defaults to 10 seconds. Live mode enforces a 10-second minimum; smaller values remain available for dry-run previews. **Timeout** defaults to 15 seconds, accepts 2–120 seconds, and can be adjusted for the connection.
+- GUI input fields support **Ctrl+A** (select all), **Ctrl+C** (copy), **Ctrl+V** (paste), and **Shift+Insert**; right-click an editable field and choose **Paste** if needed.
+- Web Status sends each populated slot as one complete status; it has no Marquee or per-frame scrolling mode. **Loop rounds** counts complete passes through the populated slots: `0` loops indefinitely and `1` stops after one pass.
+- **Activity Log** shows and appends activity events to `web_status.log` beside the app. Rotation-start, retry, and live-update-failure entries include the mode, configured and effective delay, loop count, timeout, and populated-slot count. Rate limits honor a valid server `Retry-After` value in seconds or HTTP-date form; waits above 24 hours stop automation instead of retrying early. Without a server wait value, rate-limit retries use 30/60/120-second backoff, up to five attempts. Transient profile-page errors also retry up to five times with bounded backoff. A POST timeout is not retried because the server may already have accepted it. Pressing **Stop** cancels pending retries and prevents a profile-page GET from advancing to the status POST; a POST already in progress may finish, but no further update is scheduled. Status text, passwords, cookies, CSRF values, and sensitive response headers are redacted.
 - In **Account & Session**, press **Open login page**, sign in in your browser, then copy `PHPSESSID=...` from the `profiles.camfrog.com/home.php` request in DevTools and paste it into the session field. Press **Login** to verify the current cookie; a signed-in result arms automation. The cookie stays in memory only.
 - With **Send live** enabled, **Start** verifies the current cookie if Login has not already armed the session, asks for confirmation, and begins rotation. **Stop** cancels the loop and disarms the session, so the next Start verifies again. Dry-run remains the default.
 - CLI password login can be blocked by CAPTCHA; the tool does not bypass it. For CLI use, `--probe` is read-only and `--cookies-file` accepts a Netscape cookie export. Never paste passwords or cookie values into chat, issues, or files.
@@ -94,11 +94,11 @@ Status: login flow mapped; the status-update endpoint was captured from a logged
 
 | Symptom | Fix |
 |---|---|
-| `pywin32 ... no matching distribution` | 64-bit Python 3.13, delete `.venv`, rerun `build.bat`. |
+| `pywin32 ... no matching distribution` | Install CPython 3.12 64-bit, delete `.venv`, rerun `build.bat`. |
 | Auto-detect finds nothing | Open a chat room (not tray-minimized) and retry; then Discover controls. |
 | Old `requirements.txt (line 1)` pywinauto-only error | You run an older copy — extract the newest zip into a new empty folder. |
 | Status never sends (status apps) | Enable **Send statuses live to Camfrog**; dry-run is default. |
-| Error sound on every status change | Try **combo Enter (test)**; verify with Apply Now before marquee use. |
+| Error sound on every status change | Try **combo Enter (test)** in dry-run mode first. Review the activity log before enabling live status changes. |
 | Wrong/old window driven | Fix **Window title regex**, re-run Auto-detect. |
 | Explorer shows old icon after rebuild | Windows icon cache: rename/move the exe or restart Explorer. |
 

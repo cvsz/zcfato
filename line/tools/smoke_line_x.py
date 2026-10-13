@@ -11,6 +11,23 @@ import win32gui
 from pywinauto import Desktop, mouse
 
 
+def system_taskkill_path():
+    """Return taskkill.exe from Windows' system directory, never from PATH/cwd."""
+    if os.name != "nt":
+        return "taskkill.exe"
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_system_directory = kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = (ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint)
+    get_system_directory.restype = ctypes.c_uint
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_system_directory(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return os.path.join(buffer.value, "taskkill.exe")
+
+
 PROJECT = Path(__file__).resolve().parents[1]
 EXE = PROJECT / "dist" / "line-status-changer.exe"
 CONFIG = Path(tempfile.gettempdir()) / f"line-x-smoke-{os.getpid()}.json"
@@ -93,7 +110,7 @@ def main():
                 # terminate the process tree so a failed test cannot strand
                 # the GUI worker in the tray.
                 subprocess.run(
-                    ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                    [system_taskkill_path(), "/PID", str(process.pid), "/T", "/F"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     check=False,
                 )
@@ -101,7 +118,7 @@ def main():
                     process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     subprocess.run(
-                        ["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
+                        [system_taskkill_path(), "/PID", str(process.pid), "/T", "/F"],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                         check=False,
                     )

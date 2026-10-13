@@ -18,11 +18,11 @@ Missing keys use built-in defaults. This reference covers the source CLI configu
 | `safety.stop_file` | `STOP` | Create this file to stop (cleared on next start) |
 | `safety.pid_file` | `camfrog_auto.pid` | PID file for background mode / single instance |
 | `safety.require_foreground` | `true` | Refuse to press Enter unless Camfrog is foreground |
-| `safety.restore_previous_window` | `true` | After sending, return focus to the window you were using |
+| `safety.restore_previous_window` | `true` | After sending, return focus to the window you were using. Set `false` to leave Camfrog's chat window in front; IM auto-reply scrolls its local reply echo into the chat viewport either way |
 | `safety.max_consecutive_failures` | `5` | Stop after N failed ticks in a row (backoff + re-attach) |
 | `status.enabled` | `true` | Rotate status |
 | `status.edit` / `apply_button` | selectors / `null` | UIA selectors from `discover`; `apply_button` is invoked instead of Enter |
-| `status.background_enter_target` | `edit` | Experimental `combo`: when `safety.require_foreground` is `false`, post Enter to the verified `CComboBoxTS` parent instead of its Edit child. May avoid a Windows error sound, but **not confirmed to save status**. No fallback if the parent is missing. Test with Apply Now, confirm the status in Camfrog, and set back to `edit` if it fails. No effect when an apply button is configured or foreground mode is on. |
+| `status.background_enter_target` | `edit` | When Camfrog is not foreground, the status worker automatically posts Enter to the verified `CComboBoxTS` parent; `combo` forces this background path even while Camfrog is foreground. The Edit text is read back before submission. Camfrog must stay running in the same signed-in Windows session; a closed Camfrog process cannot be updated. |
 | `status.interval_seconds` | `600` | Minimum 0.3 |
 | `status.retry_seconds` | `30` | Wait after a failed send before retrying (1–3600) |
 | `status.set_on_start` | `true` | Set first status immediately |

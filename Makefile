@@ -7,7 +7,7 @@ help:
 
 validate-template:
 	python3 scripts/validate_repo.py
-	python3 -m unittest discover -s tests -v
+	python3 -m unittest discover -s tests -p 'test_bootstrap.py' -v
 
 setup format lint test build security:
 	@echo 'This is a template placeholder: implement this target for your actual project; do not treat it as a passing check.' >&2

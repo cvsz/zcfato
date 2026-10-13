@@ -14,8 +14,9 @@
 
 6. Run project-specific formatting, linting, type checks, tests, build, and security checks before opening a pull request.
 
-Windows-only tests (tkinter GUI, DPAPI, Chrome store) skip on Linux; run them
-on the Windows host instead (default `192.168.1.85`, SSH auth required):
+Windows-only tests (tkinter GUI, DPAPI, Chrome store) skip on Linux. To run them
+over SSH, configure the Windows target explicitly (`CAMFROG_WINDOWS_HOST`,
+`CAMFROG_WINDOWS_USER`, and `CAMFROG_WINDOWS_DIR`; SSH authentication required):
 
    ```bash
    python3 tools/run_remote_tests.py tests/test_web_status_gui.py -v
@@ -40,8 +41,10 @@ Before merge, capture exact-head evidence for the checks that apply to the chang
 For repository administration changes, use the read-back verifier:
 
 ```bash
-python3 scripts/github_admin.py --repo OWNER/REPO --verify
+python3 scripts/github_admin.py --repo OWNER/REPOSITORY --branch DEFAULT_BRANCH --required-check "EXACT_CHECK_NAME" --verify
 ```
+
+Pass `--branch DEFAULT_BRANCH` and one `--required-check "EXACT_CHECK_NAME"` per actual status-check context. The helper requires these explicit target values before it can verify GitHub state.
 
 ## Documentation
 

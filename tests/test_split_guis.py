@@ -7,6 +7,7 @@ import copy
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,6 +22,7 @@ MODULES = {
     "camfrog_music_gui": ("music", None),
     "status_random_gui": ("status", "random"),
     "status_marquee_gui": ("status", "marquee"),
+    "status_changer_gui": ("status", "both"),
     "chat_im_private_gui": (None, None),
     "web_status_gui": (None, None),
 }
@@ -28,6 +30,142 @@ MODULES = {
 
 def load(name):
     return __import__(name)
+
+
+@pytest.mark.parametrize("name", ["camfrog_auto", "im_autoreply_gui"])
+def test_im_reply_requires_new_outgoing_echo(name, monkeypatch):
+    mod = load(name)
+    previous = ["zdevz: hello", "Seaza: [auto] old reply"]
+    snapshots = iter([
+        "zdevz: hello\nSeaza: [auto] old reply\nSeaza: [auto] hello zdevz",
+    ])
+    monkeypatch.setattr(mod, "read_chat", lambda *_args: next(snapshots))
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    assert mod.confirm_im_reply_echo(
+        object(), previous, "Seaza", "[auto] hello zdevz", timeout=0.1)
+
+
+@pytest.mark.parametrize("name", ["camfrog_auto", "im_autoreply_gui"])
+def test_im_reply_does_not_confirm_old_echo(name, monkeypatch):
+    mod = load(name)
+    previous = ["zdevz: hello", "Seaza: [auto] hello zdevz"]
+    monkeypatch.setattr(
+        mod, "read_chat", lambda *_args: "\n".join(previous))
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    assert not mod.confirm_im_reply_echo(
+        object(), previous, "Seaza", "[auto] hello zdevz", timeout=0.01)
+
+
+@pytest.mark.parametrize("name", ["camfrog_auto", "im_autoreply_gui"])
+def test_im_worker_mutex_blocks_duplicate_instance(name, tmp_path, monkeypatch):
+    mod = load(name)
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    monkeypatch.setattr(mod, "acquire_run_mutex", lambda: False)
+    monkeypatch.setattr(mod, "running_pid", lambda _cfg: None)
+    monkeypatch.setattr(mod, "Runner", lambda *_args: pytest.fail(
+        "duplicate worker must not start"))
+
+    assert mod.run_guarded({}, None) == 3
+
+
+def test_im_state_counts_im_replies(tmp_path, monkeypatch, capsys):
+    mod = load("im_autoreply_gui")
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    stats = copy.deepcopy(mod.DEFAULTS.get("stats", {}))
+    stats["file"] = "stats.json"
+    config = copy.deepcopy(mod.DEFAULTS)
+    config["stats"] = stats
+    (tmp_path / "stats.json").write_text(
+        json.dumps({"replies": 0, "im_replies": 1}), encoding="utf-8")
+
+    assert mod.cmd_state(config) == 1
+    assert "replies 1" in capsys.readouterr().out
+
+
+def test_im_activity_log_uses_app_log_path_and_redacts_credentials(tmp_path, monkeypatch):
+    mod = load("im_autoreply_gui")
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    cfg = copy.deepcopy(mod.DEFAULTS)
+    cfg["log"]["file"] = "im-autoreply.log"
+
+    assert mod.activity_log_path(cfg) == tmp_path / "im-autoreply.log"
+    detail = mod.activity_detail(
+        'PHPSESSID=abc123 Cookie: session=private Authorization: Bearer abc.def token="xyz"')
+    assert "abc123" not in detail
+    assert "private" not in detail
+    assert "abc.def" not in detail
+    assert "xyz" not in detail
+    assert "[REDACTED]" in detail
+
+    cfg["log"]["file"] = ""
+    assert mod.activity_log_path(cfg) is None
+
+
+@pytest.mark.parametrize("name", ["camfrog_auto", "im_autoreply_gui"])
+def test_start_reports_success_only_after_worker_pid_is_registered(
+        name, tmp_path, monkeypatch, capsys):
+    mod = load(name)
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    monkeypatch.setattr(mod.os, "name", "nt")
+    monkeypatch.setattr(mod, "child_cmd", lambda _args: ["pythonw.exe", "entry.py"])
+    monkeypatch.setattr(mod, "child_env", lambda: {})
+    states = iter([None, None, 123])
+    monkeypatch.setattr(mod, "running_pid", lambda _cfg: next(states))
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    class Child:
+        pid = 123
+        returncode = None
+
+        @staticmethod
+        def poll():
+            return None
+
+    child = Child()
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *_args, **_kwargs: child)
+    config = copy.deepcopy(mod.DEFAULTS)
+    config["log"]["file"] = "worker.log"
+
+    assert mod.cmd_start(config, SimpleNamespace(config=None, lang=None)) == 0
+    assert "started in background (PID 123)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("name", ["camfrog_auto", "im_autoreply_gui"])
+def test_duplicate_start_terminates_unregistered_child(name, tmp_path, monkeypatch, capsys):
+    mod = load(name)
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    monkeypatch.setattr(mod.os, "name", "nt")
+    monkeypatch.setattr(mod, "child_cmd", lambda _args: ["pythonw.exe", "entry.py"])
+    monkeypatch.setattr(mod, "child_env", lambda: {})
+    states = iter([None, 999])
+    monkeypatch.setattr(mod, "running_pid", lambda _cfg: next(states))
+    monkeypatch.setattr(mod.time, "sleep", lambda _seconds: None)
+
+    class Child:
+        pid = 123
+        returncode = None
+        terminated = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        @staticmethod
+        def wait(timeout):
+            return 0
+
+    child = Child()
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda *_args, **_kwargs: child)
+    config = copy.deepcopy(mod.DEFAULTS)
+    config["log"]["file"] = "worker.log"
+
+    assert mod.cmd_start(config, SimpleNamespace(config=None, lang=None)) == 1
+    assert child.terminated
+    assert "already running (PID 999)" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("name", sorted(MODULES))
@@ -50,10 +188,304 @@ def test_profiles_and_modes_are_pinned():
     assert load("camfrog_music_gui").APP_PROFILE == "music"
     assert load("status_random_gui").STATUS_MODE == "random"
     assert load("status_marquee_gui").STATUS_MODE == "marquee"
+    assert load("status_changer_gui").STATUS_MODE == "both"
     assert load("status_random_gui").runtime_config(
         load("status_random_gui").DEFAULTS)["status"]["random"] is True
     assert load("status_marquee_gui").runtime_config(
         load("status_marquee_gui").DEFAULTS)["status"]["marquee"]["enabled"] is True
+    combined = load("status_changer_gui")
+    assert combined.runtime_config(combined.DEFAULTS, "random")["status"]["random"] is True
+    assert combined.runtime_config(combined.DEFAULTS, "marquee")["status"]["marquee"]["enabled"] is True
+
+
+def test_combined_status_workflows_keep_marquee_edits_separate_from_random():
+    mod = load("status_changer_gui")
+    config = copy.deepcopy(mod.DEFAULTS)
+    original_marquee = copy.deepcopy(config["status"]["marquee"])
+
+    mod.configure_status_mode(
+        config, "random", ["random status"], 60,
+        marquee_options={"step": "unfinished", "stride": "unfinished"},
+    )
+
+    assert config["status"]["interval_seconds"] == 60
+    assert config["status"]["messages"] == ["random status"]
+    assert config["status"]["random"] is True
+    assert config["status"]["marquee"] == original_marquee
+
+
+def test_combined_status_configs_migrate_to_independent_mode_files(tmp_path):
+    mod = load("status_changer_gui")
+    source_path = tmp_path / "camfrog-status-config.json"
+    source = copy.deepcopy(mod.DEFAULTS)
+    source["dry_run"] = False
+    source["status"]["messages"] = ["legacy status"]
+    mod.write_config(source_path, source)
+    (tmp_path / mod.MODE_SETTINGS_FILE).write_text(
+        '{"random": 47, "marquee": 0.5}', encoding="utf-8")
+
+    paths = mod.initialize_status_mode_configs(source_path)
+
+    assert paths["random"].name == "random-config.json"
+    assert paths["marquee"].name == "marquee-config.json"
+    random_config = mod.load_cfg(paths["random"])
+    marquee_config = mod.load_cfg(paths["marquee"])
+    assert random_config["dry_run"] is marquee_config["dry_run"] is False
+    assert random_config["status"]["interval_seconds"] == 47
+    assert marquee_config["status"]["messages"] == ["legacy status"]
+    assert source_path.is_file()  # migration preserves the old file
+
+    random_config["dry_run"] = True
+    mod.write_config(paths["random"], random_config)
+    assert mod.load_cfg(paths["marquee"])["dry_run"] is False
+
+
+def test_new_combined_status_app_creates_only_private_mode_configs(tmp_path):
+    mod = load("status_changer_gui")
+    source_path = tmp_path / "camfrog-status-config.json"
+
+    paths = mod.initialize_status_mode_configs(source_path)
+
+    assert paths["random"].is_file()
+    assert paths["marquee"].is_file()
+    assert not source_path.exists()
+    assert not (tmp_path / mod.MODE_SETTINGS_FILE).exists()
+
+
+def test_combined_status_config_migration_keeps_shared_interval_when_legacy_file_is_absent(
+        tmp_path):
+    mod = load("status_changer_gui")
+    source_path = tmp_path / "camfrog-status-config.json"
+    source = copy.deepcopy(mod.DEFAULTS)
+    source["status"]["interval_seconds"] = 42
+    mod.write_config(source_path, source)
+
+    paths = mod.initialize_status_mode_configs(source_path)
+
+    assert mod.load_cfg(paths["random"])["status"]["interval_seconds"] == 42
+    assert paths["random"] != paths["marquee"]
+    assert not (tmp_path / mod.MODE_SETTINGS_FILE).exists()
+
+
+def test_combined_status_config_migration_keeps_each_legacy_app_settings(tmp_path, monkeypatch):
+    mod = load("status_changer_gui")
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    random_legacy = tmp_path / "random-data" / "camfrog-status-config.json"
+    marquee_legacy = tmp_path / "marquee-data" / "camfrog-status-config.json"
+    random_config = copy.deepcopy(mod.DEFAULTS)
+    random_config["status"]["messages"] = ["random-only"]
+    random_config["status"]["interval_seconds"] = 36
+    marquee_config = copy.deepcopy(mod.DEFAULTS)
+    marquee_config["status"]["messages"] = ["marquee-only"]
+    marquee_config["status"]["marquee"]["step_seconds"] = 0.7
+    shared = copy.deepcopy(mod.DEFAULTS)
+    shared["window_title_regex"] = ".*Camfrog.*"
+    shared["status"]["messages"] = ["old-shared-status"]
+    shared["status"]["interval_seconds"] = 48
+    mod.write_config(random_legacy, random_config)
+    mod.write_config(marquee_legacy, marquee_config)
+    source_path = tmp_path / "status-data" / "camfrog-status-config.json"
+    mod.write_config(source_path, shared)
+
+    paths = mod.initialize_status_mode_configs(source_path)
+
+    assert mod.load_cfg(paths["random"])["status"]["messages"] == ["random-only"]
+    assert mod.load_cfg(paths["random"])["status"]["interval_seconds"] == 36
+    migrated_marquee = mod.load_cfg(paths["marquee"])
+    assert migrated_marquee["status"]["messages"] == ["marquee-only"]
+    assert migrated_marquee["status"]["marquee"]["step_seconds"] == 0.7
+    assert mod.load_cfg(paths["random"])["window_title_regex"] == ".*Camfrog.*"
+
+
+def test_combined_status_copies_legacy_pools_into_private_databases(tmp_path, monkeypatch):
+    mod = load("status_changer_gui")
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    data_dir = tmp_path / "status-data"
+    monkeypatch.setattr(mod, "DATA_DIR", data_dir)
+    legacy_path = tmp_path / "random-data" / "random.db"
+    source_values = ["legacy slot 1", "legacy slot 2"] + [""] * 8
+    mod.write_status_pool(legacy_path, source_values)
+
+    paths = mod.migrate_status_pools()
+
+    assert paths["random"] == data_dir / "random.db"
+    assert paths["random"] != legacy_path
+    assert mod.read_status_pool(paths["random"]) == source_values
+    updated_values = ["combined app edit"] + [""] * 9
+    mod.write_status_pool(paths["random"], updated_values)
+    assert mod.read_status_pool(legacy_path) == source_values
+
+
+def test_combined_status_marquee_workflow_applies_its_own_controls():
+    mod = load("status_changer_gui")
+    config = copy.deepcopy(mod.DEFAULTS)
+
+    mod.configure_status_mode(
+        config, "marquee", ["scrolling status"], 30,
+        marquee_options={"step": "0.5", "stride": "3", "infinite_loop": True,
+                         "scroll": True},
+    )
+
+    assert config["status"]["random"] is False
+    assert config["status"]["interval_seconds"] == 30
+    assert config["status"]["messages"] == ["scrolling status"]
+    assert config["status"]["marquee"]["enabled"] is True
+    assert config["status"]["marquee"]["step_seconds"] == 0.5
+    assert config["status"]["marquee"]["stride"] == 3
+    assert config["status"]["marquee"]["infinite_loop"] is True
+    assert config["status"]["marquee"]["scroll"] is True
+
+
+@pytest.mark.parametrize("name", ["status_changer_gui", "status_marquee_gui"])
+def test_legacy_marquee_loop_setting_repeats_slot_one_after_slot_ten(name):
+    """The old Loop value must now loop status slots, not spin on one message."""
+    mod = load(name)
+    config = copy.deepcopy(mod.DEFAULTS)
+    config["dry_run"] = True
+    status = config["status"]
+    status.update(
+        enabled=True,
+        random=False,
+        messages=[f"SLOT {index:02d}" for index in range(1, 11)],
+        interval_seconds=600,
+        set_on_start=True,
+    )
+    status["history"]["enabled"] = False
+    status["marquee"].update(
+        enabled=True,
+        scroll=True,
+        width=28,
+        loop_slots=False,
+        infinite_loop=True,
+    )
+
+    runner = mod.Runner(config)
+    runner.status_edit, runner.apply_btn, runner.win = object(), None, object()
+    sent = []
+    runner.send = lambda _ctrl, text, btn=None, win=None: sent.append(text) or True
+    for now in range(11):
+        runner.do_status(float(now))
+
+    assert runner.cfg["status"]["marquee"]["loop_slots"] is True
+    assert runner.cfg["status"]["marquee"]["infinite_loop"] is False
+    assert sent == [f"SLOT {index:02d}" for index in range(1, 11)] + ["SLOT 01"]
+    assert runner.status_i == 1
+
+    runtime = mod.runtime_config(config, "marquee") if name == "status_changer_gui" \
+        else mod.runtime_config(config)
+    assert runtime["status"]["marquee"]["loop_slots"] is True
+    assert runtime["status"]["marquee"]["infinite_loop"] is False
+
+
+def test_combined_control_discovery_uses_bounded_background_process(tmp_path, monkeypatch):
+    mod = load("status_changer_gui")
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    monkeypatch.setattr(mod, "LANG", "en")
+    pythonw = tmp_path / "pythonw.exe"
+    console_python = tmp_path / "python.exe"
+    pythonw.touch()
+    console_python.touch()
+    command = [str(pythonw), "status_changer_gui.py", "--worker"]
+    monkeypatch.setattr(mod, "worker_cmd", lambda _args: list(command))
+    calls = {}
+
+    def run(child_command, **kwargs):
+        calls["command"] = child_command
+        calls["kwargs"] = kwargs
+        return type("Completed", (), {"returncode": 0})()
+
+    monkeypatch.setattr(mod.subprocess, "run", run)
+
+    result = mod.run_control_discovery(tmp_path / "camfrog-status-config.json", timeout=12)
+
+    assert result == 0
+    assert calls["command"][-2:] == ["detect", "--apply"]
+    assert calls["command"][0] == str(console_python)  # hidden console child can report errors
+    assert calls["kwargs"]["timeout"] == 12
+    assert calls["kwargs"]["stdout"] == mod.subprocess.DEVNULL
+
+
+def test_combined_control_discovery_reports_timeout(tmp_path, monkeypatch):
+    mod = load("status_changer_gui")
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    monkeypatch.setattr(mod, "LANG", "en")
+    monkeypatch.setattr(mod, "worker_cmd", lambda _args: ["pythonw.exe", "status_changer_gui.py"])
+    calls = {}
+
+    def time_out(command, **kwargs):
+        calls["command"] = command
+        raise mod.subprocess.TimeoutExpired(command, kwargs["timeout"])
+
+    monkeypatch.setattr(mod.subprocess, "run", time_out)
+
+    with pytest.raises(RuntimeError, match="timed out after 3 seconds"):
+        mod.run_control_discovery(
+            tmp_path / "camfrog-status-config.json", apply=False, timeout=3)
+    assert calls["command"][-1] == "detect"
+
+
+def test_status_window_discovery_uses_win32_candidates_and_attaches_uia_per_handle(monkeypatch):
+    mod = load("status_changer_gui")
+
+    class Window:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def class_name(self):
+            return "#32770"
+
+        def window_text(self):
+            return "Camfrog window"
+
+    windows = [Window(1), Window(2)]
+    backends = []
+    checked = []
+
+    class Desktop:
+        def __init__(self, backend):
+            backends.append(backend)
+
+        def windows(self, **kwargs):
+            assert kwargs == {"title_re": ".*Camfrog.*", "visible_only": False}
+            return windows
+
+        def window(self, handle):
+            return type("Spec", (), {"wrapper_object": lambda _self: Window(handle)})()
+
+    def find(window, _selector):
+        checked.append(window.handle)
+        if window.handle == 1:
+            raise LookupError("status selector not in this window")
+        return object()
+
+    monkeypatch.setattr(mod, "find", find)
+    config = {"window_title_regex": ".*Camfrog.*", "status": {"edit": {"auto_id": "1001"}}}
+
+    selected = mod.get_status_window(config, Desktop)
+
+    assert selected.handle == 2
+    assert backends == ["win32", "uia"]
+    assert checked == [1, 2]
+
+
+def test_status_detect_does_not_scan_room_or_im_windows(monkeypatch, tmp_path, capsys):
+    mod = load("status_changer_gui")
+    monkeypatch.setattr(mod, "APP_PROFILE", "status")
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    monkeypatch.setattr(mod, "get_window", lambda _config: object())
+    monkeypatch.setattr(mod, "describe_controls", lambda _window: [{"class_name": "Edit"}])
+    monkeypatch.setattr(mod, "process_windows", lambda _window: pytest.fail(
+        "status discovery must not walk chat windows"))
+    monkeypatch.setattr(mod, "detect_camfrog", lambda _rows: {
+        "status.edit": ({"class_name": "Edit", "index": 0}, "status field"),
+        "autoreply.input": ({"class_name": "RichEdit", "index": 0}, "chat input"),
+    })
+    monkeypatch.setattr(mod, "write_detect_report", lambda _rows, _path: None)
+
+    assert mod.cmd_detect(copy.deepcopy(mod.DEFAULTS), apply=False) == 0
+    output = capsys.readouterr().out
+    assert "status.edit" in output
+    assert "autoreply.input" not in output
 
 
 def test_room_and_im_profiles_disable_other_features():
@@ -79,6 +511,34 @@ def test_music_profile_disables_status_and_im():
     assert out["autoreply"]["enabled"] is True
 
 
+@pytest.mark.parametrize("name", ["im_autoreply_gui", "room_control_gui", "camfrog_music_gui"])
+def test_feature_engines_parse_current_camfrog_dom_rows(name):
+    mod = load(name)
+    rows = [{"class_name": "msg-user animated-message", "children": [
+        {"class_name": "nickname-field", "text": "FriendA"},
+        {"class_name": "msg-time", "text": "10/11/2026 08:24"},
+        {"class_name": "msgid", "text": "hello\nthere"},
+    ]}]
+
+    assert mod.parse_web_dom_rows(rows) == ["FriendA: hello there"]
+
+
+@pytest.mark.parametrize("name", ["camfrog_auto", "im_autoreply_gui", "room_control_gui", "camfrog_music_gui"])
+def test_web_chat_reader_prefers_dom_when_uia_has_no_hyperlinks(name, monkeypatch):
+    mod = load(name)
+    rows = [{"class_name": "msg-user animated-message", "children": [
+        {"class_name": "nickname-field", "text": "zdevz"},
+        {"class_name": "msg-time", "text": "10/11/2026 08:24"},
+        {"class_name": "msgid", "text": "hello"},
+    ]}]
+    monkeypatch.setattr(mod, "is_web", lambda _ctrl: True)
+    monkeypatch.setattr(mod, "web_dom_rows", lambda _ctrl: rows)
+    monkeypatch.setattr(mod, "web_items", lambda *_args, **_kwargs: pytest.fail(
+        "the DOM parser should handle current Camfrog UIA trees without Hyperlink controls"))
+
+    assert mod.read_chat(object()) == "zdevz: hello"
+
+
 @pytest.mark.parametrize("name,cmd", [
     ("room_control_gui", "check"),
     ("im_autoreply_gui", "check"),
@@ -90,7 +550,7 @@ def test_cli_passthrough_validates_example_config(name, cmd, capsys):
     assert "config OK" in capsys.readouterr().out
 
 
-@pytest.mark.parametrize("name", ["status_random_gui", "status_marquee_gui"])
+@pytest.mark.parametrize("name", ["status_random_gui", "status_marquee_gui", "status_changer_gui"])
 def test_status_modules_carry_a_working_engine_cli(name, capsys):
     mod = load(name)
     assert mod.cli_main(["check", "--config", str(EXAMPLE)]) == 0
@@ -99,6 +559,147 @@ def test_status_modules_carry_a_working_engine_cli(name, capsys):
 
 def test_status_modules_reject_other_modes_commands(capsys):
     assert load("status_random_gui").cli_main(["marquee", "x"]) == 2
+
+
+@pytest.mark.parametrize("name", ["status_changer_gui", "status_marquee_gui"])
+def test_status_worker_observes_stop_during_failure_backoff(name, tmp_path, monkeypatch):
+    """A failed marquee tick must not make Stop wait through exponential backoff."""
+    mod = load(name)
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    config = copy.deepcopy(mod.DEFAULTS)
+    config["dry_run"] = True
+    config["status"].update(enabled=True, set_on_start=True)
+    config["safety"]["stop_file"] = "worker.stop"
+    config["safety"]["max_consecutive_failures"] = 5
+    runner = mod.Runner(config)
+    resolves = []
+    def resolve():
+        resolves.append("resolve")
+        runner.status_edit = object()
+    runner.resolve = resolve
+    runner.do_status = lambda _now: (_ for _ in ()).throw(RuntimeError("status failed"))
+    runner.im_summary = lambda: None
+    runner.write_stats = lambda *_args, **_kwargs: None
+
+    sleep_calls = []
+
+    def request_stop_during_wait(seconds):
+        sleep_calls.append(seconds)
+        runner.stop_file.write_text("stop", encoding="utf-8")
+
+    monkeypatch.setattr(mod.time, "sleep", request_stop_during_wait)
+
+    assert runner.run() == 0
+    assert resolves == ["resolve"]  # do not reattach/re-resolve after Stop
+    assert sleep_calls == [0.1]
+
+
+@pytest.mark.parametrize("worker_pid", [1234, None])
+def test_combined_status_stop_targets_worker_while_gui_busy(
+        tmp_path, monkeypatch, worker_pid):
+    from types import ModuleType
+
+    mod = load("status_changer_gui")
+    fake_tk = ModuleType("tkinter")
+    fake_tk.TclError = type("TclError", (Exception,), {})
+    fake_tk.__path__ = []
+    fake_messagebox = ModuleType("tkinter.messagebox")
+    fake_ttk = ModuleType("tkinter.ttk")
+    fake_tk.messagebox = fake_messagebox
+    fake_tk.ttk = fake_ttk
+    monkeypatch.setitem(sys.modules, "tkinter", fake_tk)
+    monkeypatch.setitem(sys.modules, "tkinter.messagebox", fake_messagebox)
+    monkeypatch.setitem(sys.modules, "tkinter.ttk", fake_ttk)
+    app_class = mod.build_app()
+    app = app_class.__new__(app_class)
+    app.busy = True
+    app.stop_in_progress = False
+    app.mode = "marquee"
+    app.config_path = tmp_path / "config.json"
+    app.note = SimpleNamespace(configure=lambda **_kwargs: None)
+    app._tr = lambda english, _thai: english
+    app._log_activity = lambda *_args, **_kwargs: None
+    stop_requests = []
+    app._start_stop_task = lambda runtime, *_args, **_kwargs: stop_requests.append(runtime) or True
+
+    config = copy.deepcopy(mod.DEFAULTS)
+    monkeypatch.setattr(mod, "load_cfg", lambda _path: config)
+    monkeypatch.setattr(mod, "runtime_config", lambda _config, mode: (mode,))
+    monkeypatch.setattr(mod, "running_pid", lambda _runtime: worker_pid)
+
+    app.set_worker_running("marquee", False)
+
+    assert stop_requests == ([("marquee",)] if worker_pid else [])
+    if worker_pid is None:
+        assert app.pending_stop_mode == "marquee"
+
+
+def test_scrolling_status_operation_honors_cancellation_between_frames(monkeypatch):
+    import status_changer_gui as mod
+
+    cfg = copy.deepcopy(mod.DEFAULTS)
+    cfg["dry_run"] = True
+    cfg["status"]["enabled"] = True
+    cfg["status"]["history"]["enabled"] = False
+    cfg["status"]["max_length"] = 120
+    cfg["status"]["marquee"].update(
+        enabled=True, scroll=True, width=10, stride=1, step_seconds=0.3,
+        cycles=1, max_frames=80)
+    monkeypatch.setattr(mod, "get_window", lambda _config: object())
+    monkeypatch.setattr(mod, "find", lambda _win, _spec: object())
+    monkeypatch.setattr(mod, "load_cfg", lambda _path: cfg)
+
+    cancel_event = mod.threading.Event()
+    sent_frames = []
+
+    def commit(_win, _ctrl, text, *_args, **_kwargs):
+        sent_frames.append(text)
+        cancel_event.set()
+        return True
+
+    monkeypatch.setattr(mod, "commit", commit)
+
+    with pytest.raises(mod.StatusOperationCancelled):
+        mod.apply_status_scrolling(
+            "dummy.json", "A long message that needs multiple scrolling frames",
+            cancel_event=cancel_event)
+
+    assert len(sent_frames) == 1
+
+
+def test_standalone_marquee_stop_is_not_discarded_while_gui_busy(tmp_path, monkeypatch):
+    from types import ModuleType
+
+    mod = load("status_marquee_gui")
+    fake_tk = ModuleType("tkinter")
+    fake_tk.TclError = type("TclError", (Exception,), {})
+    fake_tk.__path__ = []
+    fake_messagebox = ModuleType("tkinter.messagebox")
+    fake_ttk = ModuleType("tkinter.ttk")
+    fake_tk.messagebox = fake_messagebox
+    fake_tk.ttk = fake_ttk
+    monkeypatch.setitem(sys.modules, "tkinter", fake_tk)
+    monkeypatch.setitem(sys.modules, "tkinter.messagebox", fake_messagebox)
+    monkeypatch.setitem(sys.modules, "tkinter.ttk", fake_ttk)
+    app_class = mod.build_app()
+    app = app_class.__new__(app_class)
+    app.busy = True
+    app.stop_in_progress = False
+    app.mode = "marquee"
+    app.config_path = tmp_path / "config.json"
+    app.note = SimpleNamespace(configure=lambda **_kwargs: None)
+    app._tr = lambda english, _thai: english
+    stop_requests = []
+    app._start_stop_task = lambda runtime, *_args, **_kwargs: stop_requests.append(runtime) or True
+
+    config = copy.deepcopy(mod.DEFAULTS)
+    monkeypatch.setattr(mod, "load_cfg", lambda _path: config)
+    monkeypatch.setattr(mod, "runtime_config", lambda _config: ("marquee",))
+    monkeypatch.setattr(mod, "running_pid", lambda _runtime: 1234)
+
+    app.set_enabled("marquee", False)
+
+    assert stop_requests == [("marquee",)]
 
 
 def test_chat_im_private_engine_copy():
@@ -125,12 +726,164 @@ def test_entry_points_import_their_module():
             ("im_autoreply_entry", "im_autoreply_gui"),
             ("status_random_entry", "status_random_gui"),
             ("status_marquee_entry", "status_marquee_gui"),
+            ("status_changer_entry", "status_changer_gui"),
             ("chat_im_private_entry", "chat_im_private_gui"),
             ("music_dj_entry", "camfrog_music_gui"),
             ("web_status_entry", "web_status_gui")):
         mod = importlib.import_module(entry)
         assert importlib.import_module(module) is not None
         assert hasattr(mod, "main") or module is not None
+
+
+@pytest.mark.parametrize(("profile", "selected_override"), [
+    ("im_reply", "CAMFROG_APP_DATA_DIR"),
+    ("status", "ZCFATO_DATA_DIR"),
+])
+def test_engine_data_directory_override_is_profile_scoped(profile, selected_override, tmp_path):
+    import os
+    import subprocess
+
+    app_data = tmp_path / "app-data"
+    status_data = tmp_path / "status-data"
+    env = os.environ.copy()
+    env.update({
+        "CAMFROG_APP_PROFILE": profile,
+        "CAMFROG_APP_DATA_DIR": str(app_data),
+        "ZCFATO_DATA_DIR": str(status_data),
+    })
+    result = subprocess.run(
+        [sys.executable, "-c", "import camfrog_auto; print(camfrog_auto.BASE)"],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    expected = status_data if selected_override == "ZCFATO_DATA_DIR" else app_data
+    assert Path(result.stdout.strip()).resolve() == expected.resolve()
+
+
+def test_im_entry_clears_status_data_override(tmp_path):
+    import os
+    import subprocess
+
+    env = os.environ.copy()
+    env["ZCFATO_DATA_DIR"] = str(tmp_path / "status-data")
+    result = subprocess.run(
+        [sys.executable, "-c",
+         "import os, im_autoreply_entry; print('ZCFATO_DATA_DIR' in os.environ)"],
+        cwd=ROOT, env=env, capture_output=True, text=True, timeout=10,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False"
+
+
+def test_im_source_worker_dispatches_through_entrypoint():
+    import os
+    import subprocess
+
+    command = load("im_autoreply_gui").child_cmd(
+        SimpleNamespace(config=None, lang=None))
+    assert Path(command[1]).name == "im_autoreply_entry.py"
+    command[0] = sys.executable
+    result = subprocess.run(
+        command + ["not-a-real-command"],
+        capture_output=True, text=True, timeout=5, env=os.environ.copy(),
+    )
+
+    assert result.returncode == 2
+    assert "usage:" in result.stderr.lower()
+    assert "not-a-real-command" in result.stderr
+
+
+@pytest.mark.parametrize(("module", "entrypoint"), [
+    ("status_random_gui", "status_random_entry.py"),
+    ("status_marquee_gui", "status_marquee_entry.py"),
+    ("status_changer_gui", "status_changer_entry.py"),
+])
+def test_status_worker_command_dispatches_through_entrypoint(module, entrypoint):
+    """Source workers must use the same launcher that calls the GUI module's main()."""
+    import os
+    import subprocess
+    from types import SimpleNamespace
+
+    command = load(module).worker_cmd(SimpleNamespace(config=None, lang=None))
+    assert Path(command[1]).name == entrypoint
+    command[0] = sys.executable
+    result = subprocess.run(
+        command + ["not-a-real-command"],
+        capture_output=True, text=True, timeout=5, env=os.environ.copy(),
+    )
+
+    assert result.returncode == 2
+    assert "usage:" in result.stderr.lower()
+    assert "not-a-real-command" in result.stderr
+
+
+def test_combined_status_ctrl_x_cuts_selected_entry_text(monkeypatch):
+    import tkinter
+    from types import SimpleNamespace
+
+    mod = load("status_changer_gui")
+
+    class Menu:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def add_command(self, **_kwargs):
+            pass
+
+        def add_separator(self):
+            pass
+
+    class Entry:
+        def __init__(self):
+            self.value = "abcdef"
+            self.bindings = {}
+
+        def winfo_class(self):
+            return "TEntry"
+
+        def winfo_children(self):
+            return []
+
+        def bind(self, sequence, callback, add=None):
+            self.bindings[sequence] = callback
+
+        def cget(self, name):
+            assert name == "state"
+            return "normal"
+
+        def selection_present(self):
+            return True
+
+        def get(self):
+            return self.value
+
+        def index(self, name):
+            return {"sel.first": 1, "sel.last": 4}[name]
+
+        def delete(self, _start, _end):
+            self.value = self.value[:1] + self.value[4:]
+
+    class Root:
+        def __init__(self, entry):
+            self.entry = entry
+
+        def winfo_children(self):
+            return [self.entry]
+
+    monkeypatch.setattr(tkinter, "Menu", Menu)
+    copied = []
+    monkeypatch.setattr(mod, "set_clipboard_text", lambda _root, text: copied.append(text))
+    entry = Entry()
+    controller = mod.ClipboardController(Root(entry))
+    controller.install(controller.root)
+
+    result = entry.bindings["<Control-x>"](SimpleNamespace(widget=entry))
+
+    assert result == "break"
+    assert copied == ["bcd"]
+    assert entry.value == "aef"
 
 
 from conftest import has_display, tk_root  # noqa: E402
@@ -167,7 +920,11 @@ def test_im_gui_smoke(tmp_path, monkeypatch):
     monkeypatch.setattr(tkinter, "Tk", lambda: root)
     app = g.build_app()(tmp_path / "config.json")
     app.root.update()
-    assert len(app.nb.tabs()) == 4
+    tabs = app.nb.tabs()
+    assert len(tabs) == 5
+    assert any(app.nb.tab(tab, "text") in ("Activity Log", "บันทึกกิจกรรม")
+               for tab in tabs)
+    assert "Application opened" in app.log.get("1.0", "end")
     cfg, errs = app.collect()
     assert not errs
     assert hasattr(app, "im_tree") and not hasattr(app, "tree")
@@ -232,7 +989,7 @@ def test_marquee_runner_scrolls_frames_and_rotates_lines(monkeypatch):
     assert r.stats.get("statuses", 0) >= 2
 
 
-def test_marquee_infinite_loop_repeats_frames_until_status_interval(monkeypatch):
+def test_marquee_slot_loop_advances_after_finishing_scroll_frames(monkeypatch):
     import status_marquee_gui as m
 
     cfg = copy.deepcopy(m.DEFAULTS)
@@ -243,7 +1000,7 @@ def test_marquee_infinite_loop_repeats_frames_until_status_interval(monkeypatch)
     cfg["status"]["history"]["enabled"] = False
     cfg["status"]["marquee"].update(
         enabled=True, scroll=True, width=10, stride=2, step_seconds=0.5,
-        cycles=1, max_frames=5, infinite_loop=True)
+        cycles=1, max_frames=5, loop_slots=True, infinite_loop=False)
     assert m.validate(cfg)[0] == []
 
     r = m.Runner(cfg)
@@ -259,10 +1016,332 @@ def test_marquee_infinite_loop_repeats_frames_until_status_interval(monkeypatch)
         r.do_status(instant)
 
     assert len(sent) == 7
-    assert sent[0] == sent[5]
-    assert sent[6] != sent[0]
+    assert sent[5] == "AAA status that is long enough"
+    assert sent[6].startswith("BBB")
     assert r.status_i == 1
     assert r.marq is not None
+
+
+@pytest.mark.parametrize("name", ["status_changer_gui", "status_marquee_gui"])
+def test_marquee_without_scroll_uses_frame_delay_not_legacy_interval(name, monkeypatch):
+    """Static Marquee slots must advance on Frame even if old config says 600s."""
+    mod = load(name)
+    cfg = copy.deepcopy(mod.DEFAULTS)
+    cfg["dry_run"] = True
+    cfg["status"].update(
+        enabled=True, random=False,
+        messages=["SLOT 01", "SLOT 02", "SLOT 03"],
+        interval_seconds=600, set_on_start=True,
+    )
+    cfg["status"]["history"]["enabled"] = False
+    cfg["status"]["marquee"].update(
+        enabled=True, scroll=False, loop_slots=True, infinite_loop=False,
+        step_seconds=0.5,
+    )
+    runner = mod.Runner(cfg)
+    runner.status_edit, runner.apply_btn, runner.win = object(), None, object()
+    sent = []
+    runner.send = lambda _ctrl, text, btn=None: sent.append(text) or True
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+
+    for instant in (0.0, 0.49, 0.5, 1.0, 1.49, 1.5):
+        clock[0] = instant
+        runner.do_status(instant)
+
+    assert sent == ["SLOT 01", "SLOT 02", "SLOT 03", "SLOT 01"]
+    assert runner.status_i == 1
+
+
+@pytest.mark.parametrize("name", ["status_changer_gui", "status_marquee_gui"])
+def test_camfrog_status_edit_replaces_text_through_accessible_value(name):
+    """Read back the custom Edit through UIA even when native window_text is empty."""
+    mod = load(name)
+    wanted = "slot 2 ไทย {ready}"
+
+    class Edit:
+        value = "slot 1"
+
+        @property
+        def iface_value(self):
+            return self
+
+        @property
+        def CurrentValue(self):
+            return self.value
+
+        def set_edit_text(self, value):
+            self.value = value
+
+        def window_text(self):
+            return ""  # Camfrog's native Edit HWND does not expose WM_GETTEXT.
+
+    edit = Edit()
+    assert mod.write_text(edit, wanted)
+    assert edit.value == wanted
+
+
+@pytest.mark.parametrize("name", ["status_changer_gui", "status_marquee_gui"])
+def test_foreground_status_commit_writes_frame_before_enter(name, monkeypatch):
+    """Focus the Camfrog window, replace the frame, then submit without Ctrl+A."""
+    mod = load(name)
+    events = []
+    win = SimpleNamespace(handle=77)
+    ctrl = SimpleNamespace(
+        handle=88,
+        set_focus=lambda: events.append(("focus", 88)),
+        type_keys=lambda keys: events.append(("keys", keys)),
+    )
+    user32 = SimpleNamespace(
+        GetForegroundWindow=lambda: win.handle,
+    )
+    monkeypatch.setattr(mod.ctypes, "windll", SimpleNamespace(user32=user32), raising=False)
+    monkeypatch.setattr(mod, "is_web", lambda _ctrl: False)
+    monkeypatch.setattr(mod, "foreground_ok", lambda _win: True)
+    monkeypatch.setattr(
+        mod, "write_text",
+        lambda _ctrl, text: events.append(("write", text)) or True,
+    )
+
+    assert mod.commit(win, ctrl, "slot 2", False, require_fg=True)
+    assert events == [("focus", 88), ("write", "slot 2"),
+                      ("keys", "{ENTER}")]
+
+
+@pytest.mark.parametrize("name", ["status_changer_gui", "status_marquee_gui"])
+def test_combo_enter_option_uses_background_target_even_when_foreground_is_required(
+        name, monkeypatch):
+    """The explicit combo test option must bypass the normal foreground Enter path."""
+    mod = load(name)
+    events = []
+    win = SimpleNamespace(handle=77)
+    ctrl = SimpleNamespace(
+        handle=88,
+        set_focus=lambda: events.append(("focus", 88)),
+        type_keys=lambda keys: events.append(("keys", keys)),
+    )
+    user32 = SimpleNamespace(
+        GetForegroundWindow=lambda: 55,
+        IsWindow=lambda hwnd: True,
+        SetForegroundWindow=lambda hwnd: events.append(("restore", hwnd)),
+    )
+    monkeypatch.setattr(mod.ctypes, "windll", SimpleNamespace(user32=user32), raising=False)
+    monkeypatch.setattr(mod, "is_web", lambda _ctrl: False)
+    monkeypatch.setattr(
+        mod, "write_text",
+        lambda _ctrl, text: events.append(("write", text)) or True,
+    )
+    monkeypatch.setattr(
+        mod, "_background_enter",
+        lambda target_ctrl, target: events.append(("background_enter", target_ctrl, target)),
+    )
+
+    assert mod.commit(
+        win, ctrl, "slot 2", False, require_fg=True, restore=True,
+        background_enter_target="combo")
+    assert events == [("write", "slot 2"), ("background_enter", ctrl, "combo")]
+
+
+@pytest.mark.parametrize(
+    "name", ["status_changer_gui", "status_marquee_gui", "status_random_gui"])
+def test_status_update_uses_combo_when_camfrog_is_not_foreground(name, monkeypatch):
+    """Background status changes never activate Camfrog or steal current focus."""
+    mod = load(name)
+    events = []
+    win = SimpleNamespace(handle=77)
+    ctrl = SimpleNamespace(
+        handle=88,
+        set_focus=lambda: events.append(("focus", 88)),
+        type_keys=lambda keys: events.append(("keys", keys)),
+    )
+    user32 = SimpleNamespace(
+        GetForegroundWindow=lambda: 55,
+        IsWindow=lambda _hwnd: True,
+        SetForegroundWindow=lambda hwnd: events.append(("restore", hwnd)),
+    )
+    monkeypatch.setattr(mod.ctypes, "windll", SimpleNamespace(user32=user32), raising=False)
+    monkeypatch.setattr(mod, "is_web", lambda _ctrl: False)
+    monkeypatch.setattr(mod, "foreground_ok", lambda _win: pytest.fail(
+        "background status updates must not focus Camfrog"))
+    monkeypatch.setattr(
+        mod, "write_text", lambda _ctrl, text: events.append(("write", text)) or True)
+    monkeypatch.setattr(
+        mod, "_background_enter",
+        lambda target_ctrl, target: events.append(("background_enter", target_ctrl, target)))
+
+    assert mod.commit(
+        win, ctrl, "slot 2", False, require_fg=True, restore=True,
+        background_enter_target="edit", background_if_not_foreground=True)
+    assert events == [("write", "slot 2"), ("background_enter", ctrl, "combo")]
+
+
+@pytest.mark.parametrize(
+    "name", ["status_changer_gui", "status_marquee_gui", "status_random_gui"])
+def test_non_status_commit_keeps_foreground_requirement(name, monkeypatch):
+    """Chat and IM controls must not use the status-only background fallback."""
+    mod = load(name)
+    events = []
+    win = SimpleNamespace(handle=77)
+    ctrl = SimpleNamespace(set_focus=lambda: events.append("focus"))
+    user32 = SimpleNamespace(GetForegroundWindow=lambda: 55)
+    monkeypatch.setattr(mod.ctypes, "windll", SimpleNamespace(user32=user32), raising=False)
+    monkeypatch.setattr(mod, "is_web", lambda _ctrl: False)
+    monkeypatch.setattr(mod, "foreground_ok", lambda _win: False)
+    monkeypatch.setattr(mod, "write_text", lambda *_args: events.append("write") or True)
+
+    assert not mod.commit(win, ctrl, "reply", False, require_fg=True)
+    assert events == []
+
+
+def test_status_window_discovery_includes_hidden_windows(monkeypatch):
+    mod = load("status_changer_gui")
+    native = SimpleNamespace(
+        handle=77,
+        class_name=lambda: "#32770",
+        window_text=lambda: "Camfrog Video Chat",
+    )
+    calls = []
+
+    class NativeDesktop:
+        def windows(self, **kwargs):
+            calls.append(kwargs)
+            return [native]
+
+    class UiaWindow:
+        def wrapper_object(self):
+            return self
+
+    class UiaDesktop:
+        def window(self, **_kwargs):
+            return UiaWindow()
+
+    def desktop_factory(**kwargs):
+        return NativeDesktop() if kwargs["backend"] == "win32" else UiaDesktop()
+
+    monkeypatch.setattr(mod, "find", lambda _window, _selector: object())
+    cfg = {"window_title_regex": ".*Camfrog.*", "status": {"edit": {"class_name": "Edit"}}}
+    assert isinstance(mod.get_status_window(cfg, desktop_factory), UiaWindow)
+    assert calls == [{"title_re": ".*Camfrog.*", "visible_only": False}]
+
+
+@pytest.mark.parametrize("name", ["status_changer_gui", "status_marquee_gui"])
+def test_marquee_submits_frames_only_after_configured_step(name, monkeypatch):
+    mod = load(name)
+    cfg = copy.deepcopy(mod.DEFAULTS)
+    cfg["dry_run"] = True
+    cfg["status"].update(enabled=True, random=False,
+                         messages=["A marquee message long enough for several frames"],
+                         set_on_start=True)
+    cfg["status"]["history"]["enabled"] = False
+    cfg["status"]["marquee"].update(
+        enabled=True, scroll=True, width=8, stride=2, step_seconds=0.5,
+        cycles=1, max_frames=5, loop_slots=False, infinite_loop=False)
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    runner = mod.Runner(cfg)
+    runner.status_edit, runner.apply_btn, runner.win = object(), None, object()
+    sent_at = []
+    runner.send = lambda _ctrl, _text, btn=None: sent_at.append(clock[0]) or True
+
+    for instant in (0.0, 0.25, 0.49, 0.5, 0.75, 0.99, 1.0):
+        clock[0] = instant
+        runner.do_status(instant)
+
+    assert sent_at == [0.0, 0.5, 1.0]
+
+
+@pytest.mark.parametrize("name", ["status_changer_gui", "status_marquee_gui"])
+@pytest.mark.parametrize("scroll", [False, True])
+@pytest.mark.parametrize("loop_slots", [False, True])
+def test_marquee_uses_each_slot_once_then_wraps_only_when_loop_is_enabled(
+        name, scroll, loop_slots, monkeypatch, tmp_path, caplog):
+    """Marquee sends slots 1..10 in order, then returns to 1 only with Loop."""
+    mod = load(name)
+    monkeypatch.setattr(mod, "BASE", tmp_path)
+    cfg = copy.deepcopy(mod.DEFAULTS)
+    cfg["dry_run"] = True
+    messages = [f"SLOT {index:02d} -- " + ("abcdefghijklmno" * 2)
+                for index in range(1, 11)]
+    cfg["status"].update(enabled=True, random=False, messages=messages,
+                         interval_seconds=600, set_on_start=True,
+                         language_cycle=["en", "th"])
+    cfg["status"]["history"].update(
+        enabled=True, use_as_source=True, seed_from_messages=False)
+    cfg["status"]["marquee"].update(
+        enabled=True, scroll=scroll, width=8, stride=2, step_seconds=0.5,
+        cycles=1, max_frames=3, loop_slots=loop_slots, infinite_loop=False)
+    caplog.set_level("INFO")
+    runner = mod.Runner(cfg)
+    runner.hist.pick = lambda *_args, **_kwargs: "HISTORY OVERRIDE"
+    runner.status_edit, runner.apply_btn, runner.win = object(), None, object()
+    runner.send = lambda _ctrl, _text, btn=None: True
+
+    clock = [0.0]
+    monkeypatch.setattr(mod.time, "monotonic", lambda: clock[0])
+    completed = []
+    previous_count = 0
+    expected = messages + messages[:1] if loop_slots else messages
+    for tick in range(1501):
+        now = tick * 0.1
+        clock[0] = now
+        runner.do_status(now)
+        count = runner.stats["statuses"]
+        if count > previous_count:
+            completed.append(runner.current_text)
+            previous_count = count
+            if loop_slots and len(completed) == len(expected):
+                break
+
+    assert completed[:len(expected)] == expected
+    assert completed == expected
+    assert "1/10" in caplog.text
+    if loop_slots:
+        assert runner.status_i == 1  # 11 completed, so slot 2 is next
+    else:
+        assert runner.status_i == 10
+
+
+@pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
+def test_combined_status_changer_marquee_has_no_every_and_matches_web_status_theme(
+        tmp_path, monkeypatch):
+    import tkinter
+    import status_changer_gui as app_module
+    import web_status_gui
+
+    monkeypatch.setattr(app_module, "BASE", tmp_path)
+    monkeypatch.setattr(app_module, "DATA_DIR", tmp_path / "status-data")
+    cfg_path = tmp_path / "camfrog-status-config.json"
+    app_module.write_config(cfg_path, copy.deepcopy(app_module.DEFAULTS))
+    root = tk_root()
+    root.deiconify()
+    monkeypatch.setattr(tkinter, "Tk", lambda: root)
+    app = app_module.build_app()(cfg_path)
+    root.update()
+
+    def labels_under(widget):
+        labels = []
+        for child in widget.winfo_children():
+            try:
+                labels.append(str(child.cget("text")))
+            except (tkinter.TclError, TypeError):
+                pass
+            labels.extend(labels_under(child))
+        return labels
+
+    app.tabs.select(app.pages["marquee"])
+    root.update()
+    marquee_labels = labels_under(app.pages["marquee"])
+    assert not any(label in ("Every", "เปลี่ยนทุก") for label in marquee_labels)
+    assert any(label in ("Frame", "จังหวะ") for label in marquee_labels)
+    assert set(app.intervals) == {"random"}
+
+    app.tabs.select(app.pages["random"])
+    root.update()
+    assert any(label in ("Every", "เปลี่ยนทุก")
+               for label in labels_under(app.pages["random"]))
+    assert app_module.STATUS_CHANGER_THEME == web_status_gui.WEB_STATUS_THEME
+    assert root.cget("background") == web_status_gui.WEB_STATUS_THEME["background"]
+    root.withdraw()
 
 
 def test_apply_sends_frames_immediately_when_scroll_on(monkeypatch):
@@ -278,7 +1357,7 @@ def test_apply_sends_frames_immediately_when_scroll_on(monkeypatch):
     monkeypatch.setattr(m, "get_window", lambda config: object())
     monkeypatch.setattr(m, "find", lambda win, spec: object())
     seen, sleeps = [], []
-    monkeypatch.setattr(m, "commit", lambda *a: seen.append(a[2]) or True)
+    monkeypatch.setattr(m, "commit", lambda *a, **_kwargs: seen.append(a[2]) or True)
     monkeypatch.setattr(m.time, "sleep", lambda s: sleeps.append(s))
     monkeypatch.setattr(m, "load_cfg", lambda path: cfg)
     assert m.apply_status_scrolling("dummy.json", "status message that scrolls on") == 0
@@ -298,7 +1377,7 @@ def test_apply_falls_back_to_single_shot_when_scroll_off(monkeypatch):
     monkeypatch.setattr(m, "get_window", lambda config: object())
     monkeypatch.setattr(m, "find", lambda win, spec: object())
     seen = []
-    monkeypatch.setattr(m, "commit", lambda *a: seen.append(a[2]) or True)
+    monkeypatch.setattr(m, "commit", lambda *a, **_kwargs: seen.append(a[2]) or True)
     monkeypatch.setattr(m, "load_cfg", lambda path: cfg)
     assert m.apply_status_scrolling("dummy.json", "hello") == 0
     assert seen == ["hello"]

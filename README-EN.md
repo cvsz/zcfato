@@ -1,28 +1,29 @@
 # Camfrog standalone feature apps
 
-Windows only. Uses UI Automation. Selectors are derived from static analysis of Camfrog 8.5.0.51219 and **not yet verified on a live session** — run `detect` first.
+Windows only. Uses UI Automation. Selector defaults were derived from static analysis of Camfrog 8.5.0.51219; run **Auto-detect** against your installed build before enabling live actions. Limited Windows 11 smoke testing verified the IM local-echo path, but not recipient delivery or every control.
 
 Full user manual: `docs/USER-MANUAL-EN.md` (Thai: `docs/USER-MANUAL-TH.md`).
 
 ## Standalone feature apps
 
-Each executable is built into its own folder and creates its own config and runtime files there. Config, logs, status pools, and history are not shared between the apps.
+Each executable is built into its own folder and creates its own config and runtime files there. Config, logs, status pools, and history are not shared between the apps. The combined Status Changer keeps Random and Marquee pools separate and reuses an existing mode pool when it can find one.
 
 | App | Scope |
 |---|---|
 | `room-control\room-control.exe` | Room control and room auto-reply. Status changes and private IM reply are disabled. |
 | `chat-im-private\chat-im-private.exe` | Lists and focuses private-chat windows that are already open in Camfrog. It does not read or send messages. |
+| `status-changer\status-changer.exe` | One window with **Random**, **Marquee**, and **Activity Log** tabs. Random and Marquee keep separate config files, ten-slot pools, and worker settings. |
 | `status-random\status-random.exe` | Random status rotation with its own ten-slot pool under `random-data\`. |
-| `status-marquee\status-marquee.exe` | Marquee status rotation with its own ten-slot pool and Loop control under `marquee-data\`. |
-| `im-autoreply\im-autoreply.exe` | Private IM auto-reply only. Room auto-reply and status changes are disabled. |
+| `status-marquee\status-marquee.exe` | Marquee status rotation with its own ten-slot pool and Loop slots control under `marquee-data\`. |
+| `im-autoreply\im-autoreply.exe` | Private IM auto-reply only, with an Activity Log tab for GUI actions and worker outcomes. Room auto-reply and status changes are disabled. |
 | `music-dj\music-dj.exe` | Room music DJ: answers `!request` / `!queue` / `!current` / `!skip` / `!help` in chat, keeps a persistent queue, and can play Windows MCI-supported audio files locally into Camfrog. Choose the music folder with Browse. Status changes and private IM reply are disabled. |
 | `web-status\web-status.exe` | GUI + console prototype: update status via profiles.camfrog.com (dry-run by default; the GUI verifies a browser `PHPSESSID` session before live rotation). No args opens the GUI; any args use the CLI. The GUI has ten one-line status fields saved in `webtext.db`; **Start** rotates through the non-empty lines every N seconds. |
 
-Room Control and IM Auto-reply use separate `config.json` files; Chat IM Private uses `private-chat-config.json`; Random and Marquee each use `camfrog-status-config.json` in their own data folder. Random and Marquee also keep their pools, logs, history, and worker files separate. Status **Start** saves settings and starts that app's bundled worker.
+Each executable keeps its config and runtime data in its own app data folder. Room Control and IM Auto-reply use separate `config.json` files; Chat IM Private uses `private-chat-config.json`. The combined Status Changer stores `random-config.json` and `marquee-config.json`, separate pools, and separate worker settings in `status-data\`. A first run imports shared Camfrog controls from the legacy `camfrog-status-config.json`, while mode-specific settings and pools come from the matching legacy app when present. Legacy pools are copied once into the combined app's own databases; later edits remain independent. The old shared config is kept for recovery and is no longer written. A new install creates only the two mode configs. The legacy status executables also keep their own app-local configs. Status **Start** saves the selected mode's config and starts that mode's bundled worker.
 
 ## Build
 
-Double-click `build.bat` (needs 64-bit Python in PATH). It selects Python 3.12 first and builds the six apps above into separate subfolders under `dist\`. It preserves each app's local config and runtime data when refreshing the binaries, copies no shared `config.json`, and creates a zip containing only the executables and checksums. It also writes `dist\SHA256SUMS.txt`.
+Double-click `build.bat` (requires CPython 3.12 64-bit). It builds eight executables into separate subfolders under `dist\`. It preserves each app's local config and runtime data when refreshing the binaries, copies no shared `config.json`, and creates a zip containing only the executables and checksums. It also writes `dist\SHA256SUMS.txt`. Run `full-build.bat` to build the eight Camfrog apps plus the separate LINE Status Changer. CI runs the full build and publishes the LINE executable as a separate artifact; it does not upload local LINE settings.
 
 - **Icon:** replace `app.ico` (a real multi-size `.ico`, ideally 16–256 px) and rebuild. If Explorer still shows the old icon it is the Windows icon cache: rename/move the exe or restart Explorer.
 - **Checksums & zip:** `SHA256SUMS.txt` lists each executable's path inside `dist\`; `tools\package.py` creates it and the zip using Python. Verify an app with `certutil -hashfile dist\room-control\room-control.exe SHA256`.
@@ -31,7 +32,7 @@ Double-click `build.bat` (needs 64-bit Python in PATH). It selects Python 3.12 f
 
 Run **`doctor.bat`** first. It prints your Python version/bit/build type, flags known-bad setups, detects an old copy of this project, and tests whether pip can fetch `pywin32`.
 
-`pywin32 ... no matching distribution` means pip has **no wheel for your Python**. pywin32 312 ships wheels for CPython 3.9–3.15, **64-bit (and ARM64) only on 3.9–3.13**. Not covered: 32-bit Python ≤ 3.13, free-threaded (`3.xt`) builds, PyPy, Python < 3.8. Fix: `winget install Python.Python.3.13` (64-bit), delete the `.venv` folder, run `build.bat` again.
+`pywin32 ... no matching distribution` means pip could not install a dependency for the selected interpreter. This project supports only standard CPython 3.12 64-bit. Fix: install `winget install Python.Python.3.12`, delete the `.venv` folder, then run `build.bat` again.
 
 If the error says `requirements.txt (line 1)` and mentions only pywinauto, you are running an **older copy** of the project — extract the newest zip into a new empty folder.
 
@@ -40,10 +41,10 @@ If the error says `requirements.txt (line 1)` and mentions only pywinauto, you a
 1. Open Camfrog and join a room. For Camfrog 8.x, launch `room-control.exe` and use **Setup → Auto-detect**. Findings: `docs/CAMFROG-8.5-FINDINGS.md`.
 2. Edit that app's `config.json`, set your nickname, and configure room replies. Keep `dry_run` on while checking behavior.
 3. Use `im-autoreply.exe` for private IM auto-reply; its config and logs are separate from Room Control.
-4. Use `status-random.exe` or `status-marquee.exe` to configure status messages in the corresponding app's data folder. Dry-run is enabled by default; enable **Send statuses live to Camfrog** before using **Apply Now** or **Start** to send them.
+4. Use `status-changer.exe` to manage Random and Marquee from separate tabs, or use either legacy status executable. **Save Data** stores the selected tab's messages and settings without contacting Camfrog. Dry-run is enabled by default; enable **Send statuses live to Camfrog** before using **Start** to send statuses. The legacy status executables still offer **Apply Now**.
 5. Open a private chat in Camfrog, then use `chat-im-private.exe` to refresh and focus its window. Its **Discover controls** button dumps the control tree to `controls.txt` for selector setup, like the other apps.
 
-`python camfrog_auto.py ...` remains available as a source-only developer CLI. It uses the local `config.json`, which is ignored by Git; create it with `python camfrog_auto.py init --config config.json` or copy `config.example.json`. CI and builds validate the safe example. The CLI is not one of the six packaged apps. The `extras\*.bat` helpers are source-checkout shortcuts, except `extras\gui.bat` which launches the built `dist\room-control\room-control.exe`.
+`python camfrog_auto.py ...` remains available as a source-only developer CLI. It uses the local `config.json`, which is ignored by Git; create it with `python camfrog_auto.py init --config config.json` or copy `config.example.json`. CI and builds validate the safe example. The CLI is not one of the packaged apps. The `extras\*.bat` helpers are source-checkout shortcuts, except `extras\gui.bat` which launches the built `dist\room-control\room-control.exe`.
 
 ## Background mode
 
@@ -57,16 +58,16 @@ Room Control and IM Auto-reply use the GUI **Save & Start** and **Stop** control
 
 Each app writes logs beside its own config. The source CLI uses `camfrog_auto.log` in the repository folder.
 
-**Heads-up:** Windows has no way to type into another app without focusing it. Each send briefly brings Camfrog to the front, presses Enter, then returns focus to your previous window (`safety.restore_previous_window`). Camfrog must be open (minimized is OK only if UIA can still reach its controls — verify with `discover`).
+**Background status updates:** Random and Marquee can update Camfrog's native status control without bringing its window to the front. The worker can discover minimized or hidden windows, but Camfrog must remain running in the same signed-in Windows session and UI Automation must still expose the status control. This does not work after Camfrog exits; behavior while Windows is locked or the session is disconnected depends on Windows and Camfrog. Room-chat replies use a different embedded input and still require the room window to be foreground.
 
 ## Scrolling status + history switch
 
-- **Marquee** (`status.marquee`): long statuses scroll across a window of `width` characters, one frame every `step_seconds` (minimum 0.3 s). Finite `cycles` settle on the full text; **Loop** repeats the frame list until `status.interval_seconds`, then advances to the next status. The default advances 2 Thai-safe clusters every 0.5 seconds; the runner wakes at each frame deadline without an extra random delay after sending.
+- **Marquee** (`status.marquee`): long statuses scroll across a window of `width` characters, one frame every `step_seconds` (minimum 0.3 s). Each populated slot finishes its frames before advancing to the next slot. **Loop slots** starts again at slot 1 after the last populated slot; with it off, the sequence stops after the last slot. The default advances 2 Thai-safe clusters every 0.5 seconds; the runner wakes at each frame deadline without an extra random delay after sending.
 - **History switch** (`status.history`): every status you set is saved to `status_history.json`. With `use_as_source: true` the next status is picked from that history (`rotate` = round-robin, `random`, `most_used`). Your `status.messages` are seeded into it automatically.
 - **TH/EN auto switch** (`status.language_cycle: ["th","en"]`): alternates Thai, English, Thai, English… each time the status changes. Works with history and with plain messages.
-- **Safety:** every frame is a real status change on Camfrog, so frames are rate-limited (`step_seconds >= 0.3`); **Loop** repeats until the configured status interval. Keep `interval_seconds` generous and start with `dry_run: true`.
-- **Live status send:** the status apps start in dry-run mode. **Apply Now** reports that no status was sent until **Send statuses live to Camfrog** is enabled. Live sends focus Camfrog for the Enter action, then restore the previous window.
-- **Experimental background Enter target:** if Windows plays an error sound on every status change, the Random and Marquee Status apps have **Try combo Enter (test)**. They post Enter to the verified status ComboBox instead of its Edit child, without raising the Camfrog window. This might not commit the status on your Camfrog version; test one status with **Apply Now** and verify it persists before using marquee. Uncheck to restore the original behavior. See `status.background_enter_target` in `CONFIG-EN.md`.
+- **Safety:** every frame is a real status change on Camfrog, so frames are rate-limited (`step_seconds >= 0.3`). Keep `interval_seconds` generous for Random mode and start with `dry_run: true`.
+- **Live status send:** the status apps start in dry-run mode. In `status-changer.exe`, **Save Data** only saves settings; status changes are sent by **Start** after **Send statuses live to Camfrog** is enabled. The legacy status executables retain **Apply Now**. When Camfrog is not foreground, status sends use the verified background ComboBox path without changing window focus.
+- **Background status updates:** when Camfrog is not foreground, the status worker writes the verified Edit control and posts Enter to its verified ComboBox parent. It does not raise Camfrog or take focus. Select **Use background status updates** to use that path even while Camfrog is foreground. The worker checks the Edit read-back before submitting. See `status.background_enter_target` in `CONFIG-EN.md`.
 
 Preview offline without opening Camfrog:
 ```
@@ -92,7 +93,7 @@ python camfrog_auto.py history-import old_status.txt # one status per line
 
 ## Development
 
-Install `requirements-dev.txt` and run the offline test suite from the source checkout. CI (`.github/workflows/ci.yml`) runs tests on Ubuntu and builds the feature apps on Windows. Audit notes: `AUDIT.md`. Full user manual: `docs/USER-MANUAL-EN.md`.
+Install `requirements-dev.txt` and run the offline test suite from the source checkout. CI (`.github/workflows/ci.yml`) runs tests and template validation on Ubuntu, then builds the Camfrog and LINE apps on Windows. Audit notes: `AUDIT.md`. Full user manual: `docs/USER-MANUAL-EN.md`.
 
 ## Language
 
@@ -104,7 +105,7 @@ Use `im-autoreply.exe`; its `config.json` is private to that app. Room auto-repl
 
 Set `autoreply.own_nickname`, `autoreply_im.only_nicknames`, and `autoreply_im.rules` in that app's config. Keep `dry_run: true` until you have checked its behavior, then enable live mode from this app only when ready.
 
-**Not verified on a live session:** the IM window's send path (the panes match the room's, per the findings). The `wb-log-mtim-data` window kind (probably tabbed IM) is deliberately ignored. `private_chat_request` (incoming private-chat requests) is never auto-accepted. See `CONFIG-EN.md`.
+Windows 11 smoke evidence: the worker attaches to the selected private-chat window and its outgoing local echo is present in that window's MSHTML history. The app now scrolls that row into the chat viewport. This does not prove that Camfrog delivered it to the recipient; the UI exposes no delivery acknowledgement. The `wb-log-mtim-data` window kind is deliberately ignored, and `private_chat_request` is never auto-accepted. See `CONFIG-EN.md`.
 
 ## Safety
 

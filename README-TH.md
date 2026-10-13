@@ -1,28 +1,29 @@
 # แอป Camfrog แยกตามฟีเจอร์
 
-ใช้ได้เฉพาะ Windows ใช้ UI Automation Selector มาจากการวิเคราะห์ Camfrog 8.5.0.51219 แบบ static และ**ยังไม่ได้ทดสอบกับ Camfrog จริง** ต้องตั้ง selector เอง — รัน `detect` ก่อน
+ใช้ได้เฉพาะ Windows และใช้ UI Automation ค่า selector เริ่มต้นได้จากการวิเคราะห์ Camfrog 8.5.0.51219 แบบ static ควรกด **Auto-detect** กับรุ่นที่ติดตั้งจริงก่อนเปิดการทำงาน live มี smoke test บน Windows 11 เฉพาะเส้นทาง IM local echo แล้ว แต่ยังไม่ได้ยืนยันว่าผู้รับได้รับข้อความหรือทดสอบ control ทุกตัว
 
 คู่มือผู้ใช้ฉบับเต็ม: `docs/USER-MANUAL-TH.md` (English: `docs/USER-MANUAL-EN.md`)
 
 ## แอปแยกตามฟีเจอร์
 
-แต่ละ exe อยู่คนละโฟลเดอร์และสร้างไฟล์ตั้งค่า/ข้อมูลของตัวเอง ไม่ใช้ config, log, รายการสถานะ หรือประวัติร่วมกัน
+แต่ละ exe อยู่คนละโฟลเดอร์และสร้างไฟล์ตั้งค่า/ข้อมูลของตัวเอง ไม่ใช้ config, log, รายการสถานะ หรือประวัติร่วมกัน แอป Status Changer รวมหน้าจอไว้หน้าต่างเดียว แต่ยังแยก pool ของ Random กับ Marquee และนำ pool เดิมมาใช้หากพบโฟลเดอร์ข้อมูลเดิม
 
 | แอป | ขอบเขต |
 |---|---|
 | `room-control\room-control.exe` | ควบคุมห้องและตอบอัตโนมัติในห้อง ปิดการเปลี่ยนสถานะและการตอบ IM ส่วนตัว |
 | `chat-im-private\chat-im-private.exe` | แสดงและโฟกัสหน้าต่างแชทส่วนตัวที่เปิดอยู่ใน Camfrog ไม่มีการอ่านหรือส่งข้อความ |
+| `status-changer\status-changer.exe` | หน้าต่างเดียว มีแท็บ **Random**, **Marquee** และ **Activity Log** โดยแยก config, pool สิบช่อง และการตั้งค่า worker ของแต่ละโหมด |
 | `status-random\status-random.exe` | สลับสถานะแบบสุ่ม มี pool สิบช่องของตัวเองใน `random-data\` |
-| `status-marquee\status-marquee.exe` | สลับสถานะแบบเลื่อน มี pool สิบช่องของตัวเอง ตัวควบคุม Loop ใน `marquee-data\` |
-| `im-autoreply\im-autoreply.exe` | ตอบ IM ส่วนตัวอย่างเดียว ไม่ตอบในห้อง ไม่เปลี่ยนสถานะ |
+| `status-marquee\status-marquee.exe` | สลับสถานะแบบเลื่อน มี pool สิบช่องของตัวเอง และตัวควบคุมวนช่องใน `marquee-data\` |
+| `im-autoreply\im-autoreply.exe` | ตอบ IM ส่วนตัว พร้อมแท็บ Activity Log แสดงคำสั่งจาก GUI และผลการทำงานของ worker ไม่ตอบในห้องและไม่เปลี่ยนสถานะ |
 | `music-dj\music-dj.exe` | ดีเจเพลงในห้อง: รับคำสั่ง `!request` / `!queue` / `!current` / `!skip` / `!help` จากแชท เก็บคิวลงไฟล์ และเล่นไฟล์เสียงที่ Windows MCI รองรับบนเครื่องส่งเข้า Camfrog ได้ เลือกโฟลเดอร์เพลงด้วย Browse ปิดการเปลี่ยนสถานะและการตอบ IM ส่วนตัว |
 | `web-status\web-status.exe` | รุ่นทดลองแบบ GUI + console: เปลี่ยนสถานะผ่าน profiles.camfrog.com (ค่าเริ่มต้นโหมดทดลอง; GUI ตรวจสอบ session `PHPSESSID` จากเบราว์เซอร์ก่อนเริ่มเปลี่ยนสถานะจริง) ไม่ใส่ argument เปิด GUI ใส่ argument ใช้ CLI ใน GUI มีช่องข้อความบรรทัดเดียว 10 ช่อง บันทึกใน `webtext.db`; ปุ่ม **Start** วนเฉพาะบรรทัดที่ไม่ว่างทุก N วินาที |
 
-Room Control และ IM Auto-reply ใช้ `config.json` แยกกัน ส่วน Chat IM Private ใช้ `private-chat-config.json` และ Random/Marquee ใช้ `camfrog-status-config.json` ในโฟลเดอร์ข้อมูลคนละชุด แต่ละแอปแยก pool, log, ประวัติ และ worker ปุ่ม **Start** จะบันทึกค่าและเริ่ม worker ของแอปนั้น
+แต่ละ exe เก็บ config และข้อมูล runtime ในโฟลเดอร์ของแอปตัวเอง Room Control และ IM Auto-reply ใช้ `config.json` คนละไฟล์ ส่วน Chat IM Private ใช้ `private-chat-config.json` Status Changer เก็บ `random-config.json` และ `marquee-config.json` รวมถึง pool และ worker settings แยกกันใน `status-data\` เมื่อเปิดครั้งแรก ระบบนำ selector และค่ากลางจาก `camfrog-status-config.json` เดิมมาใช้ ส่วนค่าของแต่ละโหมดและ pool มาจากแอปเก่าของโหมดนั้นถ้ามี โดยคัดลอก pool เดิมเข้าฐานข้อมูลของ Status Changer ครั้งเดียว หลังจากนั้นการแก้ไขจะแยกจากกัน ไฟล์ config เก่าจะเก็บไว้สำหรับกู้คืนและจะไม่ถูกเขียนอีก การติดตั้งใหม่จะสร้างเฉพาะ config สองไฟล์ของโหมด exe สถานะแบบแยกเดิมก็เก็บ config ในโฟลเดอร์ของแอปตัวเอง ปุ่ม **Start** บันทึก config ของโหมดที่เลือกและเริ่ม worker ของโหมดนั้น
 
 ## สร้าง exe
 
-ดับเบิลคลิก `build.bat` (ต้องมี Python 64-bit) ระบบเลือก Python 3.12 และสร้างหกแอปแยกโฟลเดอร์ใน `dist\` โดยเก็บ config/ข้อมูลเดิมของแต่ละแอปไว้เมื่อ build ใหม่ ไม่คัดลอก config กลาง และสร้าง zip ที่มีเฉพาะ exe กับ checksums นอกจากนี้ยังเขียน `dist\SHA256SUMS.txt`
+ดับเบิลคลิก `build.bat` (ต้องใช้ CPython 3.12 แบบ 64-bit) เพื่อสร้าง exe แปดตัวแยกโฟลเดอร์ใน `dist\` โดยเก็บ config/ข้อมูลเดิมของแต่ละแอปไว้เมื่อ build ใหม่ ไม่คัดลอก config กลาง และสร้าง zip ที่มีเฉพาะ exe กับ checksums นอกจากนี้ยังเขียน `dist\SHA256SUMS.txt` ใช้ `full-build.bat` เพื่อ build แอป Camfrog ทั้ง 8 ตัวพร้อม LINE Status Changer ที่แยกต่างหาก CI รัน full build และเผยแพร่ exe ของ LINE เป็น artifact แยก โดยไม่ส่ง config LINE ในเครื่องขึ้นไป
 
 - **ไอคอน:** เปลี่ยนไฟล์ `app.ico` (ไฟล์ `.ico` หลายขนาดจริง 16–256 px) แล้ว build ใหม่ ถ้า Explorer ยังโชว์ไอคอนเก่าคือ cache ของ Windows ให้ย้ายหรือเปลี่ยนชื่อ exe หรือรีสตาร์ท Explorer
 - **Checksums และ zip:** `SHA256SUMS.txt` ระบุ path ของ exe แต่ละตัว และสร้าง zip ด้วย Python ตรวจแฮชด้วย `certutil -hashfile dist\room-control\room-control.exe SHA256`
@@ -31,7 +32,7 @@ Room Control และ IM Auto-reply ใช้ `config.json` แยกกัน 
 
 รัน **`doctor.bat`** ก่อน จะบอกเวอร์ชัน/บิตของ Python ตรวจรุ่นที่ใช้ไม่ได้ ตรวจว่าไฟล์โปรเจกต์เป็นของเก่าไหม และลองโหลด `pywin32`
 
-ไม่มี wheel สำหรับ Python ของคุณ (`pywin32 ... no matching distribution`): pywin32 312 มี wheel สำหรับ CPython 3.9–3.15 แบบ **64-bit (และ ARM64) เฉพาะ 3.9–3.13** ใช้ไม่ได้กับ Python 32-bit รุ่น ≤ 3.13, รุ่น free-threaded, PyPy, Python < 3.8 แก้โดยติดตั้ง Python 3.13 แบบ 64-bit ลบ `.venv` แล้วรัน `build.bat` ใหม่
+ถ้า pip ติดตั้ง dependency ไม่ได้ (`pywin32 ... no matching distribution`) โปรเจกต์นี้รองรับเฉพาะ CPython 3.12 รุ่นปกติ แบบ 64-bit ให้ติดตั้ง `winget install Python.Python.3.12` ลบ `.venv` แล้วรัน `build.bat` ใหม่
 
 ถ้า error ขึ้น `requirements.txt (line 1)` และพูดถึงแต่ pywinauto แปลว่าใช้ไฟล์เก่า ให้แตก zip ล่าสุดลงโฟลเดอร์ใหม่
 
@@ -40,10 +41,10 @@ Room Control และ IM Auto-reply ใช้ `config.json` แยกกัน 
 1. เปิด Camfrog แล้วเข้าห้อง สำหรับ Camfrog 8.x เปิด `room-control.exe` แล้วใช้ **Setup → Auto-detect** ผลวิเคราะห์: `docs/CAMFROG-8.5-FINDINGS.md`
 2. แก้ `config.json` ของแอปนั้น ตั้งนิค ตั้งกฎตอบ คง `dry_run` ไว้ขณะทดสอบ
 3. ใช้ `im-autoreply.exe` สำหรับตอบ IM ส่วนตัว config และ log แยกจาก Room Control
-4. ใช้ `status-random.exe` หรือ `status-marquee.exe` ตั้งข้อความในโฟลเดอร์ข้อมูลของแอปนั้น โดยค่าเริ่มต้นเป็นโหมดทดลอง ให้เปิด **Send statuses live to Camfrog** ก่อนกด **Apply Now** หรือ **Start** เพื่อส่งสถานะจริง
+4. ใช้ `status-changer.exe` ตั้งข้อความ Random และ Marquee ในแท็บแยกกัน หรือเปิด exe สถานะรุ่นเดิมก็ได้ ปุ่ม **Save Data** บันทึกข้อความและค่าของแท็บที่เลือกโดยไม่ติดต่อ Camfrog ค่าเริ่มต้นเป็นโหมดทดลอง ให้เปิด **Send statuses live to Camfrog** ก่อนกด **Start** เพื่อส่งสถานะจริง ส่วน exe รุ่นเดิมยังมีปุ่ม **Apply Now**
 5. เปิดแชทส่วนตัวใน Camfrog แล้วใช้ `chat-im-private.exe` refresh และโฟกัสหน้าต่าง ปุ่ม **Discover controls** ดึงรายการ control ลง `controls.txt` เพื่อตั้ง selector เหมือนแอปอื่น
 
-คำสั่ง `python camfrog_auto.py ...` ยังใช้เป็น CLI สำหรับพัฒนา โดยใช้ `config.json` ในเครื่องซึ่ง Git จะไม่ติดตาม สร้างได้ด้วย `python camfrog_auto.py init --config config.json` หรือคัดลอกจาก `config.example.json` ส่วน CI และ build ตรวจด้วยตัวอย่างที่ปลอดภัย CLI นี้ไม่ใช่หนึ่งในหกแอปที่ build คำสั่งใน `extras\*.bat` เป็นทางลัด ยกเว้น `extras\gui.bat` ที่เปิด `dist\room-control\room-control.exe` ที่ build แล้ว
+คำสั่ง `python camfrog_auto.py ...` ยังใช้เป็น CLI สำหรับพัฒนา โดยใช้ `config.json` ในเครื่องซึ่ง Git จะไม่ติดตาม สร้างได้ด้วย `python camfrog_auto.py init --config config.json` หรือคัดลอกจาก `config.example.json` ส่วน CI และ build ตรวจด้วยตัวอย่างที่ปลอดภัย CLI นี้ไม่ใช่แอปที่ build คำสั่งใน `extras\*.bat` เป็นทางลัด ยกเว้น `extras\gui.bat` ที่เปิด `dist\room-control\room-control.exe` ที่ build แล้ว
 
 ## รันเบื้องหลัง
 
@@ -57,16 +58,16 @@ Room Control และ IM Auto-reply มีปุ่ม **Save & Start** กั�
 
 แต่ละแอปบันทึก log ในโฟลเดอร์ของ config ตัวเอง ส่วน source CLI ใช้ `camfrog_auto.log` ในโฟลเดอร์ repository
 
-**ข้อควรรู้:** Windows พิมพ์ลงแอปอื่นโดยไม่โฟกัสไม่ได้ ทุกครั้งที่ส่ง โปรแกรมจะดึง Camfrog ขึ้นมาหน้าสุดชั่วครู่ กด Enter แล้วคืนโฟกัสให้หน้าต่างเดิม (`safety.restore_previous_window`) Camfrog ต้องเปิดอยู่ (ย่อไว้ได้เฉพาะเมื่อ UIA ยังเข้าถึง control — ตรวจด้วย `discover`)
+**ส่งสถานะเบื้องหลัง:** Random และ Marquee เปลี่ยนสถานะผ่าน control ของ Camfrog ได้โดยไม่ดึงหน้าต่างขึ้นมาหน้าสุด worker ค้นหา control ในหน้าต่างที่ย่อหรือซ่อนได้ แต่ต้องเปิด Camfrog ค้างไว้ใน Windows session ของผู้ใช้คนเดิม และ UI Automation ต้องยังมองเห็น control สถานะ วิธีนี้ใช้ไม่ได้เมื่อปิด Camfrog แล้ว ส่วนกรณี Windows ล็อกหน้าจอหรือตัดการเชื่อมต่อ session ขึ้นกับ Windows และ Camfrog การตอบแชทในห้องใช้ช่องกรอกข้อความอีกชนิดหนึ่งและยังต้องให้หน้าต่างห้องอยู่หน้าสุด
 
 ## สถานะเลื่อน + สลับจากประวัติ
 
-- **สถานะเลื่อน** (`status.marquee`): ข้อความยาวเลื่อนผ่านหน้าต่างกว้าง `width` ตัวอักษร เฟรมละ `step_seconds` วินาที (ขั้นต่ำ 0.3 วินาที) แบบ `cycles` จำกัดจะจบที่ข้อความเต็ม ส่วน **Loop** จะวนชุดเฟรมจนถึง `status.interval_seconds` แล้วเปลี่ยนสถานะถัดไป ค่าเริ่มต้นเลื่อน 2 กลุ่มอักษรทุก 0.5 วินาที ตัวรันตื่นตามกำหนดเฟรม โดยไม่ตัดสระ/วรรณยุกต์และไม่สร้างเฟรมว่าง
+- **สถานะเลื่อน** (`status.marquee`): ข้อความยาวเลื่อนผ่านหน้าต่างกว้าง `width` ตัวอักษร เฟรมละ `step_seconds` วินาที (ขั้นต่ำ 0.3 วินาที) แต่ละช่องที่มีข้อความจะเลื่อนจนจบก่อนเปลี่ยนไปช่องถัดไป **Loop slots** จะเริ่มช่อง 1 ใหม่หลังช่องสุดท้าย หากปิดไว้จะหยุดหลังช่องสุดท้าย ค่าเริ่มต้นเลื่อน 2 กลุ่มอักษรทุก 0.5 วินาที ตัวรันตื่นตามกำหนดเฟรม โดยไม่ตัดสระ/วรรณยุกต์และไม่สร้างเฟรมว่าง
 - **สลับจากประวัติ** (`status.history`): ทุก status ที่ตั้งถูกเก็บลง `status_history.json` ถ้าเปิด `use_as_source` จะสลับเลือกจากประวัติให้อัตโนมัติ (`rotate` = วนรอบ, `random`, `most_used`) ข้อความใน `status.messages` ถูกใส่เข้าไปอัตโนมัติ
 - **สลับไทย-อังกฤษอัตโนมัติ** (`status.language_cycle: ["th","en"]`): สลับไทย→อังกฤษ→ไทย… ทุกครั้งที่เปลี่ยน status ใช้ได้ทั้งประวัติและข้อความปกติ
-- **ความปลอดภัย:** ทุกเฟรมคือการเปลี่ยน status จริง จึงจำกัดความถี่ขั้นต่ำ 0.3 วินาที; เมื่อเปิด **Loop** จะวนจนถึง `interval_seconds` ควรตั้งช่วงเวลาให้เหมาะสมและเริ่มด้วย `dry_run: true`
-- **ส่งสถานะจริง:** แอปสถานะเริ่มในโหมดทดลอง ปุ่ม **Apply Now** จะแจ้งว่ายังไม่ได้ส่งจนกว่าจะเปิด **Send statuses live to Camfrog** โหมดจริงจะโฟกัส Camfrog ตอนกด Enter แล้วคืนหน้าต่างเดิม
-- **เป้าหมาย Enter เบื้องหลัง (ทดลอง):** ถ้า Windows มีเสียง error ทุกครั้งที่เปลี่ยนสถานะ แอป Random และ Marquee มีปุ่ม **Try combo Enter (test)** โปรแกรมจะส่ง Enter ไปที่ ComboBox สถานะแทนช่อง Edit โดยไม่ดึงหน้าต่าง Camfrog ขึ้นมา อาจใช้ไม่ได้กับ Camfrog รุ่นของคุณ ทดสอบหนึ่งสถานะด้วย **Apply Now** แล้วตรวจว่ายังอยู่ก่อนใช้ marquee เอาออกเพื่อกลับพฤติกรรมเดิม ดู `status.background_enter_target` ใน `CONFIG-TH.md`
+- **ความปลอดภัย:** ทุกเฟรมคือการเปลี่ยน status จริง จึงจำกัดความถี่ขั้นต่ำ 0.3 วินาที ควรตั้งช่วงเวลาให้เหมาะสมและเริ่มด้วย `dry_run: true`
+- **ส่งสถานะจริง:** แอปสถานะเริ่มในโหมดทดลอง สำหรับ `status-changer.exe` ปุ่ม **Save Data** บันทึกค่าเท่านั้น การส่งสถานะทำผ่าน **Start** หลังเปิด **Send statuses live to Camfrog** ส่วน exe รุ่นเดิมยังมีปุ่ม **Apply Now** เมื่อ Camfrog ไม่ได้อยู่หน้าสุด จะใช้เส้นทาง ComboBox เบื้องหลังโดยไม่เปลี่ยนโฟกัส
+- **ส่งสถานะเบื้องหลัง:** เมื่อ Camfrog ไม่ได้อยู่หน้าสุด worker จะเขียนลง Edit ที่ตรวจสอบแล้ว แล้วส่ง Enter ไปยัง ComboBox แม่ โดยไม่ดึงหน้าต่างหรือแย่งโฟกัส เลือก **Use background status updates** เพื่อใช้วิธีนี้แม้ Camfrog อยู่หน้าสุด worker จะตรวจข้อความที่อ่านกลับจาก Edit ก่อนส่ง ดู `status.background_enter_target` ใน `CONFIG-TH.md`
 
 ดูตัวอย่างโดยไม่ต้องเปิด Camfrog:
 ```
@@ -92,7 +93,7 @@ python camfrog_auto.py history-import old_status.txt # ไฟล์ละบร�
 
 ## พัฒนา
 
-ติดตั้ง `requirements-dev.txt` แล้วรัน test suite แบบออฟไลน์จาก source CI (`.github/workflows/ci.yml`) รัน test บน Ubuntu และ build แอปบน Windows หมายเหตุ audit: `AUDIT.md` คู่มือผู้ใช้ฉบับเต็ม: `docs/USER-MANUAL-TH.md`
+ติดตั้ง `requirements-dev.txt` แล้วรัน test suite แบบออฟไลน์จาก source CI (`.github/workflows/ci.yml`) รัน test บน Ubuntu และ build แอป Camfrog กับ LINE บน Windows หมายเหตุ audit: `AUDIT.md` คู่มือผู้ใช้ฉบับเต็ม: `docs/USER-MANUAL-TH.md`
 
 ## ภาษา
 
@@ -104,7 +105,7 @@ python camfrog_auto.py history-import old_status.txt # ไฟล์ละบร�
 
 ตั้งค่า `autoreply.own_nickname`, `autoreply_im.only_nicknames` และ `autoreply_im.rules` ใน config ของแอปนี้ และคง `dry_run: true` จนตรวจสอบการทำงานแล้ว แล้วค่อยเปิดโหมดจริงเฉพาะแอปนี้เมื่อพร้อม
 
-**ยังไม่ได้ทดสอบกับ Camfrog จริง** ในส่วนการส่งข้อความของหน้าต่าง IM (pane ตรงกับของห้องตามผลวิเคราะห์) ชนิดหน้าต่าง `wb-log-mtim-data` (น่าจะเป็น IM แบบแท็บ) ถูกข้ามโดยตั้งใจ คำขอเปิดแชทส่วนตัว (`private_chat_request`) ไม่ถูกรับอัตโนมัติ ดู `CONFIG-TH.md`
+หลักฐาน smoke test บน Windows 11: worker จับหน้าต่างแชตส่วนตัวที่เลือก และพบ local echo ของข้อความขาออกในประวัติ MSHTML ของหน้าต่างนั้นแล้ว แอปเลื่อนบรรทัดดังกล่าวเข้าพื้นที่แชตด้วย แต่ไม่ได้ยืนยันว่า Camfrog ส่งถึงผู้รับ เพราะ UI ไม่มีการตอบรับการส่ง ชนิดหน้าต่าง `wb-log-mtim-data` ถูกข้ามโดยตั้งใจ และจะไม่รับคำขอเปิดแชต (`private_chat_request`) อัตโนมัติ ดู `CONFIG-TH.md`
 
 ## ความปลอดภัย
 

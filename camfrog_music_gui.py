@@ -8,12 +8,14 @@ import json
 import logging
 import logging.handlers
 import os
+import ntpath
 import random
 import re
 import subprocess
 import sys
 import time
 import unicodedata
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -22,6 +24,23 @@ import io
 import queue
 import threading
 from types import SimpleNamespace
+
+
+def system_taskkill_path():
+    """Return taskkill.exe from Windows' system directory, never from PATH/cwd."""
+    if os.name != "nt":
+        return "taskkill.exe"
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_system_directory = kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = (ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint)
+    get_system_directory.restype = ctypes.c_uint
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_system_directory(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return os.path.join(buffer.value, "taskkill.exe")
 
 # ============================================================
 # Inlined engine (camfrog_auto.py) - no shared imports.
@@ -807,6 +826,82 @@ def web_items(ctrl, tail=150):
     return out[-tail:] if tail else out
 
 
+def parse_web_dom_rows(rows, tail=150):
+    """Convert current Camfrog MSHTML rows into 'nick: message' lines.
+
+    Current Camfrog exposes message rows as `span.msg-user`, with sibling
+    `nickname-field` and `msgid` spans. Validate the nickname before returning
+    it so UI text that is not a message row cannot enter the reply pipeline.
+    """
+    lines = []
+    for row in rows:
+        row_classes = set(str(row.get("class_name", "")).lower().split())
+        if "msg-user" not in row_classes:
+            continue
+        nick = message = ""
+        for child in row.get("children", ()):
+            classes = set(str(child.get("class_name", "")).lower().split())
+            value = str(child.get("text", "")).strip()
+            if "nickname-field" in classes:
+                nick = value
+            elif "msgid" in classes:
+                message = value
+        if not NICK_RE.fullmatch(nick) or not message:
+            continue
+        message = " ".join(message.split())
+        if message:
+            lines.append(f"{nick}: {message}")
+    return lines[-tail:] if tail else lines
+
+
+def web_dom_rows(ctrl):
+    """Read Camfrog's IE/MSHTML message rows without logging private text.
+
+    UI Automation no longer exposes the sender hyperlink in current Camfrog
+    builds. `WM_HTML_GETOBJECT` gives the same embedded document and preserves
+    its explicit sender/message classes. Return None when this path is not
+    available so callers can retain the older UIA parser as a fallback.
+    """
+    try:
+        import pythoncom
+        import win32con
+        import win32gui
+        from win32com.client import Dispatch
+
+        servers = ctrl.descendants(class_name="Internet Explorer_Server")
+        if not servers:
+            return None
+        msg = win32gui.RegisterWindowMessage("WM_HTML_GETOBJECT")
+        sent, result = win32gui.SendMessageTimeout(
+            servers[0].handle, msg, 0, 0, win32con.SMTO_ABORTIFHUNG, 1000
+        )
+        if not sent or not result:
+            return None
+        document = Dispatch(pythoncom.ObjectFromLresult(result, pythoncom.IID_IDispatch, 0))
+        elements = document.all
+        rows = []
+        for index in range(int(elements.length)):
+            nickname = elements.item(index)
+            if "nickname-field" not in str(nickname.className or "").lower().split():
+                continue
+            parent = nickname.parentElement
+            row_classes = str(parent.className or "")
+            if "msg-user" not in row_classes.lower().split():
+                continue
+            children = []
+            for child_index in range(int(parent.children.length)):
+                child = parent.children.item(child_index)
+                children.append({
+                    "class_name": str(child.className or ""),
+                    "text": str(child.innerText or ""),
+                })
+            rows.append({"class_name": row_classes, "children": children})
+        return rows
+    except Exception as exc:
+        log.debug("MSHTML chat history read failed: %s", type(exc).__name__)
+        return None
+
+
 def is_web(ctrl):
     return _ctrl_attr(ctrl, "class_name") == "AtlAxWinLic140"
 
@@ -832,6 +927,11 @@ def read_chat(ctrl, tail=150):
     """Chat history as text lines. Web log panes are parsed into 'nick: message'; other controls
     (older native builds) go through read_text()."""
     if is_web(ctrl):
+        dom_rows = web_dom_rows(ctrl)
+        if dom_rows is not None:
+            dom_lines = parse_web_dom_rows(dom_rows, tail)
+            if dom_lines:
+                return "\n".join(dom_lines)
         return "\n".join(parse_web_log(web_items(ctrl, tail)))
     return read_text(ctrl)
 
@@ -1236,18 +1336,46 @@ def read_pid(cfg):
         return None
 
 
+def _process_query_api():
+    """Return kernel32 process-query APIs with pointer-safe Windows types."""
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (
+        wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD))
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32, wintypes
+
+
 def pid_alive(pid):
     if not pid:
         return False
     if os.name == "nt":
-        k = ctypes.windll.kernel32
-        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
+        try:
+            pid = int(pid)
+            if not 0 < pid <= 0xFFFFFFFF:
+                return False
+            kernel32, wintypes = _process_query_api()
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            try:
+                code = wintypes.DWORD()
+                ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                return bool(ok) and code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except (OSError, TypeError, ValueError, OverflowError):
             return False
-        code = ctypes.c_ulong()
-        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
-        k.CloseHandle(h)
-        return bool(ok) and code.value == 259  # STILL_ACTIVE
     try:
         os.kill(pid, 0)
         return True
@@ -1258,27 +1386,47 @@ def pid_alive(pid):
 def pid_image(pid):
     """Executable path of a process (Windows), or None when unknown."""
     try:
-        k = ctypes.windll.kernel32
-        h = k.OpenProcess(0x1000, False, pid)
-        if not h:
+        pid = int(pid)
+        if not 0 < pid <= 0xFFFFFFFF:
             return None
-        buf, n = ctypes.create_unicode_buffer(1024), ctypes.c_ulong(1024)
-        ok = k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n))
-        k.CloseHandle(h)
-        return buf.value if ok else None
-    except Exception:
+        kernel32, wintypes = _process_query_api()
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buffer))
+            ok = kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size))
+            return buffer.value if ok else None
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, TypeError, ValueError, OverflowError, AttributeError):
         return None
 
 
 def pid_is_ours(pid, image=None):
-    """Guard against PID reuse: a stale pid file must never make `stop` kill a stranger."""
+    """Only trust this executable or its Python worker interpreter."""
     if os.name != "nt":
         return True
     image = image if image is not None else pid_image(pid)
     if not image:
-        return True  # cannot tell: keep the old behaviour
-    name = Path(image).name.lower()
-    return "camfrog" in name or name.startswith("python") or name == Path(sys.executable).name.lower()
+        return False
+    candidate = ntpath.normcase(ntpath.normpath(str(image)))
+    executables = [sys.executable]
+    base_executable = getattr(sys, "_base_executable", None)
+    if not getattr(sys, "frozen", False) and base_executable:
+        executables.append(base_executable)
+    expected = set()
+    for executable in executables:
+        current = ntpath.normcase(ntpath.normpath(str(executable)))
+        expected.add(current)
+        current_name = ntpath.basename(current).casefold()
+        if current_name in {"python.exe", "pythonw.exe"}:
+            sibling = "pythonw.exe" if current_name == "python.exe" else "python.exe"
+            expected.add(ntpath.normcase(
+                ntpath.join(ntpath.dirname(current), sibling)))
+    return candidate in expected
 
 
 def running_pid(cfg):
@@ -1351,7 +1499,7 @@ def cmd_stop(cfg):
     forced = False
     if pid_alive(pid):
         try:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+            subprocess.run([system_taskkill_path(), "/PID", str(pid), "/T", "/F"],
                            capture_output=True, check=False, timeout=10)
             forced = True
         except (OSError, subprocess.TimeoutExpired):
@@ -2967,7 +3115,7 @@ def set_clipboard_text(root, text):
         return
     root.clipboard_clear()
     root.clipboard_append(text)
-    root.update()
+    root.update_idletasks()
 
 
 def get_clipboard_text(root):
@@ -3080,10 +3228,12 @@ class ClipboardController:
         import tkinter as tk
 
         self.root = root
-        self.translate = translate or (lambda text: text)
+        self.translate = translate or (lambda text: str(text).partition("|")[0])
         self.on_error = on_error
         self.target = None
         self.widgets = []
+        import weakref
+        self._installed_widgets = weakref.WeakSet()
         self.menu = tk.Menu(root, tearoff=False)
         for label, action in (("Cut|ตัด", "cut"), ("Copy|คัดลอก", "copy"),
                               ("Paste|วาง", "paste")):
@@ -3093,21 +3243,68 @@ class ClipboardController:
         self.menu.add_command(label=self.translate("Select all|เลือกทั้งหมด"),
                               command=lambda: self.select_all(self.target))
 
+    def refresh_menu(self):
+        """Refresh localized labels after the GUI language changes."""
+        labels = ("Cut|ตัด", "Copy|คัดลอก", "Paste|วาง",
+                  "Select all|เลือกทั้งหมด")
+        for index, label in enumerate(labels):
+            self.menu.entryconfigure(index if index < 3 else 4,
+                                     label=self.translate(label))
+
     def install(self, parent):
+        """Bind editors recursively, including controls added after the first build."""
         for widget in parent.winfo_children():
             widget_class = _widget_class(widget)
-            if widget_class in _WIDGET_CLASSES:
+            if widget_class in _WIDGET_CLASSES and widget not in self._installed_widgets:
+                self._installed_widgets.add(widget)
                 self.widgets.append(widget)
+                if widget_class in {"Text", "Listbox"}:
+                    try:
+                        widget.configure(
+                            background="#ffffff" if widget_class == "Text" else "#fffdfa",
+                            foreground="#283648", selectbackground="#8b672b",
+                            selectforeground="#fffdfa", insertbackground="#283648",
+                            highlightbackground="#d5c8ac", highlightcolor="#8b672b")
+                    except Exception:
+                        pass
                 for sequence, action in (
                     ("<Control-c>", "copy"), ("<Control-x>", "cut"),
                     ("<Control-v>", "paste"), ("<Control-Insert>", "copy"),
                     ("<Shift-Delete>", "cut"), ("<Shift-Insert>", "paste"),
                 ):
                     widget.bind(sequence, lambda event, op=action: self.handle(event, op), add="+")
+                # The generic key binding also recognizes Windows virtual-key
+                # codes and control characters when a Thai/non-Latin layout
+                # reports an unknown keysym for Ctrl+A/C/V/X.
+                widget.bind("<Control-KeyPress>", self.handle_control_key, add="+")
                 widget.bind("<Control-a>", self._select_all_event, add="+")
                 widget.bind("<Button-3>", self.show_menu, add="+")
                 widget.bind("<Shift-F10>", self.show_menu, add="+")
             self.install(widget)
+
+    def handle_control_key(self, event):
+        """Dispatch Ctrl+A/C/V/X consistently across keyboard layouts."""
+        keysym = str(getattr(event, "keysym", "")).lower()
+        char = str(getattr(event, "char", "") or "")
+        try:
+            keycode = int(getattr(event, "keycode", -1))
+        except (TypeError, ValueError):
+            keycode = -1
+        shortcuts = {
+            "a": ({"a", "\x01"}, 65, None),
+            "c": ({"c", "\x03"}, 67, "copy"),
+            "v": ({"v", "\x16"}, 86, "paste"),
+            "x": ({"x", "\x18"}, 88, "cut"),
+        }
+        key = next((name for name, (chars, code, _action) in shortcuts.items()
+                    if keysym == name or char in chars or keycode == code), None)
+        if key is None:
+            return None
+        self.target = event.widget
+        _chars, _code, action = shortcuts[key]
+        if action is None:
+            return self._select_all_event(event)
+        return self.handle(event, action)
 
     def perform(self, widget, action):
         if widget is None:
@@ -3399,7 +3596,7 @@ def build_app():
                 row=5, column=2, columnspan=2, sticky="w")
             ttk.Label(f, text=bi("Variables: {sender} {me} {time} {date}. Replies starting with / are blocked.|"
                                  "ตัวแปร: {sender} {me} {time} {date} คำตอบที่ขึ้นต้นด้วย / จะถูกบล็อก"),
-                      foreground="#666").grid(row=6, column=0, columnspan=4, sticky="w", pady=4)
+                      foreground="#626d7a").grid(row=6, column=0, columnspan=4, sticky="w", pady=4)
             bar = ttk.Frame(f)
             bar.grid(row=7, column=0, columnspan=4, sticky="e")
             ttk.Button(bar, text="OK", command=self.ok).pack(side="left", padx=4)
@@ -3434,27 +3631,28 @@ def build_app():
     class App:
         def __init__(self, cfg_path):
             self.root = tk.Tk()
+            self.root.configure(background="#f4f1e8")
             style = ttk.Style(self.root)
             try:
                 style.theme_use("clam")
             except tk.TclError:
                 pass
-            style.configure("TFrame", background="#edf2f5")
-            style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
-            style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
-            style.configure("TRadiobutton", background="#edf2f5", foreground="#233548")
-            style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
-            style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
+            style.configure("TFrame", background="#f4f1e8")
+            style.configure("TLabel", background="#f4f1e8", foreground="#283648", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TRadiobutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TLabelframe", background="#f4f1e8", bordercolor="#d5c8ac")
+            style.configure("TLabelframe.Label", background="#f4f1e8", foreground="#8b672b",
                             font=("Segoe UI", 9, "bold"))
             style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
-                            background="#d9e8f0", foreground="#1a3a52")
-            style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
+                            background="#ebe5d9", foreground="#283648")
+            style.map("TButton", background=[("active", "#d6e9e8"), ("pressed", "#d5c8ac")])
             style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
-                            foreground="#152b3a")
-            style.configure("TNotebook", background="#edf2f5")
+                            foreground="#283648")
+            style.configure("TNotebook", background="#f4f1e8")
             style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
-            style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
-                      foreground=[("selected", "#096c7b")])
+            style.map("TNotebook.Tab", background=[("selected", "#fffdfa")],
+                      foreground=[("selected", "#8b672b")])
             self.root.geometry("800x560")
             self.root.minsize(660, 460)
             self.model = ConfigModel(cfg_path)
@@ -3528,7 +3726,7 @@ def build_app():
                 self.auto_apply_var = tk.BooleanVar(master=self.root, value=True)
             ttk.Checkbutton(bar, text=bi("Auto-apply valid changes|ใช้ค่าที่ถูกต้องอัตโนมัติ"),
                             variable=self.auto_apply_var, command=self.auto_apply_toggled).pack(side="right")
-            self.msg = ttk.Label(bar, text="", foreground="#444")
+            self.msg = ttk.Label(bar, text="", foreground="#626d7a")
             self.msg.pack(side="left", padx=12)
             self.nb = ttk.Notebook(self.root)
             self.nb.pack(fill="both", expand=True, padx=8)
@@ -3607,7 +3805,7 @@ def build_app():
                 w = ttk.Entry(parent, textvariable=var, width=width)
             w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
             if hint:
-                ttk.Label(parent, text=bi(hint), foreground="#666").grid(row=row, column=2, sticky="w")
+                ttk.Label(parent, text=bi(hint), foreground="#626d7a").grid(row=row, column=2, sticky="w")
             self.binds.append((path, kind, var, label))
             return var
 
@@ -3635,7 +3833,7 @@ def build_app():
             self.stats_lbl = ttk.Label(f, text="")
             self.stats_lbl.pack(anchor="w", pady=6)
             ttk.Label(f, text=bi("Closing this window does not stop the bot. Dry-run only logs what it would send.|"
-                                 "ปิดหน้าต่างนี้ไม่หยุดบอท โหมดทดลองแค่บันทึกว่าจะส่งอะไร"), foreground="#666").pack(anchor="w")
+                                 "ปิดหน้าต่างนี้ไม่หยุดบอท โหมดทดลองแค่บันทึกว่าจะส่งอะไร"), foreground="#626d7a").pack(anchor="w")
             lf = ttk.Frame(f)
             lf.pack(fill="both", expand=True, pady=6)
             self.log = tk.Text(lf, state="disabled", wrap="none", height=18, font=("Consolas", 9))
@@ -3670,7 +3868,7 @@ def build_app():
             ttk.Button(row, text=bi("Discover controls -> controls.txt|ดึง control -> controls.txt"),
                        command=lambda: self.helper("discover")).pack(side="left", padx=6)
             ttk.Label(row, text=bi("Windows only. Copy values from controls.txt into the boxes below.|"
-                                   "เฉพาะ Windows คัดลอกค่าจาก controls.txt มาใส่ช่องด้านล่าง"), foreground="#666").pack(side="left")
+                                   "เฉพาะ Windows คัดลอกค่าจาก controls.txt มาใส่ช่องด้านล่าง"), foreground="#626d7a").pack(side="left")
             self.selector_group(f, "Chat history selector|selector ประวัติแชท", ("autoreply", "history"))
             self.selector_group(f, "Chat input selector|selector ช่องพิมพ์แชท", ("autoreply", "input"))
             self.helper_out = tk.Text(f, height=8, state="disabled")
@@ -3716,7 +3914,7 @@ def build_app():
             e.pack(side="left", padx=4)
             e.bind("<Return>", lambda _e: self.test_rule())
             ttk.Button(lf, text=bi("Test|ทดลอง"), command=self.test_rule).pack(side="left")
-            self.tout = ttk.Label(lf, text="", foreground="#0a5")
+            self.tout = ttk.Label(lf, text="", foreground="#28744c")
             self.tout.pack(side="left", padx=8)
 
         # ---- music DJ
@@ -3789,7 +3987,7 @@ def build_app():
                 g, text=bi("Browse...|เลือก..."), command=self.dj_browse_music_folder)
             self.btn_dj_browse_music.grid(row=music_row, column=2, sticky="w", padx=4, pady=2)
             ttk.Label(g, text=bi("Windows-supported audio files|ไฟล์เสียงที่ Windows รองรับ"),
-                      foreground="#666").grid(row=music_row, column=3, sticky="w")
+                      foreground="#626d7a").grid(row=music_row, column=3, sticky="w")
             self.field(g, "Audio backend|เสียง", ("dj", "audio_backend"), "choice", ("chat", "local"), 10,
                        hint="chat = announce in chat, local = play audio on this PC|chat = ประกาศในแชท local = เล่นเสียงบนเครื่องนี้")
             self.field(g, "Now playing template|แม่แบบกำลังเล่น", ("dj", "announce_now"), width=44,
@@ -3801,7 +3999,7 @@ def build_app():
                 "Local audio plays on this PC - route it into Camfrog with a virtual cable or stereo mix.|"
                 "คำสั่งในแชท: !request <เพลง> !queue !current !skip !help "
                 "เสียง local เล่นบนเครื่องนี้ - ส่งเข้า Camfrog ด้วย virtual cable หรือ stereo mix"),
-                foreground="#666", wraplength=900).pack(anchor="w", pady=(8, 4))
+                foreground="#626d7a", wraplength=900).pack(anchor="w", pady=(8, 4))
             lf = ttk.LabelFrame(f, text=bi("Queue|คิวเพลง"), padding=6)
             lf.pack(fill="both", expand=True)
             self.dj_tree = ttk.Treeview(lf, columns=("n", "title", "user"), show="headings", height=10)
@@ -3932,7 +4130,7 @@ def build_app():
             self.run_bg(probe, "auto-update")
 
         def say(self, text, bad=False):
-            self.msg.configure(text=text, foreground="#b00" if bad else "#060")
+            self.msg.configure(text=text, foreground="#a3303a" if bad else "#28744c")
 
         def attach_autosave_hooks(self):
             vars_ = [var for _path, _kind, var, _label in self.binds]
@@ -4188,10 +4386,10 @@ def build_app():
             cfg = self.model.cfg
             pid = running_pid(cfg)
             self.state_lbl.configure(text=(t("state_running", pid=pid) if pid else t("state_stopped")),
-                                     foreground="#060" if pid else "#a00")
+                                     foreground="#28744c" if pid else "#a3303a")
             live = (not cfg["dry_run"]) if not hasattr(self, "live_var") else self.live_var.get()
             self.mode_lbl.configure(text=bi("LIVE|โหมดจริง") if live else bi("DRY-RUN|โหมดทดลอง"),
-                                    foreground="#c00" if live else "#06a")
+                                    foreground="#9f3740" if live else "#8b672b")
             self.btn_start.state(["disabled"] if pid else ["!disabled"])
             self.btn_stop.state(["!disabled"] if pid else ["disabled"])
             s = read_stats(cfg)
@@ -4258,12 +4456,12 @@ def build_app():
         def test_rule(self):
             cfg, errs = self.collect()
             if errs:
-                self.tout.configure(text=errs[0], foreground="#b00")
+                self.tout.configure(text=errs[0], foreground="#a3303a")
                 return
             try:
-                self.tout.configure(text=explain(cfg, self.tn.get().strip(), self.tm.get()).replace("\n", "  |  "), foreground="#0a5")
+                self.tout.configure(text=explain(cfg, self.tn.get().strip(), self.tm.get()).replace("\n", "  |  "), foreground="#28744c")
             except re.error as e:
-                self.tout.configure(text=str(e), foreground="#b00")
+                self.tout.configure(text=str(e), foreground="#a3303a")
 
         def mainloop(self):
             self.root.mainloop()
@@ -4326,6 +4524,31 @@ def version_newer(latest, current=APP_VERSION):
     return _version_key(latest) > _version_key(current)
 
 
+def _validate_github_release_url(url):
+    """Accept only HTTPS URLs on GitHub's release and asset hosts."""
+    allowed_hosts = {
+        "github.com", "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid GitHub release URL") from exc
+    if (parsed.scheme.casefold() != "https"
+            or (parsed.hostname or "").casefold() not in allowed_hosts
+            or parsed.username or parsed.password
+            or port not in (None, 443)):
+        raise ValueError("update URL must use HTTPS on a GitHub release host")
+    return str(url)
+
+
+def _validate_github_response_url(response, requested_url):
+    geturl = getattr(response, "geturl", None)
+    final_url = geturl() if callable(geturl) else requested_url
+    _validate_github_release_url(final_url)
+
+
 def github_latest_release(timeout=15.0):
     """(tag, notes, {asset_name: url}) for the newest release, or None."""
     request = urllib.request.Request(
@@ -4353,19 +4576,26 @@ def check_for_update(asset_name, timeout=15.0):
 
 
 def check_release_assets(asset_name, timeout=15.0):
-    """(tag, url, sums_url, notes) for a newer release carrying `asset_name`."""
+    """Return verified GitHub release URLs only when the asset has checksums."""
     release = github_latest_release(timeout)
     if release is None:
         return None
     tag, notes, assets = release
     url = assets.get(asset_name)
-    if url and version_newer(tag):
-        sums_url = assets.get(UPDATE_ASSET_SUMS, "")
-        if not sums_url:  # e.g. release-SHA256SUMS.txt alongside SHA256SUMS.txt
-            sums_url = next((u for n, u in sorted(assets.items())
-                             if n.endswith("SHA256SUMS.txt")), "")
-        return tag, url, sums_url, notes
-    return None
+    if not url or not version_newer(tag):
+        return None
+    sums_url = assets.get(UPDATE_ASSET_SUMS, "")
+    if not sums_url:  # e.g. release-SHA256SUMS.txt alongside SHA256SUMS.txt
+        sums_url = next((value for name, value in sorted(assets.items())
+                         if name.endswith("SHA256SUMS.txt")), "")
+    if not sums_url:
+        return None
+    try:
+        _validate_github_release_url(url)
+        _validate_github_release_url(sums_url)
+    except ValueError:
+        return None
+    return tag, url, sums_url, notes
 
 
 def self_update(asset_name, confirm=None, timeout=15.0):
@@ -4394,26 +4624,30 @@ def _sha256_file(path, chunk=1 << 20):
 
 
 def download_update(url, target, timeout=60.0):
-    """Stream a release asset to `target`. Returns the bytes written."""
+    """Stream a GitHub release asset to `target`. Returns the bytes written."""
+    _validate_github_release_url(url)
     request = urllib.request.Request(
-        url, headers={"User-Agent": "camfrog_auto/{0}".format(APP_VERSION)})
+        url, headers={"User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
     written = 0
-    with urllib.request.urlopen(request, timeout=timeout) as response, \
-            open(target, "wb") as handle:
-        while True:
-            block = response.read(1 << 16)
-            if not block:
-                break
-            handle.write(block)
-            written += len(block)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        _validate_github_response_url(response, url)
+        with open(target, "wb") as handle:
+            while True:
+                block = response.read(1 << 16)
+                if not block:
+                    break
+                handle.write(block)
+                written += len(block)
     return written
 
 
 def verify_against_sums(sums_url, asset_name, local_path, timeout=30.0):
-    """True when local_path matches the release's SHA256SUMS entry."""
+    """True when local_path matches the GitHub release's SHA256SUMS entry."""
+    _validate_github_release_url(sums_url)
     request = urllib.request.Request(
         sums_url, headers={"User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
     with urllib.request.urlopen(request, timeout=timeout) as response:
+        _validate_github_response_url(response, sums_url)
         text = response.read().decode("utf-8", "replace")
     want = ""
     for line in text.splitlines():
@@ -4421,8 +4655,7 @@ def verify_against_sums(sums_url, asset_name, local_path, timeout=30.0):
         if len(parts) != 2:
             continue
         name = parts[1].lstrip("*")
-        # release sums may be flat ("room-control.exe") or dist-relative
-        # ("room-control/room-control.exe"); match either, first hit wins.
+        # Release sums may be flat or dist-relative; match either, first hit wins.
         if name == asset_name or name.endswith("/" + asset_name):
             want = parts[0].lower()
             break
@@ -4438,6 +4671,17 @@ def stage_and_swap_update(url, asset_name, sums_url=None):
     """
     if not getattr(sys, "frozen", False):
         return False, "self-update only applies to the packaged executable."
+    if not sums_url:
+        return False, "release checksum is unavailable; update refused."
+    if not isinstance(asset_name, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,123}\.exe",
+            asset_name, flags=re.IGNORECASE):
+        return False, "invalid update asset name."
+    try:
+        _validate_github_release_url(url)
+        _validate_github_release_url(sums_url)
+    except ValueError as exc:
+        return False, str(exc)
     exe = Path(sys.executable).resolve()
     staged = exe.parent / (asset_name + ".new")
     try:
@@ -4461,6 +4705,6 @@ def stage_and_swap_update(url, asset_name, sums_url=None):
     if os.name == "nt":  # CREATE_NO_WINDOW: no console flash during the swap
         spawn["creationflags"] = 0x08000000
     subprocess.Popen(command, close_fds=True, **spawn)
-    return True, "update downloaded; the app will restart itself with {0}.".format(asset_name)
+    return True, "update is staged; it will replace {0} after the app exits.".format(asset_name)
 
 

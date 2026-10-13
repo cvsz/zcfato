@@ -9,17 +9,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from typing import Any
+from urllib.parse import quote
 
-DEFAULT_REPO = "cvsz/ztemplate"
-DEFAULT_BRANCH = "main"
-REQUIRED_CHECKS = (
-    "repository-baseline",
-    "Analyze GitHub Actions",
-    "dependency-review",
-)
+REPO_RE = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\Z")
+
+
+def validate_target(repo: str, branch: str, required_checks: tuple[str, ...]) -> None:
+    if not REPO_RE.fullmatch(repo) or any(part in {".", ".."} for part in repo.split("/")):
+        raise ValueError("--repo must be an OWNER/REPOSITORY name")
+    if not branch or any(ord(char) < 32 or ord(char) == 127 for char in branch):
+        raise ValueError("--branch must be a non-empty branch name without control characters")
+    if any(not check.strip() or any(char in check for char in "\r\n\0") for check in required_checks):
+        raise ValueError("required check names must be non-empty single-line values")
+    if len(set(required_checks)) != len(required_checks):
+        raise ValueError("required check names must not be repeated")
 
 
 def gh_api(method: str, endpoint: str, payload: dict[str, Any] | None = None) -> Any:
@@ -53,11 +60,11 @@ def require_gh() -> None:
         raise RuntimeError("GitHub CLI is not authenticated. Run: gh auth login")
 
 
-def protection_payload() -> dict[str, Any]:
+def protection_payload(required_checks: tuple[str, ...]) -> dict[str, Any]:
     return {
         "required_status_checks": {
             "strict": True,
-            "contexts": list(REQUIRED_CHECKS),
+            "contexts": list(required_checks),
         },
         "enforce_admins": True,
         "required_pull_request_reviews": {
@@ -77,7 +84,7 @@ def protection_payload() -> dict[str, Any]:
     }
 
 
-def print_plan(repo: str, branch: str) -> None:
+def print_plan(repo: str, branch: str, required_checks: tuple[str, ...]) -> None:
     print(f"Repository: {repo}")
     print(f"Branch: {branch}")
     print("Planned administration changes:")
@@ -88,8 +95,10 @@ def print_plan(repo: str, branch: str) -> None:
     print("- require conversation resolution")
     print("- require branch to be up to date")
     print("- require checks:")
-    for check in REQUIRED_CHECKS:
+    for check in required_checks:
         print(f"  - {check}")
+    if not required_checks:
+        print("  - none supplied; required checks will not be configured")
     print("- enforce rules for administrators")
     print("- block force pushes and branch deletion")
     print("- enable Dependabot vulnerability alerts and automated security fixes")
@@ -99,8 +108,13 @@ def print_plan(repo: str, branch: str) -> None:
     print("- prevent Actions from approving pull requests")
 
 
-def apply(repo: str, branch: str) -> None:
-    gh_api("PUT", f"repos/{repo}/branches/{branch}/protection", protection_payload())
+def apply(repo: str, branch: str, required_checks: tuple[str, ...]) -> None:
+    encoded_branch = quote(branch, safe="")
+    gh_api(
+        "PUT",
+        f"repos/{repo}/branches/{encoded_branch}/protection",
+        protection_payload(required_checks),
+    )
 
     gh_api("PUT", f"repos/{repo}/vulnerability-alerts")
     gh_api("PUT", f"repos/{repo}/automated-security-fixes")
@@ -126,15 +140,16 @@ def apply(repo: str, branch: str) -> None:
     )
 
 
-def verify(repo: str, branch: str) -> list[str]:
+def verify(repo: str, branch: str, required_checks: tuple[str, ...]) -> list[str]:
     errors: list[str] = []
 
-    protection = gh_api("GET", f"repos/{repo}/branches/{branch}/protection")
+    encoded_branch = quote(branch, safe="")
+    protection = gh_api("GET", f"repos/{repo}/branches/{encoded_branch}/protection")
 
     contexts = set(
         (protection.get("required_status_checks") or {}).get("contexts") or []
     )
-    missing_checks = sorted(set(REQUIRED_CHECKS) - contexts)
+    missing_checks = sorted(set(required_checks) - contexts)
     if missing_checks:
         errors.append(f"missing required status checks: {', '.join(missing_checks)}")
 
@@ -195,25 +210,42 @@ def verify(repo: str, branch: str) -> list[str]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--repo", default=DEFAULT_REPO)
-    parser.add_argument("--branch", default=DEFAULT_BRANCH)
+    parser.add_argument("--repo", required=True, help="target repository in OWNER/REPOSITORY form")
+    parser.add_argument("--branch", required=True, help="branch to protect, for example main")
+    parser.add_argument(
+        "--required-check",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="exact required status-check name; repeat once for each check",
+    )
     parser.add_argument("--apply", action="store_true", help="apply administration changes")
     parser.add_argument("--verify", action="store_true", help="verify effective settings")
     args = parser.parse_args()
 
-    require_gh()
-    print_plan(args.repo, args.branch)
+    required_checks = tuple(args.required_check)
+    try:
+        validate_target(args.repo, args.branch, required_checks)
+    except ValueError as exc:
+        parser.error(str(exc))
+
+    if (args.apply or args.verify) and not required_checks:
+        parser.error("--apply and --verify require at least one --required-check")
 
     if not args.apply and not args.verify:
+        print_plan(args.repo, args.branch, required_checks)
         print("\nDry-run only. Re-run with --apply to mutate GitHub settings.")
         return 0
 
+    require_gh()
+    print_plan(args.repo, args.branch, required_checks)
+
     if args.apply:
-        apply(args.repo, args.branch)
+        apply(args.repo, args.branch, required_checks)
         print("\nAdministration changes applied.")
 
     if args.verify or args.apply:
-        errors = verify(args.repo, args.branch)
+        errors = verify(args.repo, args.branch, required_checks)
         if errors:
             print("\nVerification failed:", file=sys.stderr)
             for error in errors:
