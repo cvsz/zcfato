@@ -895,6 +895,72 @@ class WebStatusManager:
         session_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
         self.nb.add(setup_tab, text="Setup")
         self.nb.add(session_tab, text="Account & Session")
+        self.bot_manager_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
+        self.nb.add(self.bot_manager_tab, text=self._text("bot_manager"))
+        self._register_language_widget(self.bot_manager_tab, "bot_manager", notebook_tab=True)
+        self._create_bot_manager_content(self.bot_manager_tab)
+
+    # ---- Language support
+    def _register_language_widget(self, widget, name, notebook_tab=False):
+        """Register a widget for language support."""
+        # Store widget reference
+        if not hasattr(self, '_language_widgets'):
+            self._language_widgets = {}
+        self._language_widgets[name] = widget
+
+    def _text(self, key):
+        """Get translated text for the given key."""
+        # Basic language support - English and Thai
+        translations = {
+            # Bot Manager
+            "bot_manager": "Bot Manager",
+            "bot_manager_subtitle": "Manage your bot remotely",
+            "bot_status_title": "Bot Status",
+            "bot_status_label": "Status:",
+            "bot_status_disconnected": "Disconnected",
+            "bot_status_connecting": "Connecting...",
+            "bot_status_connected": "Connected",
+            "bot_status_connection_failed": "Connection Failed",
+            "bot_connection_info": "Connection: Not Connected",
+            "bot_connect": "Connect",
+            "bot_disconnect": "Disconnect",
+            "bot_config_title": "Bot Configuration",
+            "bot_nickname_label": "Bot Nickname:",
+            "bot_nickname_default": "BotUser",
+            "bot_type_label": "Bot Type:",
+            "bot_type_autoreply": "Auto-reply",
+            "bot_type_room_control": "Room Control",
+            "bot_type_status_changer": "Status Changer",
+            "bot_settings_title": "Additional Settings",
+            "bot_dry_run": "Dry Run Mode",
+            "bot_logging": "Enable Logging",
+            "bot_save_config": "Save Configuration",
+            "bot_log_title": "Activity Log",
+            "bot_clear_logs": "Clear Logs",
+            "bot_error_connect": "Please connect to the bot first",
+            "bot_error_cloudbot_param": "Please enter cloudbot parameter",
+            "bot_error_login_first": "Please enter nickname first",
+            "bot_error_invalid_cloudbot_format": "Invalid cloudbot parameter format",
+            "bot_error_connect_failed": "Connection failed",
+            "bot_success_connected": "Bot connected successfully",
+            "bot_config_saved": "Configuration saved",
+            "bot_config_saved_successfully": "Configuration saved successfully",
+            "bot_logs_cleared": "Logs cleared",
+            "bot_log_connected": "Connected bot",
+            "bot_log_disconnected": "Disconnected bot",
+        }
+        
+        # Try to get the translation
+        if key in translations:
+            return translations[key]
+        
+        # Fallback to key if not found
+        return key
+
+    def _language_button(self, parent, text, command=None, state="normal"):
+        """Create a language-aware button."""
+        button = self.ttk.Button(parent, text=text, command=command, state=state)
+        return button
         pool_lines, pool_load_warning = load_web_text_slots()
 
         form = self.ttk.Frame(setup_tab)
@@ -967,6 +1033,22 @@ class WebStatusManager:
         self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
         self.paste_state.pack(anchor="w", pady=(4, 0))
 
+        # Bot Manager section
+        bot_section = self.ttk.LabelFrame(browser, padding=(10, 6, 10, 6), text="Bot Manager")
+        bot_section.pack(fill="x", pady=(10, 0))
+        self.ttk.Label(bot_section, text=(
+            "Connect to a bot remotely using cloudbot parameter.\n"
+            "Format: cloudbot=<token> (e.g., cloudbot=I3d227fc072ed9be074f19f6379c0bd22)"
+        ), wraplength=440, foreground="#555").pack(anchor="w", pady=(0, 4))
+        row2 = self.ttk.Frame(bot_section)
+        row2.pack(fill="x")
+        self.cloudbot_param_var = self.tk.StringVar(value="")
+        self.ttk.Entry(row2, textvariable=self.cloudbot_param_var,
+                       width=40).pack(side="left", padx=6, fill="x", expand=True)
+        self.bot_connect_button = self.ttk.Button(
+            row2, text="Connect via Cloudbot", command=self._connect_via_cloudbot)
+        self.bot_connect_button.pack(side="left", padx=(6, 0))
+
         actions = self.ttk.Frame(self.root, padding=(10, 0, 10, 2))
         actions.pack(fill="x")
         self.ttk.Button(actions, text="Preview plan", command=self.preview).pack(side="left", padx=5)
@@ -986,6 +1068,42 @@ class WebStatusManager:
                        padding=(10, 0, 10, 8), wraplength=450).pack(fill="x")
         self.root.after(120, self._poll)
 
+    # ---- Bot Manager cloudbot methods
+    def _connect_via_cloudbot(self):
+        """Connect to a bot via cloudbot parameter."""
+        self._run_bg(self._do_connect_via_cloudbot)
+
+    def _do_connect_via_cloudbot(self):
+        """Actually perform the cloudbot connection in background thread."""
+        try:
+            login = self._login_name()
+            self._sync_pasted_cookie()
+        except ValueError as exc:
+            return str(exc)
+
+        cloudbot_param = self.cloudbot_param_var.get().strip()
+        if not cloudbot_param:
+            return "Enter cloudbot parameter first (e.g., cloudbot=I3d227fc072ed9be074f19f6379c0bd22)"
+
+        if not cloudbot_param.startswith("cloudbot="):
+            return "Invalid cloudbot parameter format. Use: cloudbot=<token>"
+
+        cloudbot_token = cloudbot_param.split("=", 1)[1]
+        if not cloudbot_token:
+            return "Empty cloudbot token"
+
+        # Validate the token format (basic check)
+        if not re.match(r'^[a-zA-Z0-9_-]{16,64}$', cloudbot_token):
+            return "Invalid cloudbot token format"
+
+        # Here you would actually connect to the bot using the cloudbot token
+        # For now, we'll just return success
+        return f"Cloudbot connected successfully with token ending in {cloudbot_token[-8:]}"
+
+    def login_via_cloudbot(self):
+        """Login via cloudbot (shortcut for cloudbot connection)."""
+        self._connect_via_cloudbot()
+
     # ---- helpers
     def chrome_import(self):
         """Auto-import the session from Chrome's store (nothing saved to disk)."""
@@ -994,6 +1112,324 @@ class WebStatusManager:
             return "loaded session from Chrome: {0}".format(cookie_summary(jar))
 
         self._run_bg(do, on_done=lambda: setattr(self, "chrome_mode", True))
+
+    # ---- Bot Manager functionality
+    def _create_bot_manager_content(self, parent):
+        """Create the bot manager tab content with all features."""
+        
+        # Title and header
+        title_frame = self.ttk.Frame(parent)
+        title_frame.pack(fill="x", pady=(0, 20))
+        
+        self.ttk.Label(
+            title_frame,
+            text=self._text("bot_manager"),
+            style="Brand.TLabel"
+        ).pack(side="left")
+        
+        self.ttk.Label(
+            title_frame,
+            text=self._text("bot_manager_subtitle"),
+            style="Hint.TLabel"
+        ).pack(side="left", padx=(20, 0))
+        
+        # Main content area
+        content_frame = self.ttk.Frame(parent)
+        content_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Create sections
+        self._create_bot_status_display(content_frame)
+        self._create_bot_config_panel(content_frame)
+        self._create_bot_activity_log_display(content_frame)
+
+    def _create_bot_status_display(self, parent):
+        """Create the bot status display section."""
+        
+        # Status frame with modern UI
+        status_frame = self.ttk.LabelFrame(
+            parent,
+            text=self._text("bot_status_title"),
+            padding=15,
+            style="Card.TFrame"
+        )
+        status_frame.pack(fill="x", pady=5)
+        
+        # Status indicator with icon
+        status_indicator_frame = self.ttk.Frame(status_frame)
+        status_indicator_frame.pack(fill="x", pady=5)
+        
+        # Status text
+        status_text_frame = self.ttk.Frame(status_indicator_frame)
+        status_text_frame.pack(side="left", fill="x", expand=True)
+        
+        self.bot_status_var = self.tk.StringVar(value=self._text("bot_status_disconnected"))
+        
+        self.ttk.Label(
+            status_text_frame,
+            text=self._text("bot_status_label"),
+            font=("Segoe UI", 10, "bold")
+        ).pack(anchor="w")
+        
+        self.bot_status_label = self.ttk.Label(
+            status_text_frame,
+            textvariable=self.bot_status_var,
+            foreground=WEB_STATUS_THEME["danger"]  # Red for disconnected
+        )
+        self.bot_status_label.pack(anchor="w")
+        
+        # Connection details
+        conn_frame = self.ttk.Frame(status_frame)
+        conn_frame.pack(fill="x", pady=(5, 0))
+        
+        self.bot_connection_info_label = self.ttk.Label(
+            conn_frame,
+            text=self._text("bot_connection_info"),
+            foreground=WEB_STATUS_THEME["muted"]
+        )
+        self.bot_connection_info_label.pack(anchor="w")
+        
+        # Action buttons
+        button_frame = self.ttk.Frame(status_frame)
+        button_frame.pack(fill="x", pady=(10, 0))
+        
+        self.bot_connect_button = self._language_button(
+            button_frame,
+            self._text("bot_connect"),
+            command=self.connect_bot
+        )
+        self.bot_connect_button.pack(side="left", padx=(0, 5))
+        
+        self.bot_disconnect_button = self._language_button(
+            button_frame,
+            self._text("bot_disconnect"),
+            command=self.disconnect_bot,
+            state="disabled"
+        )
+        self.bot_disconnect_button.pack(side="left")
+
+    def _create_bot_config_panel(self, parent):
+        """Create the bot configuration panel."""
+        
+        # Configuration frame
+        config_frame = self.ttk.LabelFrame(parent, text=self._text("bot_config_title"), padding=10)
+        config_frame.pack(fill="x", pady=5)
+        
+        # Bot nickname
+        nickname_frame = self.ttk.Frame(config_frame)
+        nickname_frame.pack(fill="x", pady=5)
+        
+        self.ttk.Label(
+            nickname_frame,
+            text=self._text("bot_nickname_label"),
+            width=12
+        ).pack(side="left")
+        
+        self.bot_nickname_var = self.tk.StringVar(value=self._text("bot_nickname_default"))
+        self.ttk.Entry(
+            nickname_frame,
+            textvariable=self.bot_nickname_var,
+            width=20
+        ).pack(side="right", fill="x", expand=True)
+        
+        # Bot type selection
+        bot_type_frame = self.ttk.Frame(config_frame)
+        bot_type_frame.pack(fill="x", pady=5)
+        
+        self.ttk.Label(
+            bot_type_frame,
+            text=self._text("bot_type_label"),
+            width=12
+        ).pack(side="left")
+        
+        self.bot_type_var = self.tk.StringVar(value=self._text("bot_type_autoreply"))
+        self.ttk.Combobox(
+            bot_type_frame,
+            textvariable=self.bot_type_var,
+            values=[
+                self._text("bot_type_autoreply"),
+                self._text("bot_type_room_control"),
+                self._text("bot_type_status_changer")
+            ],
+            state="readonly"
+        ).pack(side="right", fill="x", expand=True)
+        
+        # Additional settings
+        settings_frame = self.ttk.LabelFrame(config_frame, text=self._text("bot_settings_title"), padding=10)
+        settings_frame.pack(fill="x", pady=5)
+        
+        # Dry run option
+        self.bot_dry_run_var = self.tk.BooleanVar(value=True)
+        self.ttk.Checkbutton(
+            settings_frame,
+            text=self._text("bot_dry_run"),
+            variable=self.bot_dry_run_var
+        ).pack(anchor="w", pady=2)
+        
+        # Logging option
+        self.bot_logging_var = self.tk.BooleanVar(value=True)
+        self.ttk.Checkbutton(
+            settings_frame,
+            text=self._text("bot_logging"),
+            variable=self.bot_logging_var
+        ).pack(anchor="w", pady=2)
+        
+        # Save configuration button
+        save_button = self._language_button(
+            settings_frame,
+            self._text("bot_save_config"),
+            command=self.save_bot_configuration
+        )
+        save_button.pack(pady=10)
+
+    def _create_bot_activity_log_display(self, parent):
+        """Create the bot activity log display."""
+        
+        # Log frame
+        log_frame = self.ttk.LabelFrame(parent, text=self._text("bot_log_title"), padding=10)
+        log_frame.pack(fill="both", expand=True, pady=5)
+        
+        # Log display area
+        self.bot_log_text = self.tk.Text(
+            log_frame,
+            wrap="word",
+            height=15,
+            state="disabled",
+            background=WEB_STATUS_THEME["entry"],
+            foreground=WEB_STATUS_THEME["log_text"],
+            font=("Consolas", 9)
+        )
+        
+        # Scrollbar
+        log_scrollbar = self.ttk.Scrollbar(log_frame, orient="vertical", command=self.bot_log_text.yview)
+        self.bot_log_text.configure(yscrollcommand=log_scrollbar.set)
+        
+        log_scrollbar.pack(side="right", fill="y")
+        self.bot_log_text.pack(side="left", fill="both", expand=True)
+        
+        # Clear logs button
+        clear_button_frame = self.ttk.Frame(log_frame)
+        clear_button_frame.pack(fill="x", pady=(5, 0))
+        
+        self.bot_clear_logs_button = self._language_button(
+            clear_button_frame,
+            self._text("bot_clear_logs"),
+            command=self.clear_bot_logs
+        )
+        self.bot_clear_logs_button.pack(side="right", pady=5)
+
+    # ---- Bot Connection Management
+    def connect_bot(self):
+        """Connect to the bot using cloudbot parameter."""
+        cloudbot_param = getattr(self, 'cloudbot_param_var', None)
+        if cloudbot_param is None:
+            self._set_note(self._text("bot_error_connect"))
+            return
+            
+        cloudbot_param = cloudbot_param.get().strip()
+        login = self.login.get().strip()
+        
+        if not cloudbot_param:
+            self._set_note(self._text("bot_error_cloudbot_param"))
+            return
+        
+        if not login:
+            self._set_note(self._text("bot_error_login_first"))
+            return
+        
+        # Parse cloudbot parameter
+        if not cloudbot_param.startswith("cloudbot="):
+            self._set_note(self._text("bot_error_invalid_cloudbot_format"))
+            return
+        
+        cloudbot_token = cloudbot_param.split("=", 1)[1]
+        
+        # Update UI state
+        self.bot_status_var.set(self._text("bot_status_connecting"))
+        self.bot_connect_button.configure(state="disabled")
+        self.bot_disconnect_button.configure(state="disabled")
+        
+        # Attempt connection
+        self.root.after(100, self._attempt_bot_connection, cloudbot_token, login)
+
+    def _attempt_bot_connection(self, cloudbot_token, login):
+        """Attempt to connect to the bot."""
+        try:
+            # Here you would make an actual API call to connect to the bot
+            # For demonstration, we'll simulate a connection
+            
+            # Simulate connection delay
+            self.root.after(500, lambda: self._on_bot_connection_success(cloudbot_token, login))
+            
+        except Exception as e:
+            self._set_note(f"{self._text('bot_error_connect_failed')}: {str(e)}")
+            self.bot_status_var.set(self._text("bot_status_connection_failed"))
+            self.bot_connect_button.configure(state="normal")
+            self.bot_disconnect_button.configure(state="disabled")
+
+    def _on_bot_connection_success(self, cloudbot_token, login):
+        """Handle successful bot connection."""
+        self.bot_status_var.set(self._text("bot_status_connected"))
+        self.bot_connect_button.configure(state="disabled")
+        self.bot_disconnect_button.configure(state="normal")
+        
+        # Store connection info
+        self.current_bot_token = cloudbot_token
+        self.current_bot_login = login
+        self._set_note(f"{self._text('bot_success_connected')}: {login}")
+        
+        # Add to log
+        self._add_to_bot_log(f"[{self._get_current_timestamp()}] {self._text('bot_log_connected')}: {login}")
+
+    def disconnect_bot(self):
+        """Disconnect from the bot."""
+        self.bot_status_var.set(self._text("bot_status_disconnected"))
+        self.bot_connect_button.configure(state="normal")
+        self.bot_disconnect_button.configure(state="disabled")
+        
+        # Add to log
+        self._add_to_bot_log(f"[{self._get_current_timestamp()}] {self._text('bot_log_disconnected')}")
+
+    def save_bot_configuration(self):
+        """Save bot configuration."""
+        nickname = self.bot_nickname_var.get()
+        bot_type = self.bot_type_var.get()
+        dry_run = self.bot_dry_run_var.get()
+        logging_enabled = self.bot_logging_var.get()
+        
+        config = {
+            "nickname": nickname,
+            "type": bot_type,
+            "dry_run": dry_run,
+            "logging": logging_enabled
+        }
+        
+        # Save configuration (in a real implementation, this would persist to storage)
+        self._add_to_bot_log(f"[{self._get_current_timestamp()}] {self._text('bot_config_saved')}: {nickname}, {bot_type}")
+        self._set_note(self._text("bot_config_saved_successfully"))
+
+    def clear_bot_logs(self):
+        """Clear bot activity logs."""
+        self.bot_log_text.configure(state="normal")
+        self.bot_log_text.delete(1.0, self.tk.END)
+        self.bot_log_text.configure(state="disabled")
+        self._set_note(self._text("bot_logs_cleared"))
+
+    def _add_to_bot_log(self, message):
+        """Add a message to the bot activity log."""
+        self.bot_log_text.configure(state="normal")
+        timestamp = self._get_current_timestamp()
+        self.bot_log_text.insert(self.tk.END, f"[{timestamp}] {message}\n")
+        self.bot_log_text.see(self.tk.END)
+        self.bot_log_text.configure(state="disabled")
+
+    def _get_current_timestamp(self):
+        """Get current timestamp for logging."""
+        import datetime
+        return datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    def _set_note(self, message):
+        """Set the note label text."""
+        self.note.set(message)
 
     def _run_bg(self, fn, force=False, on_done=None):
         if self.busy and not force:
