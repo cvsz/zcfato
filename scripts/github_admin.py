@@ -148,6 +148,44 @@ def verify(repo: str, branch: str) -> list[str]:
         errors.append("stale approvals are not dismissed")
     if not reviews.get("require_code_owner_reviews"):
         errors.append("CODEOWNERS review is not required")
+
+    if not protection.get("allow_force_pushes"):
+        errors.append("force pushes are not allowed")
+    if not protection.get("allow_deletions"):
+        errors.append("branch deletion is not allowed")
+    if not protection.get("required_conversation_resolution"):
+        errors.append("conversation resolution is not required")
+    if not protection.get("allow_fork_syncing"):
+        errors.append("fork syncing is not enabled")
+
+    # Verify security settings
+    repo_state = gh_api("GET", f"repos/{repo}")
+    security = repo_state.get("security_and_analysis") or {}
+
+    if not security.get("secret_scanning", {}).get("status") == "enabled":
+        errors.append("secret scanning is not enabled")
+    if not security.get("secret_scanning_push_protection", {}).get("status") == "enabled":
+        errors.append("secret scanning push protection is not enabled")
+    if not security.get("dependabot_security_updates", {}).get("status") == "enabled":
+        errors.append("Dependabot security updates is not enabled")
+
+    # Verify Actions permissions
+    try:
+        actions = gh_api("GET", f"repos/{repo}/actions/permissions/workflow")
+        if actions.get("default_workflow_permissions") != "read":
+            errors.append("Workflow permissions are not set to read-only")
+        if actions.get("can_approve_pull_request_reviews"):
+            errors.append("Actions should not be able to approve pull requests")
+    except Exception:
+        errors.append("Failed to verify Actions permissions")
+
+    # Verify branch protection rules
+    if protection.get("required_linear_history"):
+        errors.append("Linear history is required (usually not desired)")
+    if protection.get("block_creations"):
+        errors.append("Branch creation is blocked (usually not desired)")
+
+    return errors
     if not reviews.get("require_last_push_approval"):
         errors.append("approval after the latest push is not required")
 
