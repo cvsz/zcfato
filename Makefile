@@ -1,4 +1,5 @@
-PYTHON ?= $(if $(wildcard $(CURDIR)/venv/bin/python),$(CURDIR)/venv/bin/python,python3)
+VENV_PYTHON := $(wildcard $(CURDIR)/venv/bin/python $(CURDIR)/venv/Scripts/python.exe)
+PYTHON ?= $(if $(VENV_PYTHON),$(firstword $(VENV_PYTHON)),python3)
 RUFF := $(PYTHON) -m ruff
 PYTEST := $(PYTHON) -m pytest
 

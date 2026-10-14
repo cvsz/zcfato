@@ -22,7 +22,7 @@ from .api import router
 from .config import Settings
 from .db import make_engine
 from .domain_api import router as domain_router
-from .observability import log_http_request, log_startup_event, redact_db_url
+from .observability import StructuredLogger, log_http_request, log_startup_event, redact_db_url
 from .rate_limit import SlidingWindowRateLimiter
 
 
@@ -59,7 +59,7 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
     app.state.session_factory = factory
     app.state.owns_engine = owns_engine
     app.state.rate_limiter = SlidingWindowRateLimiter()
-    request_logger = logging.getLogger("camfrog_control_server.http")
+    request_logger = StructuredLogger(logging.getLogger("camfrog_control_server.http"))
 
     if settings.cors_origins:
         app.add_middleware(
@@ -101,31 +101,37 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
         request.state.request_id = request_id
         started = time.monotonic()
 
-        if request.url.path.startswith("/api/v1/"):
-            bucket = (
-                "auth"
-                if request.url.path.endswith("/auth/session")
-                else ("agent" if "/agent/" in request.url.path else "admin")
-            )
-            peer = request.client.host if request.client is not None else "unknown"
-            limit = (
-                settings.auth_rate_limit_requests
-                if bucket == "auth"
-                else settings.api_rate_limit_requests
-            )
-            allowed, retry_after = await app.state.rate_limiter.allow(
-                f"{bucket}:{peer}", limit=limit
-            )
-            if not allowed:
-                response = JSONResponse(
-                    status_code=429,
-                    content={"detail": "Rate limit exceeded."},
-                    headers={"Retry-After": str(retry_after)},
+        try:
+            if request.url.path.startswith("/api/v1/"):
+                bucket = (
+                    "auth"
+                    if request.url.path.endswith("/auth/session")
+                    else ("agent" if "/agent/" in request.url.path else "admin")
                 )
+                peer = request.client.host if request.client is not None else "unknown"
+                limit = (
+                    settings.auth_rate_limit_requests
+                    if bucket == "auth"
+                    else settings.api_rate_limit_requests
+                )
+                allowed, retry_after = await app.state.rate_limiter.allow(
+                    f"{bucket}:{peer}", limit=limit
+                )
+                if not allowed:
+                    response = JSONResponse(
+                        status_code=429,
+                        content={"detail": "Rate limit exceeded."},
+                        headers={"Retry-After": str(retry_after)},
+                    )
+                else:
+                    response = await call_next(request)
             else:
                 response = await call_next(request)
-        else:
-            response = await call_next(request)
+        except Exception:
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": "Internal server error."},
+            )
 
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Content-Type-Options"] = "nosniff"
