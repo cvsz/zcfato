@@ -2826,6 +2826,7 @@ class WebStatusManager:
         self._pending = None
         self._start_generation = 0
         self._clipboard_bound_widgets = set()
+        self._language_widgets = []
         load_dotenv(BASE / ".env")  # pick up the encrypted account, if saved
         self.root = self.tk.Tk()
         self.root.title("ZChat Web Status")

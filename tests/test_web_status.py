@@ -199,10 +199,10 @@ def test_next_rotation_empty_pool_refused():
 
 @pytest.mark.parametrize("module", [ws, wsg], ids=["cli", "gui"])
 def test_parse_rotate_interval_clamps_and_preserves_fractional_seconds(module):
-    assert module.ROTATE_INTERVAL_DEFAULT == 10.0
-    assert module.parse_rotate_interval("0.5") == 0.5
-    assert module.parse_rotate_interval("1.25") == 1.25
-    assert module.parse_rotate_interval("0.25") == module.ROTATE_INTERVAL_MIN
+    assert module.ROTATE_INTERVAL_DEFAULT == 60
+    assert module.parse_rotate_interval("60") == 60.0
+    assert module.parse_rotate_interval("120.5") == 120.5
+    assert module.parse_rotate_interval("5") == module.ROTATE_INTERVAL_MIN
     assert module.parse_rotate_interval("999999") == module.ROTATE_INTERVAL_MAX
     for bad in ("", "abc", "nan", "inf", None):
         with pytest.raises(ValueError):

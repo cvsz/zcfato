@@ -13,7 +13,8 @@ setup:
 	$(PYTHON) -m pip install -e 'control-server[lint,test]'
 
 validate-template:
-	$(PYTHON) scripts/validate_repo.py
+	python3 scripts/validate_repo.py
+	python3 -m unittest discover -s tests -p 'test_bootstrap.py' -v
 
 format:
 	$(RUFF) format --check control-server/src control-server/tests
