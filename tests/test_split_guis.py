@@ -21,6 +21,7 @@ MODULES = {
     "camfrog_music_gui": ("music", None),
     "status_random_gui": ("status", "random"),
     "status_marquee_gui": ("status", "marquee"),
+    "status_changer_gui": ("status", "both"),
     "chat_im_private_gui": (None, None),
     "web_status_gui": (None, None),
 }
@@ -37,6 +38,7 @@ def test_module_has_no_project_imports(name):
               "import camfrog_private_chat_gui", "import room_control_gui",
               "import im_autoreply_gui", "import camfrog_music_gui",
               "import status_random_gui", "import status_marquee_gui",
+              "import status_changer_gui",
               "import chat_im_private_gui", "import web_status_gui",
               "from tools", "import tools", "import clipboard_support",
               "from clipboard_support")
@@ -50,10 +52,15 @@ def test_profiles_and_modes_are_pinned():
     assert load("camfrog_music_gui").APP_PROFILE == "music"
     assert load("status_random_gui").STATUS_MODE == "random"
     assert load("status_marquee_gui").STATUS_MODE == "marquee"
+    assert load("status_changer_gui").STATUS_MODE == "both"
     assert load("status_random_gui").runtime_config(
         load("status_random_gui").DEFAULTS)["status"]["random"] is True
     assert load("status_marquee_gui").runtime_config(
         load("status_marquee_gui").DEFAULTS)["status"]["marquee"]["enabled"] is True
+    combined = load("status_changer_gui")
+    assert combined.runtime_config(combined.DEFAULTS, "random")["status"]["random"] is True
+    assert combined.runtime_config(
+        combined.DEFAULTS, "marquee")["status"]["marquee"]["enabled"] is True
 
 
 def test_room_and_im_profiles_disable_other_features():
@@ -101,6 +108,105 @@ def test_status_modules_reject_other_modes_commands(capsys):
     assert load("status_random_gui").cli_main(["marquee", "x"]) == 2
 
 
+def test_status_changer_logs_the_completed_status_text(caplog, monkeypatch):
+    import logging
+    from types import SimpleNamespace
+
+    mod = load("status_changer_gui")
+    monkeypatch.setattr(mod, "LANG", "en")
+    monkeypatch.setattr(mod, "LOG_TEXT", True)
+    caplog.set_level(logging.INFO, logger="camfrog_status")
+    runner_state = SimpleNamespace(
+        marq={"slot_index": None}, status_i=0, stats={"statuses": 0}, current_text="")
+
+    mod.Runner._finish_status(
+        runner_state, {"slot_index": None, "raw": "status text sent"}, "status text sent")
+
+    assert "status set: 'status text sent'" in caplog.text
+
+
+def test_status_changer_combo_submit_does_not_focus_or_type_keys(monkeypatch):
+    from types import SimpleNamespace
+
+    mod = load("status_changer_gui")
+    posted = []
+    post_message = lambda *args: posted.append(args) or 1
+    user32 = SimpleNamespace(GetForegroundWindow=lambda: 999, PostMessageW=post_message)
+    monkeypatch.setattr(mod.ctypes, "windll", SimpleNamespace(user32=user32), raising=False)
+    combo = SimpleNamespace(class_name="CComboBoxTS", handle=77)
+    ctrl = SimpleNamespace(
+        handle=88, element_info=SimpleNamespace(parent=combo),
+        set_focus=lambda: pytest.fail("background update must not move focus"),
+        type_keys=lambda *_a, **_k: pytest.fail("background update must not simulate typing"),
+    )
+    monkeypatch.setattr(mod, "is_web", lambda _ctrl: False)
+    monkeypatch.setattr(mod, "write_text", lambda _ctrl, _text: True)
+
+    assert mod.commit(SimpleNamespace(handle=123), ctrl, "status", False,
+                      require_fg=True, background_enter_target="combo")
+    assert posted == [(77, 0x0100, 0x0D, 0), (77, 0x0101, 0x0D, 0)]
+
+
+def test_status_logs_clear_at_local_noon_once_per_day(tmp_path):
+    import datetime as dt
+
+    mod = load("status_changer_gui")
+    tz = dt.timezone(dt.timedelta(hours=7))
+    files = ("status_activity.log", "random-status-worker.log",
+             "marquee-status-worker.log", "camfrog_status_changer.log")
+    for filename in files:
+        (tmp_path / filename).write_text("old log\n", encoding="utf-8")
+        (tmp_path / f"{filename}.1").write_text("rotated log\n", encoding="utf-8")
+
+    before_noon = dt.datetime(2026, 10, 14, 11, 59, tzinfo=tz)
+    assert mod.clean_status_logs_at_noon(tmp_path, before_noon) == ()
+    assert (tmp_path / "status_activity.log").read_text("utf-8") == "old log\n"
+
+    noon = dt.datetime(2026, 10, 14, 12, 0, tzinfo=tz)
+    cleaned = mod.clean_status_logs_at_noon(tmp_path, noon, active_modes={"random"})
+    assert "status_activity.log" in cleaned
+    assert "marquee-status-worker.log" in cleaned
+    assert "random-status-worker.log" not in cleaned
+    assert (tmp_path / "random-status-worker.log").read_text("utf-8") == "old log\n"
+    assert not (tmp_path / "marquee-status-worker.log.1").exists()
+
+    later = dt.datetime(2026, 10, 14, 12, 1, tzinfo=tz)
+    assert "random-status-worker.log" in mod.clean_status_logs_at_noon(
+        tmp_path, later, active_modes=set())
+    (tmp_path / "status_activity.log").write_text("today log\n", encoding="utf-8")
+    assert mod.clean_status_logs_at_noon(tmp_path, later) == ()
+    assert (tmp_path / "status_activity.log").read_text("utf-8") == "today log\n"
+
+    next_noon = dt.datetime(2026, 10, 15, 12, 0, tzinfo=tz)
+    assert "status_activity.log" in mod.clean_status_logs_at_noon(tmp_path, next_noon)
+    assert (tmp_path / "status_activity.log").read_text("utf-8") == ""
+
+
+def test_active_worker_clears_its_open_log_at_noon(tmp_path):
+    import datetime as dt
+    import logging.handlers
+
+    mod = load("status_changer_gui")
+    path = tmp_path / "random-status-worker.log"
+    path.write_text("old log\n", encoding="utf-8")
+    rotated = Path(f"{path}.1")
+    rotated.write_text("rotated log\n", encoding="utf-8")
+    handler = logging.handlers.RotatingFileHandler(
+        path, maxBytes=10000, backupCount=1, encoding="utf-8")
+    now = dt.datetime(2026, 10, 14, 12, 0,
+                      tzinfo=dt.timezone(dt.timedelta(hours=7)))
+    try:
+        assert mod.clean_worker_log_at_noon(now, handlers=[handler]) == (path.name,)
+        assert path.read_text("utf-8") == ""
+        assert not rotated.exists()
+        record = logging.LogRecord("test", logging.INFO, "", 0, "after clean", (), None)
+        handler.emit(record)
+        handler.flush()
+        assert "after clean" in path.read_text("utf-8")
+    finally:
+        handler.close()
+
+
 def test_chat_im_private_engine_copy():
     mod = load("chat_im_private_gui")
     cfg = copy.deepcopy(mod.DEFAULTS)
@@ -125,6 +231,7 @@ def test_entry_points_import_their_module():
             ("im_autoreply_entry", "im_autoreply_gui"),
             ("status_random_entry", "status_random_gui"),
             ("status_marquee_entry", "status_marquee_gui"),
+            ("status_changer_entry", "status_changer_gui"),
             ("chat_im_private_entry", "chat_im_private_gui"),
             ("music_dj_entry", "camfrog_music_gui"),
             ("web_status_entry", "web_status_gui")):

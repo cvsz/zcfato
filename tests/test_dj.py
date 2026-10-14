@@ -1,10 +1,12 @@
 """Offline DJ tests: queue engine, commands, validation, music profile."""
 import copy
+import base64
 import json
 import os
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -448,6 +450,203 @@ def test_dj_queue_persist_roundtrip(tmp_path):
     assert q2.queue == [{"title": "Song", "user": "Ann"}]
 
 
+def _write_dj_control_request(tmp_path, action, request_id, created_at, text=None):
+    directory = c.dj_control_directory(tmp_path)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = c.dj_control_request_path(request_id, tmp_path)
+    payload = {
+        "protocol": c.DJ_CONTROL_PROTOCOL,
+        "request_id": request_id,
+        "action": action,
+        "created_at": created_at,
+    }
+    if text is not None:
+        payload["text"] = text
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path, directory / (request_id + ".response.json")
+
+
+def test_dj_control_skip_is_processed_by_owner_loop(cfg, tmp_path, monkeypatch):
+    queue = c.DJQueue(tmp_path / "dj_queue.json")
+    queue.current = {"title": "First", "user": "Ann"}
+    queue.queue = [{"title": "Next", "user": "Bob"}]
+    assert queue.save()
+    stopped = []
+    monkeypatch.setattr(c, "dj_stop", lambda: stopped.append(True))
+    request, response = _write_dj_control_request(
+        tmp_path, "skip", "a" * 32, time.time())
+
+    assert c.process_dj_control_request(cfg, base=tmp_path) == 1
+
+    saved = json.loads((tmp_path / "dj_queue.json").read_text(encoding="utf-8"))
+    result = json.loads(response.read_text(encoding="utf-8"))
+    assert saved["current"] == {"title": "Next", "user": "Bob"}
+    assert saved["queue"] == []
+    assert result["ok"] is True and result["current"] == saved["current"]
+    assert stopped == [True]
+    assert not request.exists()
+
+
+def test_dj_control_clear_stops_audio_and_persists_empty_queue(cfg, tmp_path, monkeypatch):
+    queue = c.DJQueue(tmp_path / "dj_queue.json")
+    queue.current = {"title": "First", "user": "Ann"}
+    queue.queue = [{"title": "Next", "user": "Bob"}]
+    assert queue.save()
+    stopped = []
+    monkeypatch.setattr(c, "dj_stop", lambda: stopped.append(True))
+    _, response = _write_dj_control_request(
+        tmp_path, "clear", "b" * 32, time.time())
+
+    c.process_dj_control_request(cfg, base=tmp_path)
+
+    saved = json.loads((tmp_path / "dj_queue.json").read_text(encoding="utf-8"))
+    result = json.loads(response.read_text(encoding="utf-8"))
+    assert saved == {"current": None, "queue": []}
+    assert result["ok"] is True
+    assert stopped == [True]
+
+
+def test_dj_control_speak_starts_bounded_local_voice(cfg, tmp_path, monkeypatch):
+    spoken = []
+    monkeypatch.setattr(c, "start_room_speech", lambda text: spoken.append(text))
+    _, response = _write_dj_control_request(
+        tmp_path, "speak", "e" * 32, time.time(), text="Now playing a song")
+    assert c.process_dj_control_request(
+        cfg, base=tmp_path, runner=SimpleNamespace()) == 1
+    result = json.loads(response.read_text(encoding="utf-8"))
+    assert result["ok"] is True
+    assert result["action"] == "speak"
+    assert spoken == ["Now playing a song"]
+
+    _, bad_response = _write_dj_control_request(
+        tmp_path, "speak", "f" * 32, time.time(), text="x" * 241)
+    c.process_dj_control_request(cfg, base=tmp_path, runner=SimpleNamespace())
+    bad_result = json.loads(bad_response.read_text(encoding="utf-8"))
+    assert bad_result["ok"] is False
+    assert "240 printable" in bad_result["error"]
+
+
+def test_dj_control_skip_refuses_when_dj_is_disabled(cfg, tmp_path):
+    cfg["dj"]["enabled"] = False
+    queue = c.DJQueue(tmp_path / "dj_queue.json")
+    queue.current = {"title": "First", "user": "Ann"}
+    assert queue.save()
+    _, response = _write_dj_control_request(
+        tmp_path, "skip", "d" * 32, time.time())
+
+    c.process_dj_control_request(cfg, base=tmp_path)
+
+    result = json.loads(response.read_text(encoding="utf-8"))
+    saved = json.loads((tmp_path / "dj_queue.json").read_text(encoding="utf-8"))
+    assert result["ok"] is False
+    assert "disabled" in result["error"]
+    assert saved["current"] == {"title": "First", "user": "Ann"}
+
+
+def test_dj_control_expired_request_is_rejected(cfg, tmp_path):
+    _, response = _write_dj_control_request(
+        tmp_path, "clear", "c" * 32,
+        time.time() - c.DJ_CONTROL_REQUEST_TTL_SECONDS - 1)
+
+    c.process_dj_control_request(cfg, base=tmp_path)
+
+    result = json.loads(response.read_text(encoding="utf-8"))
+    assert result["ok"] is False
+    assert "expired" in result["error"]
+    assert not (tmp_path / "dj_queue.json").exists()
+
+
+def test_dj_control_state_is_bounded_and_rejects_queue_path_escape(cfg, tmp_path):
+    cfg["dj"]["queue_file"] = "../outside.json"
+    assert c.publish_dj_control_state(cfg, base=tmp_path) is None
+    assert not (tmp_path.parent / "outside.json").exists()
+
+
+def test_dj_control_state_publishes_playback_time_for_the_voice_summary(cfg, tmp_path):
+    runner = SimpleNamespace(dj_started=time.monotonic() - 5, dj_length=180.0)
+    payload = c.publish_dj_control_state(cfg, now=1000, base=tmp_path, runner=runner)
+    assert payload["playback"]["elapsed_seconds"] >= 4
+    assert payload["playback"]["duration_seconds"] == 180.0
+    elapsed, duration = c.dj_playback_times(base=tmp_path, now=1000)
+    assert elapsed >= 4
+    assert duration == 180.0
+    assert c.dj_playback_times(base=tmp_path, now=1011) == (None, None)
+
+
+def test_youtube_search_url_is_fixed_origin_and_escaped():
+    url = c.youtube_search_url("Thai song & camera")
+    assert url.startswith("https://www.youtube.com/results?")
+    assert "search_query=Thai+song+%26+camera" in url
+    with pytest.raises(ValueError, match="Enter a YouTube"):
+        c.youtube_search_url("  ")
+    with pytest.raises(ValueError, match="printable"):
+        c.youtube_search_url("hello\nworld")
+
+
+def test_windows_speech_command_keeps_user_text_out_of_powershell_source():
+    text = "Hello; Write-Output bad ไทย"
+    command = c.windows_speech_powershell_command(text)
+    script = base64.b64decode(command).decode("utf-16le")
+    encoded_text = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    assert "System.Speech.Synthesis.SpeechSynthesizer" in script
+    assert encoded_text in script
+    assert text not in script
+    with pytest.raises(ValueError, match="Enter the text"):
+        c.windows_speech_powershell_command("  ")
+    with pytest.raises(ValueError, match="240 printable"):
+        c.windows_speech_powershell_command("x" * (c.ROOM_SPEECH_MAX_CHARS + 1))
+    with pytest.raises(ValueError, match="240 printable"):
+        c.windows_speech_powershell_command("line\nbreak")
+
+
+def test_dj_status_includes_requester_time_and_next_song():
+    summary = c.dj_status_summary(
+        {"title": "Current song", "user": "Ann"},
+        {"title": "Next song", "user": "Bob"}, elapsed=75, duration=180)
+    assert summary == ("[dj] current: Current song; requested by Ann; time 01:15/03:00; "
+                       "next: Next song (Bob)")
+    spoken = c.dj_status_speech(
+        {"title": "Current song", "user": "Ann"},
+        {"title": "Next song", "user": "Bob"}, elapsed=75, duration=180)
+    assert "Current song" in spoken
+    assert "Ann" in spoken
+    assert "01:15 of 03:00" in spoken
+    assert "Next song" in spoken
+
+
+def test_random_youtube_music_command_saves_a_youtube_search(cfg, monkeypatch):
+    query = "Thai pop official music video"
+    monkeypatch.setattr(c.random, "choice", lambda _choices: query)
+    runner, sent = _dj_runner(cfg, monkeypatch, ["Ann: !randommusic"])
+
+    runner.do_dj(True)
+
+    url = c.youtube_search_url(query)
+    history_path = Path(c.BASE) / c.YOUTUBE_RANDOM_MUSIC_FILE
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    assert sent == [f"[dj] Random YouTube music search (saved): {url}"]
+    assert history["version"] == 1
+    assert history["links"][-1]["query"] == query
+    assert history["links"][-1]["url"] == url
+    assert history["links"][-1]["created_at"].endswith("Z")
+
+
+def test_random_youtube_music_history_is_bounded_and_refuses_corruption(tmp_path):
+    query = c.YOUTUBE_RANDOM_MUSIC_QUERIES[0]
+    url = c.youtube_search_url(query)
+    for index in range(c.YOUTUBE_RANDOM_MUSIC_HISTORY_LIMIT + 5):
+        c.save_random_youtube_music_link(query, url, base=tmp_path, now=index)
+    path = tmp_path / c.YOUTUBE_RANDOM_MUSIC_FILE
+    history = json.loads(path.read_text(encoding="utf-8"))
+    assert len(history["links"]) == c.YOUTUBE_RANDOM_MUSIC_HISTORY_LIMIT
+    assert history["links"][0]["created_at"] == "1970-01-01T00:00:05Z"
+
+    path.write_text("{invalid", encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot be read"):
+        c.save_random_youtube_music_link(query, url, base=tmp_path)
+    assert path.read_text(encoding="utf-8") == "{invalid"
+
+
 def test_dj_skip_semantics():
     q = c.DJQueue(Path("nope.json"))
     with pytest.raises(c.DJError):
@@ -459,3 +658,196 @@ def test_dj_skip_semantics():
     assert q.skip("ANN", "someone") == {"title": "Next", "user": "Bob"}
     assert q.skip("owner", "owner") is None
     assert q.current is None
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("abcdefghijk", "abcdefghijk"),
+    ("https://www.youtube.com/watch?v=abcdefghijk", "abcdefghijk"),
+    ("https://youtu.be/abcdefghijk", "abcdefghijk"),
+    ("https://youtube.com/shorts/abcdefghijk", "abcdefghijk"),
+    ("https://youtube.com/embed/abcdefghijk", "abcdefghijk"),
+])
+def test_youtube_video_id_accepts_only_supported_video_forms(value, expected):
+    assert c.youtube_video_id(value) == expected
+
+
+@pytest.mark.parametrize("value", [
+    "https://example.com/watch?v=abcdefghijk",
+    "http://youtube.com/watch?v=abcdefghijk",
+    "https://youtube.com.evil.test/watch?v=abcdefghijk",
+    "https://user@youtube.com/watch?v=abcdefghijk",
+    "https://youtube.com/watch?v=short",
+    "not a video id",
+])
+def test_youtube_video_id_rejects_untrusted_or_invalid_forms(value):
+    with pytest.raises(ValueError):
+        c.youtube_video_id(value)
+
+
+def test_youtube_player_bridge_checks_token_origin_revision_and_metadata(monkeypatch):
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    host = c.YouTubePlayerHost()
+    monkeypatch.setattr(host, "_open_player_window", lambda _video: setattr(
+        host, "_browser_launched", True))
+    host.load_video("abcdefghijk")
+    origin = host.origin
+    token = host._token
+    query = urllib.parse.urlencode({
+        "token": token, "video": "abcdefghijk", "revision": host.revision})
+    try:
+        with pytest.raises(urllib.error.HTTPError) as denied:
+            urllib.request.urlopen(origin + "/?video=abcdefghijk", timeout=2)
+        assert denied.value.code == 403
+
+        with urllib.request.urlopen(origin + "/?" + query, timeout=2) as response:
+            page = response.read().decode("utf-8")
+        assert response.status == 200
+        assert "Music DJ YouTube Player" in page
+        assert "const names={'-1':'ready'" in page
+
+        payload = json.dumps({
+            "kind": "playing", "error_code": 0, "video_id": "abcdefghijk",
+            "revision": host.revision, "video_title": "Artist - Song",
+        }).encode("utf-8")
+        request = urllib.request.Request(
+            origin + "/event?token=" + urllib.parse.quote(token), data=payload,
+            headers={"Content-Type": "application/json", "Origin": origin},
+            method="POST")
+        with urllib.request.urlopen(request, timeout=2) as response:
+            assert response.status == 204
+        event = host.consume_events()[0]
+        assert event["kind"] == "playing"
+        assert event["video_title"] == "Artist - Song"
+
+        old_revision = host.revision
+        host.load_video("lmnopqrstuv")
+        stale = json.dumps({
+            "kind": "ended", "error_code": 0, "video_id": "abcdefghijk",
+            "revision": old_revision, "video_title": "Old track",
+        }).encode("utf-8")
+        stale_request = urllib.request.Request(
+            origin + "/event?token=" + urllib.parse.quote(token), data=stale,
+            headers={"Content-Type": "application/json", "Origin": origin},
+            method="POST")
+        with pytest.raises(urllib.error.HTTPError) as conflict:
+            urllib.request.urlopen(stale_request, timeout=2)
+        assert conflict.value.code == 409
+        assert host.consume_events() == []
+    finally:
+        host._closed_ack.set()
+        host.close()
+
+
+def test_youtube_queue_advances_only_for_current_player_events(cfg, monkeypatch, tmp_path):
+    cfg["dry_run"] = False
+    cfg["dj"]["audio_backend"] = "youtube"
+
+    class FakePlayer:
+        def __init__(self):
+            self.revision = 0
+            self.video_id = ""
+            self.status = "loading"
+            self.events = []
+
+        def load_video(self, video_id):
+            self.video_id = video_id
+            self.revision += 1
+            self.status = "loading"
+
+        def consume_events(self):
+            events, self.events = self.events, []
+            return events
+
+        def emit(self, kind, video_id=None, revision=None, title=""):
+            self.events.append({
+                "kind": kind,
+                "video_id": video_id if video_id is not None else self.video_id,
+                "revision": revision if revision is not None else self.revision,
+                "video_title": title,
+            })
+
+        def stop_video(self):
+            self.video_id = ""
+            self.revision += 1
+            self.status = "stopped"
+
+        def close(self):
+            self.status = "stopped"
+
+    fake = FakePlayer()
+    monkeypatch.setattr(c, "YouTubePlayerHost", lambda: fake)
+    runner = c.Runner(cfg)
+    runner.youtube_player = None
+    sent = []
+    monkeypatch.setattr(runner, "say_now", sent.append)
+    queue = c.DJQueue(tmp_path / "dj_queue.json")
+    first = "https://youtu.be/abcdefghijk"
+    second = "https://www.youtube.com/watch?v=lmnopqrstuv"
+
+    loading = runner.dj_command(queue, cfg["dj"], "request", first, "Ann", "djbot")
+    assert "Loading YouTube video abcdefghijk" in loading
+    assert queue.current == {
+        "title": "abcdefghijk", "user": "Ann", "video_id": "abcdefghijk"}
+    runner.dj_command(queue, cfg["dj"], "request", second, "Bob", "djbot")
+    assert queue.queue[0]["video_id"] == "lmnopqrstuv"
+
+    fake.emit("ready", title="Artist - First Song")
+    fake.emit("playing", title="Artist - First Song")
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is True
+    assert queue.current["title"] == "Artist - First Song"
+    assert any("Now playing: Artist - First Song" in line for line in sent)
+    old_revision = fake.revision
+
+    fake.emit("ended")
+    assert runner.dj_auto_advance(queue, cfg["dj"]) is True
+    assert queue.current["video_id"] == "lmnopqrstuv"
+    assert fake.video_id == "lmnopqrstuv"
+    fake.emit("playing", video_id="abcdefghijk", revision=old_revision,
+              title="Late event from previous video")
+    runner.dj_auto_advance(queue, cfg["dj"])
+    assert queue.current["title"] == "lmnopqrstuv"
+    fake.emit("playing", title="Artist - Second Song")
+    runner.dj_auto_advance(queue, cfg["dj"])
+    assert queue.current["title"] == "Artist - Second Song"
+    assert any("Now playing: Artist - Second Song" in line for line in sent)
+
+    assert queue.save()
+    restored = c.DJQueue(queue.path)
+    restored.load()
+    assert restored.current["video_id"] == "lmnopqrstuv"
+    assert restored.current["title"] == "Artist - Second Song"
+
+
+def test_bot_manager_skip_uses_live_youtube_runner(cfg, tmp_path):
+    cfg["dj"]["audio_backend"] = "youtube"
+    queue = c.DJQueue(tmp_path / "dj_queue.json")
+    queue.current = {
+        "title": "First video", "user": "Ann", "video_id": "abcdefghijk"}
+    queue.queue = [{
+        "title": "lmnopqrstuv", "user": "Bob", "video_id": "lmnopqrstuv"}]
+    assert queue.save()
+    _, response_path = _write_dj_control_request(
+        tmp_path, "skip", "e" * 32, time.time())
+
+    class FakeRunner:
+        def __init__(self):
+            self.started = []
+
+        def dj_start_playback(self, current_queue, dj):
+            self.started.append((current_queue.current, dj["audio_backend"]))
+            return True
+
+        def dj_stop_playback(self):
+            pass
+
+    runner = FakeRunner()
+    assert c.process_dj_control_request(cfg, base=tmp_path, runner=runner) == 1
+    response = json.loads(response_path.read_text(encoding="utf-8"))
+    assert response["ok"] is True
+    assert response["current"]["video_id"] == "lmnopqrstuv"
+    assert runner.started == [(
+        {"title": "lmnopqrstuv", "user": "Bob", "video_id": "lmnopqrstuv"},
+        "youtube")]

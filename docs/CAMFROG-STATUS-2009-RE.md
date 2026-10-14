@@ -2,14 +2,15 @@
 
 ## Scope and artifact identity
 
-This note records a static analysis of the supplied legacy utility at [`Camfrog Status 2009.exe`](Camfrog%20Status%202009.exe). The executable was inspected as data and was **not run**.
+This note records a static analysis of a locally supplied legacy status-changing utility that is not redistributed in this repository. Its SHA-256 matches the previously analyzed `Camfrog Status 2009.exe`; the executable was inspected as data and was **not run**.
 
 | Property | Observed value | Evidence |
 |---|---|---|
 | SHA-256 | `2d96ec1721d28a08ae9aae5827701e581b9ab19161a0b6842898a57ec0f4f820` | `sha256sum` |
 | File size | 32,768 bytes | `stat` |
+| Role | Legacy status-changing utility for the Camfrog desktop client | UI strings and native call paths |
 | Format | PE32, 32-bit x86, Windows GUI; three sections (`.text`, `.data`, `.rsrc`) | `file`, `objdump -x` |
-| PE timestamp | 2008-12-11 21:33:51 UTC | PE COFF header |
+| PE timestamp | 2008-12-11 14:33:51 UTC | PE COFF timestamp converted from the host-local `objdump` display to UTC |
 | Version resource | Product label contains `Camfrog Change_Status Inc. 2009`; file/product version `1.00` | `objdump -s -j .rsrc`, wide strings |
 | CLR header | Absent | PE data directory |
 | Imported runtime | `MSVBVM60.DLL` | PE import table |
@@ -36,9 +37,13 @@ The PE imports the Visual Basic runtime rather than importing Windows APIs direc
 
 The binary does not include the target application's command map. The meaning of `0x0464` and `0x0467`, and the status selected by either path, therefore remain unknown. The strings and disassembly support local window-message automation; they do not establish that these message IDs work on a particular Camfrog release.
 
-### Relevance to the current Camfrog 8.5 findings
+### Compatibility with Camfrog 8.5
 
-This executable is a separate legacy utility, not `Camfrog Video Chat.exe` 8.5.0.51219. Its `#32770` / title lookup and command IDs are not UI Automation selectors and must not be copied into the 8.5 configuration. The current-version selectors and room-control findings remain scoped to the evidence in [CAMFROG-8.5-FINDINGS.md](CAMFROG-8.5-FINDINGS.md).
+This is a status-changing utility, not the Camfrog client. It searches for a `#32770` window titled `camfrog video chat` and posts `WM_COMMAND` IDs `0x0464` and `0x0467`. The current client's main window is also documented as `#32770` / “Camfrog Video Chat”, but the meanings and effects of those command IDs on version 8.5 have not been verified. Matching a window title does not establish that the old commands still work.
+
+The repository has a buildable replacement implementation in [`status_changer_gui.py`](../status_changer_gui.py), with a build entry point at [`status_changer_entry.py`](../status_changer_entry.py). Its default selector is the UI Automation `Edit` with automation ID `1001`, matching the Camfrog 8.5 custom-status text field documented in [CAMFROG-8.5-FINDINGS.md](CAMFROG-8.5-FINDINGS.md). It reads the text back before submitting Enter and checks foreground ownership in its live path. This replaces the custom-status text automation path; it is not yet established as equivalent to the legacy utility's `Privacy`, `Invisible`, `Busy`, and `Away` choices. The original VB6 source/project is not present, and the meanings of its old command IDs remain unknown. Successful status submission and presence-choice compatibility are unverified on a running Camfrog 8.5 client.
+
+The supplied executable is not included in this repository. No Camfrog client or utility binaries are redistributed here.
 
 ## Evidence states and limits
 
@@ -50,16 +55,16 @@ This is a bounded static reverse-engineering note, not recovered VB source. The 
 
 ## Reproduction commands
 
-Run these read-only commands from the repository root to confirm the artifact identity and repeat the inspected views:
+For a locally supplied copy, these read-only commands confirm the artifact identity and repeat the inspected views:
 
 ```sh
-sha256sum 'docs/Camfrog Status 2009.exe'
-file 'docs/Camfrog Status 2009.exe'
-objdump -x 'docs/Camfrog Status 2009.exe'
-strings -a -n 3 'docs/Camfrog Status 2009.exe'
-strings -el -n 3 'docs/Camfrog Status 2009.exe'
-objdump -D -Mintel -j .text --start-address=0x403c60 --stop-address=0x403da6 'docs/Camfrog Status 2009.exe'
-objdump -D -Mintel -j .text --start-address=0x4049f0 --stop-address=0x404d30 'docs/Camfrog Status 2009.exe'
+sha256sum 'docs/Camfrog-6.exe'
+file 'docs/Camfrog-6.exe'
+objdump -x 'docs/Camfrog-6.exe'
+strings -a -n 3 'docs/Camfrog-6.exe'
+strings -el -n 3 'docs/Camfrog-6.exe'
+objdump -D -Mintel -j .text --start-address=0x403c60 --stop-address=0x403da6 'docs/Camfrog-6.exe'
+objdump -D -Mintel -j .text --start-address=0x4049f0 --stop-address=0x404d30 'docs/Camfrog-6.exe'
 ```
 
 The first disassembly range includes the 250 comparison and warning path; the second includes both observed command-message paths. Do not use these results as a substitute for version-matched testing before changing current Camfrog selectors or behavior.
