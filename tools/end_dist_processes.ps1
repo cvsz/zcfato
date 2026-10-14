@@ -10,6 +10,7 @@ $names = @(
     'chat-im-private.exe',
     'status-random.exe',
     'status-marquee.exe',
+    'status-changer.exe',
     'im-autoreply.exe',
     'web-status.exe'
 )

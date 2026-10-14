@@ -2,9 +2,9 @@
 
 Thai version: `USER-MANUAL-TH.md`.
 
-Six apps, one manual.
+Seven apps, one manual.
 
-Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-autoreply`, `music-dj`, `web-status`. All are Windows-only and need Camfrog open, except `web-status` which works through the website.
+Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-autoreply`, `music-dj`, `web-status`. Random and Marquee are separate apps with separate data folders. All are Windows-only and need Camfrog open, except `web-status` which works through the website.
 
 **Updates.** Every app checks the project's GitHub release when it starts (a banner appears only when something newer exists) and each has a **Check for updates** button; the CLI equivalent is `<app> update`. An update downloads only that app's own file, verifies it against the release's `SHA256SUMS.txt`, and installs it the next time you close the app (`<app>.new` + `camfrog-update.cmd` do the swap). No account, no token, nothing is uploaded. Releases are published with `python tools/release.py`.
 
@@ -12,7 +12,7 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 
 1. Install 64-bit Python 3.12 or 3.13.
 2. Run `doctor.bat` first. It checks your Python, flags bad setups, and tests the `pywin32` download.
-3. Double-click `build.bat` (or `full-build.bat` for everything including the LINE app). Executables land in `dist\<app>\`.
+3. Double-click `build.bat` for the seven Camfrog apps, or run `full-build.ps1` in PowerShell to build them with the LINE app. Executables land in `dist\<app>\`.
 4. If the build says `pywin32 ... no matching distribution`, your Python has no wheel: install 64-bit Python 3.13, delete `.venv`, rerun.
 
 ## 2. First run
@@ -65,27 +65,54 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `im-
 ## 9. Music DJ
 
 - A room bot that also plays music: it answers song requests from chat and announces what is playing. It needs Camfrog open and `autoreply` enabled (the DJ reuses the chat plumbing); set `dj.enabled`.
-- Chat commands, prefix `!` by default: `!request <song>` (or `!req`, `!song`), `!queue`, `!current` (or `!np`), `!skip`, `!help`. The queue view in the app mirrors the file, with **Skip current** / **Clear queue** owner buttons.
+- Chat commands, prefix `!` by default: `!request <song>` (or `!req`, `!song`), `!randommusic`, `!queue`, `!current` (or `!np`), `!skip`, `!help`. `!randommusic` posts a random YouTube music search and saves it in `youtube_random_music.json` (up to 200 entries). `!current` reports the requester, elapsed/total playback time when available, and next queued song. The Music tab can speak custom text or the current-song summary with Windows TTS; route Windows playback output to the Camfrog microphone input with a virtual cable or Stereo Mix. The queue view in the app mirrors the file, with **Skip current** / **Clear queue** owner buttons.
 - The first request starts playing immediately; each extra song is queued (`max_per_user` per person, duplicates and the currently playing song refused). `!skip` works for the requester or you (the bot owner).
 - Music folder: use **Browse** to choose it; `!request` matches supported audio filenames (substring, case-insensitive). The app searches common audio extensions including WAV, MP3, WMA, AAC/M4A, AIFF/AU, FLAC, OGG/Opus, and MIDI.
-- **Audio backend** `chat` (default) only announces in the chat. `local` additionally plays audio files that Windows MCI can open on this PC and starts the next song automatically when playback finishes — for the room to hear it, route this PC's output into Camfrog's input with a virtual cable or "Stereo Mix". Playback support depends on Windows MCI extension mappings and installed codecs. Set the sound output back to your speakers afterwards if you no longer want the room to hear it.
+- **Audio backend** `chat` (default) only announces in the chat. `local` plays audio files that Windows MCI can open and starts the next song when playback finishes. `youtube` accepts a YouTube video URL or ID in `!request`, opens the standard visible YouTube player in a separate Edge/Chrome window, announces after playback starts, and advances when YouTube reports the video ended. You may need to press **Play** if autoplay is blocked. For either player to be heard in the room, route this PC's output into Camfrog's input with a virtual cable or "Stereo Mix". Playback support depends on Windows MCI, browser, device, and codec setup.
 - Start with dry-run: the bot then only logs the announcements it would send. Requests still queue, and nothing is typed into the room.
+- In **Bot Manager → Music DJ**, choose `music-dj.exe` (the packaged zip layout is detected automatically when available). The page can open the Music DJ configuration window, start or stop its worker, request queue status, skip or clear, and send up to 240 characters to the worker's Windows TTS voice output. The Music DJ worker remains the only owner of chat commands and queue state; when installing the apps separately, use **Browse** to select the executable.
+- **YouTube assisted search** opens a visible Edge or Chrome search window with its own browser profile. Choose a result, then copy its URL into `!request`. The queue player uses YouTube's standard visible controls and detects playback/end events. The separate profile is stored under `%LOCALAPPDATA%\Camfrog\MusicDJ\YouTubeProfile` and is not shared with Camfrog browser login. See [`zBOT-Youtube-MUSIC-DJ.md`](zBOT-Youtube-MUSIC-DJ.md) for limits and acceptance checks.
 
-## 10. Web Status (prototype)
+## 10. Web Status
 
 Status: login flow mapped; the status-update endpoint was captured from a logged-in `profiles.camfrog.com/home.php` session (POST `{status, csrf}` to `/ajax/update_status.php`) and stays gated. CLI live sends need `--confirm-update`; GUI live Start asks for confirmation.
 
 - No args opens the GUI; any args use the CLI (`web-status.exe --login Seaza --status "..."`). Dry-run is default — no network at all.
-- In Setup, enter up to ten statuses in the numbered single-line fields. **Save to webtext.db** saves each slot beside the app; **Start** also saves the current values and rotates through non-empty slots every N seconds.
+- The resizable window starts at 400×300 and can shrink to 300×220. A title screen shows the Idol artwork with the Zttato logo and **Loading pages...**, then counts down from five and closes itself to reveal Setup. Click the **Z** logo for full screen; **800x600** restores that window size. **Tray** hides the window in the Windows notification area; click its icon to reopen or right-click it to exit.
+- In Setup, enter up to ten statuses in the numbered single-line fields. **Save to webtext.db** saves each slot beside the app; **Start** also saves the current values and rotates through non-empty slots every 60 seconds by default until you press **Stop**.
 - In **Account & Session**, press **Open login page**, sign in in your browser, then copy `PHPSESSID=...` from the `profiles.camfrog.com/home.php` request in DevTools and paste it into the session field. Press **Login** to verify the current cookie; a signed-in result arms automation. The cookie stays in memory only.
 - With **Send live** enabled, **Start** verifies the current cookie if Login has not already armed the session, asks for confirmation, and begins rotation. **Stop** cancels the loop and disarms the session, so the next Start verifies again. Dry-run remains the default.
+- The separate **Bot Manager** tab accepts a `cloudbot=...` parameter, verifies it against `www.camfrog.com`, and loads **Room**, **Profile**, and **Plugins**. The parameter is masked, held in memory only, and sent only to Camfrog. **Disconnect** clears this app's session; **Log out** ends the remote session.
+- **Room** edits the room name, room password, bot language, and pause state. **Profile** edits the account password and email. **Stop bot** sends Camfrog's stop command after confirmation.
+- **Plugins** lists the installed plugins returned by Camfrog (the standard catalog uses IDs 1–9 and 11–16) with activation switches. Change switches and press **Apply changes** to submit them after confirmation; the app reloads the catalog so you can review Camfrog's returned states. Select a plugin card to load its current settings form. The form maps Camfrog's text fields, text areas, checkboxes, radio groups, single and multiple selections, and file uploads to editable controls. Saving asks for confirmation, submits the form, then reloads it so you can review the values Camfrog returned. Known plugin names, field labels, and choices follow the TH/EN language setting; submitted option values remain unchanged, and free-text messages stay as entered. Shared formatting supports font, size, color, bold, italic, underline, and strikeout.
+- **Local vMix control** reads inputs from the vMix API on this PC. **Preview input** updates Preview; **Cut to output** sends the selected input directly to vMix output after a confirmation. This does not configure Camfrog's camera. Install the vMix virtual-camera device and select it manually in Camfrog, then verify it in a controlled call. The controls are limited to loopback addresses; they do not control a remote vMix host.
+
+| Plugin | Settings exposed by Camfrog |
+|---|---|
+| 1. 8 ball | Bot name and response message |
+| 2. IM control | Owner list |
+| 3. Messenger | Message and display interval |
+| 4. Greeter | Role greetings and role/gender matching switches |
+| 5. Math trivia | Question duration, timeout, notifications, answer reveal, number range, operator level, and enabled operations |
+| 6. Bad words | Rules, violation threshold, punishment reason, regular-expression mode, and kick/ban switch |
+| 7. Trivia | Question duration, timeout, notifications, answer reveal, and quiz file upload |
+| 8. Word trivia | Question duration, timeout, notifications, answer reveal, and quiz file upload |
+| 9. Roulette | Message, start interval, unavailable-game notice, and timer |
+| 11. Ghost | Question timing, notifications, answer reveal, and quiz file upload |
+| 12. Who banned | Role message, room/moderator notifications, and log retention |
+| 13. Talkback | Rule list |
+| 14. Dice | Die type and number of dice |
+| 15. DJ Manager | Microphone duration, moderator-only access, and notifications |
+| 16. Auto Moderator | Nickname rules and reports before punishment |
+
+This feature configures Camfrog's server-installed plugins; it does not create or run custom local plugin code. The available plugins and fields depend on what Camfrog returns for the connected account.
 - CLI password login can be blocked by CAPTCHA; the tool does not bypass it. For CLI use, `--probe` is read-only and `--cookies-file` accepts a Netscape cookie export. Never paste passwords or cookie values into chat, issues, or files.
 
 ## 11. Background mode, logs, files
 
 - Room/IM: GUI **Save & Start** / **Stop**, or CLI `start` / `state` / `stop` (hidden, no window). Status apps: own **Start**/**Stop** + bundled worker.
 - Each app writes logs beside its own config (`camfrog_auto.log` for source CLI). Hot reload: editing `config.json` while running applies valid changes in ~3 s; invalid edits are rejected and logged.
-- Safety: every send briefly focuses Camfrog, presses Enter, then restores your previous window. Camfrog must be open (minimized is OK only if controls are still reachable — verify with Discover).
+- Other status sends may require Camfrog in the foreground. Camfrog must be open (minimized is OK only if controls are still reachable — verify with Discover).
 
 ## 12. Troubleshooting
 
