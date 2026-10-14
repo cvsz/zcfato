@@ -5156,7 +5156,7 @@ def build_app():
             except (OSError, tk.TclError):
                 self.zeazdev_room_photo = None
             ttk.Label(brand, text="ZeaZDev room", font=("Segoe UI", 12, "bold")).pack(side="left")
-            ttk.Label(brand, text=bi("Music DJ|ดีเจเพลง"), foreground="#087b83").pack(
+            ttk.Label(brand, text=bi("Music DJ|ดีเจเพลง"), foreground="#8b672b").pack(
                 side="left", padx=8)
             g = ttk.Frame(f)
             g.pack(fill="x")
