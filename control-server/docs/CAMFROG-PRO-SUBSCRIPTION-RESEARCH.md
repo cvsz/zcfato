@@ -1,0 +1,20 @@
+# Camfrog Pro Subscription: Permanent Access and Time Stacking
+
+**Checked:** 2026-10-14. This review used public Camfrog pages and the repository report only; no account session or purchase flow was accessed.
+
+## Findings
+
+- The Thai upgrade comparison page provided for this review labels the Pro plan as billed annually and displays its price as a monthly equivalent. It maps Pro to green nick color and Extreme to purple. This is evidence for a one-year billed plan, not lifetime access. [Thai upgrade comparison](https://www.camfrog.com/th/upgrade/rows.php)
+- Camfrog's public gift page lists both one-month and one-year Pro subscription gifts. A month is the site's displayed term; the page does not define it as exactly 30 days. Neither current page documents a lifetime Pro SKU. [Upgrade plans](https://www.camfrog.com/en/register/) · [Gift subscriptions](https://www.camfrog.com/th/store/givegift/)
+- The user clarified that “lifetime Pro” refers to Camfrog's historical Pro CD-key/serial entitlement from roughly 20 years ago, rather than a current subscription plan. Camfrog's current safety page confirms that Pro serial numbers existed and warns users not to share them; it does not independently document the old key's lifetime terms. [Camfrog account safety](https://www.camfrog.com/en/help-security.phtml)
+- The user further clarified the legacy behavior: a time-limited paid upgrade can temporarily change the effective tier and room-entry capabilities, while the lifetime Pro entitlement remains as a baseline; when the paid term expires, the account falls back to its lifetime Pro benefits rather than Free. This behavior is user-provided historical knowledge and has not been independently confirmed against runtime data or an official support record.
+- Camfrog's November 2024 BOGO announcement explicitly included nickname subscription plans: the promotion added a second subscription of the same duration to the account and described the result as twice as long. This confirms that subscription time could be extended by stacking during that limited promotion. It does **not** establish that ordinary repeated purchases always stack, that different tiers combine, or that the offer is still available. [Camfrog BOGO announcement](https://blog.camfrog.com/have-a-wonderful-thanksgiving/)
+- A user-supplied report excerpt lists `subscription_type` separately from `nickname_color`, `alevel`, and `xp_count`; nickname color and displayed experience level therefore cannot alone establish tier or expiry. The excerpt maps Store error `-32019` to “recipient has lifetime subscription.” In light of the user's historical clarification, this may refer to legacy CD-key Pro holders, but the client-side message does not identify a product or SKU.
+
+## Conclusion and confidence
+
+- **High confidence:** Public evidence supports finite Pro subscription terms (one month and one year as gifts) and a historical, promotion-specific same-duration extension mechanism.
+- **Historical context:** The user identifies lifetime Pro as a legacy CD-key entitlement. Current public pages do not list that key product for sale. The public evidence confirms Pro serial numbers existed, but the precise legacy duration and entitlement migration are not independently documented in the sources reviewed here.
+- **Unknown:** Whether ordinary repeated purchases extend the expiry date, how overlapping temporary tiers are prioritized, and whether every tier change stacks or converts. The report's lifetime error could apply to the legacy entitlement, but its text does not specify that. Account-level base entitlement and temporary expiry must be read from Camfrog's official account/support record.
+
+For the control server, keep the verified base entitlement separate from time-bounded upgrades. If the legacy fallback behavior is confirmed for an account, expiry of an overlay must restore that base entitlement rather than imply Free status. Do not infer lifetime access from a missing expiry field, and do not implement subscription changes from the current evidence.

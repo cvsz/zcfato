@@ -11,13 +11,19 @@ import subprocess
 import sys
 import tempfile
 import base64
+import ipaddress
 import random
 import socket
 import time
 import urllib.parse
+import urllib.error
 import urllib.request
+import uuid
+import xml.etree.ElementTree as ET
 from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
 from pathlib import Path
+from dataclasses import dataclass, field
+from html.parser import HTMLParser
 import queue
 import threading
 
@@ -44,6 +50,8 @@ BROWSER_HEADERS = {
     "Accept-Language": "en-US,en;q=0.9",
 }
 LOGIN_PAGE_URL = "https://www.camfrog.com/th/login.php"
+BOT_MANAGER_BASE_URL = "https://www.camfrog.com"
+BOT_MANAGER_HOST = "www.camfrog.com"
 
 # Captured 2026-10-09 from a logged-in https://profiles.camfrog.com/home.php
 # session: the profile page's hopping box POSTs {status, csrf} here, and the
@@ -52,13 +60,1004 @@ LOGIN_PAGE_URL = "https://www.camfrog.com/th/login.php"
 WEB_UPDATE_URL = "https://profiles.camfrog.com/ajax/update_status.php"
 HOME_URL = "https://profiles.camfrog.com/home.php"
 
+DJ_CONTROL_PROTOCOL = 1
+DJ_CONTROL_REQUEST_TTL_SECONDS = 30
+LOCAL_MEDIA_SETTINGS = "web_status_media.json"
+
 EXIT_OK = 0
 EXIT_USAGE = 2
 EXIT_BLOCKED = 3
 
 ROTATE_INTERVAL_MIN = 30
-ROTATE_INTERVAL_DEFAULT = 300
+ROTATE_INTERVAL_DEFAULT = 60
 ROTATE_INTERVAL_MAX = 86400
+
+
+def default_music_dj_executable(base=None):
+    """Find the sibling Music DJ package produced by build.bat."""
+    root = Path(base or BASE)
+    candidates = (
+        root / "music-dj.exe",
+        root.parent / "music-dj" / "music-dj.exe",
+        root / "dist" / "music-dj" / "music-dj.exe",
+    )
+    return next((path.resolve() for path in candidates if path.is_file()), None)
+
+
+def music_dj_control_request(executable, action, timeout=4.0, clock=None,
+                             sleep=None, text=None):
+    """Send a one-shot command to the Music DJ worker through its private data folder."""
+    if action not in {"status", "skip", "clear", "speak"}:
+        raise ValueError("Unsupported Music DJ control action.")
+    if action == "speak":
+        text = str(text or "").strip()
+        if not text or len(text) > 240 or any(ord(char) < 32 or ord(char) == 127
+                                              for char in text):
+            raise ValueError("Voice text must be 1 to 240 printable characters.")
+    elif text is not None:
+        raise ValueError("Voice text is only valid for the speak action.")
+    executable = Path(executable).expanduser().resolve()
+    if executable.name.casefold() != "music-dj.exe":
+        raise ValueError("Select the packaged music-dj.exe application.")
+    directory = executable.parent / "dj-control"
+    request_id = uuid.uuid4().hex
+    request_path = directory / (request_id + ".request.json")
+    response_path = directory / (request_id + ".response.json")
+    now = time.time()
+    payload = {
+        "protocol": DJ_CONTROL_PROTOCOL,
+        "request_id": request_id,
+        "action": action,
+        "created_at": now,
+    }
+    if action == "speak":
+        payload["text"] = text
+    directory.mkdir(parents=True, exist_ok=True)
+    temp_path = directory / (request_id + ".tmp")
+    try:
+        temp_path.write_text(json.dumps(payload, separators=(",", ":")) + "\n",
+                             encoding="utf-8")
+        os.replace(temp_path, request_path)
+        deadline = (time.monotonic if clock is None else clock)() + timeout
+        wait = time.sleep if sleep is None else sleep
+        while (time.monotonic if clock is None else clock)() < deadline:
+            try:
+                raw = response_path.read_text(encoding="utf-8")
+                response = json.loads(raw)
+                if (not isinstance(response, dict) or
+                        response.get("protocol") != DJ_CONTROL_PROTOCOL or
+                        response.get("request_id") != request_id):
+                    raise RuntimeError("Music DJ returned an invalid control response.")
+                if not response.get("ok"):
+                    raise RuntimeError(str(response.get("error") or
+                                           "Music DJ rejected the command."))
+                return response
+            except FileNotFoundError:
+                wait(0.1)
+        raise TimeoutError("Music DJ is not running or did not answer the request.")
+    finally:
+        temp_path.unlink(missing_ok=True)
+        request_path.unlink(missing_ok=True)
+        response_path.unlink(missing_ok=True)
+
+
+def music_dj_worker_state(executable, stale_after=4.0):
+    """Return a recent worker snapshot, or None when no fresh worker is visible."""
+    path = Path(executable).expanduser().resolve().parent / "dj-control" / "state.json"
+    try:
+        raw = path.read_text(encoding="utf-8")
+        if len(raw) > 128_000:
+            return None
+        state = json.loads(raw)
+        if not isinstance(state, dict):
+            return None
+        age = time.time() - float(state.get("updated_at", 0))
+        if (state.get("protocol") != DJ_CONTROL_PROTOCOL or
+                not state.get("running") or age < -5 or age > stale_after):
+            return None
+        return state
+    except (OSError, ValueError, TypeError):
+        return None
+
+
+def music_dj_speech_summary(state, now=None):
+    """Build a short TTS summary from the Music DJ status response."""
+    current = state.get("current") if isinstance(state, dict) else None
+    if not isinstance(current, dict) or not str(current.get("title", "")).strip():
+        raise ValueError("Music DJ has no current song to speak.")
+
+    def clip(value, limit):
+        value = " ".join(str(value or "").split())
+        value = "".join(char for char in value
+                        if ord(char) >= 32 and ord(char) != 127)
+        return value if len(value) <= limit else value[:limit - 1] + "…"
+
+    playback = state.get("playback")
+    elapsed = duration = None
+    if isinstance(playback, dict):
+        try:
+            age = (time.time() if now is None else float(now)) - float(state.get("updated_at"))
+            if 0 <= age <= 10:
+                raw_elapsed = playback.get("elapsed_seconds")
+                raw_duration = playback.get("duration_seconds")
+                elapsed = float(raw_elapsed) + age if raw_elapsed is not None else None
+                duration = float(raw_duration) if raw_duration is not None else None
+        except (TypeError, ValueError):
+            elapsed = duration = None
+
+    def clock(seconds):
+        total = max(0, int(seconds))
+        minutes, seconds = divmod(total, 60)
+        return "{0}:{1:02}".format(minutes, seconds) if minutes < 60 else \
+            "{0}:{1:02}:{2:02}".format(minutes // 60, minutes % 60, seconds)
+
+    if elapsed is None:
+        timing = "play time unknown"
+    elif duration and duration > 0:
+        timing = "playback {0} of {1}".format(clock(elapsed), clock(duration))
+    else:
+        timing = "played {0}".format(clock(elapsed))
+    following = (state.get("queue", [])[0]
+                 if isinstance(state.get("queue"), list) and state.get("queue") else None)
+    next_text = ("{0}, requested by {1}".format(
+        clip(following.get("title"), 50), clip(following.get("user"), 24))
+        if isinstance(following, dict) else "none")
+    return "Now playing {0}, requested by {1}; {2}. Next song: {3}.".format(
+        clip(current.get("title"), 55), clip(current.get("user"), 24), timing, next_text)
+
+
+def run_music_dj_command(executable, action, timeout=30.0):
+    """Run only the packaged app's start/stop CLI commands without a shell."""
+    if action not in {"start", "stop"}:
+        raise ValueError("Unsupported Music DJ command.")
+    if os.name != "nt":
+        raise OSError("Music DJ process control requires Windows.")
+    executable = Path(executable).expanduser().resolve()
+    if executable.name.casefold() != "music-dj.exe" or not executable.is_file():
+        raise ValueError("Select an existing packaged music-dj.exe application.")
+    flags = 0x08000000  # CREATE_NO_WINDOW
+    result = subprocess.run(
+        [str(executable), action], cwd=str(executable.parent),
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, close_fds=True,
+        creationflags=flags, timeout=timeout, check=False)
+    if result.returncode:
+        raise RuntimeError("Music DJ {0} failed with exit code {1}.".format(
+            action, result.returncode))
+    return True
+
+
+def normalize_vmix_api_url(value):
+    """Allow only a local vMix HTTP API address to avoid remote control requests."""
+    parsed = urllib.parse.urlsplit(str(value or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError("Use a local HTTP address such as http://127.0.0.1:8088.")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise ValueError("The vMix address cannot contain credentials or extra parameters.")
+    try:
+        if parsed.hostname.casefold() == "localhost":
+            addresses = socket.getaddrinfo(parsed.hostname, None, type=socket.SOCK_STREAM)
+            local_host = bool(addresses) and all(
+                ipaddress.ip_address(item[4][0]).is_loopback for item in addresses)
+        else:
+            local_host = ipaddress.ip_address(parsed.hostname).is_loopback
+    except (OSError, ValueError):
+        local_host = False
+    if not local_host:
+        raise ValueError("For safety, vMix control is limited to this PC.")
+    if parsed.path not in ("", "/", "/api", "/api/"):
+        raise ValueError("Use the vMix Web Controller origin, without a custom path.")
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        raise ValueError("The vMix address has an invalid port.") from None
+    if not 1 <= port <= 65535:
+        raise ValueError("The vMix address has an invalid port.")
+    host = "[::1]" if parsed.hostname == "::1" else parsed.hostname
+    return "{0}://{1}:{2}/api/".format(parsed.scheme, host, port)
+
+
+def vmix_api_request(base_url, parameters=None, timeout=4.0):
+    api_url = normalize_vmix_api_url(base_url)
+    query = urllib.parse.urlencode(parameters or {})
+    request = urllib.request.Request(
+        api_url + ("?" + query if query else ""),
+        headers={"Accept": "application/xml,text/xml,*/*",
+                 "User-Agent": "Camfrog-Web-Status/1"})
+    try:
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _VmixNoRedirectHandler())
+        with opener.open(request, timeout=timeout) as response:
+            payload = response.read(1_000_001)
+    except (urllib.error.URLError, TimeoutError, OSError):
+        raise RuntimeError("Could not reach the local vMix HTTP API.") from None
+    if len(payload) > 1_000_000:
+        raise RuntimeError("vMix returned an oversized API response.")
+    return payload
+
+
+class _VmixNoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Never follow a vMix API redirect outside the explicitly selected local API."""
+
+    def redirect_request(self, _request, _response, _code, _message, _headers, _new_url):
+        return None
+
+
+def fetch_vmix_inputs(base_url, timeout=4.0):
+    try:
+        root = ET.fromstring(vmix_api_request(base_url, timeout=timeout))
+    except ET.ParseError:
+        raise RuntimeError("vMix returned invalid XML.") from None
+    inputs = []
+    container = root.find("inputs")
+    for item in list(container) if container is not None else []:
+        key = item.get("key", "")
+        number = item.get("number", "")
+        title = item.get("title", "").strip()
+        if not re.fullmatch(r"[0-9a-fA-F-]{36}", key) or not number.isdigit():
+            continue
+        inputs.append({"key": key, "number": int(number),
+                       "title": title or "Input {0}".format(number),
+                       "type": item.get("type", "")})
+    return inputs
+
+
+def control_vmix_input(base_url, function, input_key, timeout=4.0):
+    if function not in {"PreviewInput", "CutDirect"}:
+        raise ValueError("Unsupported vMix action.")
+    if not re.fullmatch(r"[0-9a-fA-F-]{36}", str(input_key or "")):
+        raise ValueError("Select a valid input returned by vMix.")
+    vmix_api_request(base_url, {"Function": function, "Input": input_key}, timeout)
+    return fetch_vmix_inputs(base_url, timeout)
+
+WEB_STATUS_THEME = {
+    "background": "#edf2f5",
+    "surface": "#ffffff",
+    "surface_high": "#d9e8f0",
+    "entry": "#ffffff",
+    "border": "#c4d1dc",
+    "accent": "#087b83",
+    "accent_hover": "#096c7b",
+    "button_text": "#1a3a52",
+    "button_active": "#bdd9e9",
+    "button_pressed": "#a4c9df",
+    "text": "#233548",
+    "muted": "#596b79",
+    "danger": "#9f3740",
+    "success": "#28744c",
+    "error": "#a3303a",
+    "log_text": "#2c3b4d",
+}
+
+WEB_STATUS_GUI_TEXT_TH = {
+    "ZChat Web Status": "สถานะเว็บ ZChat",
+    "Web Status": "สถานะเว็บ",
+    "Setup": "ตั้งค่า",
+    "Account & Session": "บัญชีและเซสชัน",
+    "Session": "เซสชัน",
+    "Bot Manager": "ตัวจัดการบอท",
+    "Bot": "บอท",
+    "Music DJ": "ดีเจเพลง",
+    "Local Music DJ": "Music DJ ในเครื่องนี้",
+    "Local ZeaZDev room Music DJ": "ZeaZDev room Music DJ ในเครื่องนี้",
+    "Select music-dj.exe": "เลือก music-dj.exe",
+    "Select music-dj.exe to connect to the local DJ.":
+        "เลือก music-dj.exe เพื่อเชื่อมต่อกับ DJ ในเครื่อง",
+    "Select an existing packaged music-dj.exe application.":
+        "เลือกไฟล์ music-dj.exe ที่แพ็กไว้แล้ว",
+    "Opened the Music DJ window.": "เปิดหน้าต่าง Music DJ แล้ว",
+    "DJ worker connected; queue read from the Music DJ owner.":
+        "เชื่อมต่อกับบอท DJ แล้ว อ่านคิวจากโปรแกรม Music DJ",
+    "Music DJ worker stopped.": "หยุดบอท Music DJ แล้ว",
+    "Now playing": "กำลังเล่น",
+    "Song": "เพลง",
+    "Requested by": "ผู้ขอ",
+    "Local vMix control": "ควบคุม vMix ในเครื่อง",
+    "Refresh vMix inputs and select one first.":
+        "โหลดอินพุต vMix แล้วเลือกอินพุตก่อน",
+    "Send this input directly to the live vMix output?":
+        "ส่งอินพุตนี้ไปยังภาพออกอากาศ vMix ทันทีหรือไม่?",
+    "vMix connected; {0} inputs returned by the local API.":
+        "เชื่อมต่อ vMix แล้ว API ในเครื่องส่งอินพุตกลับมา {0} รายการ",
+    "vMix accepted {0}; confirm program output in vMix and Camfrog.":
+        "vMix รับคำสั่ง {0} แล้ว ตรวจภาพออกอากาศใน vMix และ Camfrog",
+    "For safety, vMix control is limited to this PC.":
+        "เพื่อความปลอดภัย ควบคุม vMix ได้เฉพาะเครื่องนี้",
+    "Could not reach the local vMix HTTP API.":
+        "เชื่อมต่อ vMix HTTP API ในเครื่องไม่ได้",
+    "Browse...": "เลือกไฟล์...",
+    "Open Music DJ": "เปิด Music DJ",
+    "Start DJ worker": "เริ่มบอท DJ",
+    "Stop DJ worker": "หยุดบอท DJ",
+    "Refresh queue": "โหลดคิวใหม่",
+    "Skip current": "ข้ามเพลงปัจจุบัน",
+    "Clear queue": "ล้างคิว",
+    "Voice message": "ข้อความเสียง",
+    "Speak to room": "พูดเข้าห้อง",
+    "Speak current song": "พูดข้อมูลเพลงปัจจุบัน",
+    "Voice text: up to 240 characters. Route Windows output to the Camfrog mic.":
+        "ข้อความเสียงไม่เกิน 240 ตัวอักษร ต่อเอาต์พุต Windows เข้าไมค์ Camfrog",
+    "Voice request accepted by Music DJ.": "Music DJ รับคำขอเสียงแล้ว",
+    "Music DJ executable": "ไฟล์โปรแกรม Music DJ",
+    "vMix HTTP API": "vMix HTTP API",
+    "Refresh inputs": "โหลดอินพุตใหม่",
+    "Preview input": "ดูตัวอย่างอินพุต",
+    "Cut to output": "ตัดภาพออกอากาศ",
+    "Restore 800x600": "คืนขนาด 800x600",
+    "Tray": "ถาดระบบ",
+    "Status rotation": "การสลับสถานะ",
+    "Nickname": "ชื่อเล่น",
+    "Status lines": "ข้อความสถานะ",
+    "Save to webtext.db": "บันทึกลง webtext.db",
+    "Switch every": "สลับทุก",
+    "s (min 30)": "วินาที (ขั้นต่ำ 30)",
+    "Timeout": "หมดเวลา",
+    "Send live (otherwise dry-run preview only)":
+        "ส่งสถานะจริง (ปิดไว้ = ทดลองเท่านั้น)",
+    ("Dry-run is on by default; enable Send live before status updates are sent."):
+        "ค่าเริ่มต้นเป็นโหมดทดลอง เปิดส่งสถานะจริงก่อนอัปเดตสถานะ",
+    "Session (PHPSESSID via iframe / web login)":
+        "เซสชัน (PHPSESSID ผ่าน iframe / เว็บ)",
+    ("Log in in your browser (via iframe/web login). In devtools Network tab, "
+     "inspect https://profiles.camfrog.com/home.php to get PHPSESSID=..., "
+     "paste below, then press 'Login' to verify and arm automation."):
+        ("เข้าสู่ระบบในเบราว์เซอร์ แล้วเปิดแท็บ Network ใน devtools "
+         "ตรวจ https://profiles.camfrog.com/home.php เพื่อหา PHPSESSID=... "
+         "วางค่าในช่องด้านล่าง แล้วกด Login เพื่อตรวจสอบเซสชัน"),
+    "Open login page": "เปิดหน้าเข้าสู่ระบบ",
+    "Login": "เข้าสู่ระบบ",
+    "Login in browser": "เข้าสู่ระบบผ่านเบราว์เซอร์",
+    "Preview plan": "ดูตัวอย่างแผน",
+    "Preview": "ดูแผน",
+    "Start": "เริ่ม",
+    "Stop": "หยุด",
+    "Probe session": "ตรวจสอบเซสชัน",
+    "Probe": "เช็ก",
+    "Update": "อัปเดต",
+    "How to capture": "วิธีรับ PHPSESSID",
+    "Help": "ช่วย",
+    "More": "เพิ่มเติม",
+    "cloudbot": "cloudbot",
+    "Dry-run is on. Nothing has been sent.":
+        "โหมดทดลองเปิดอยู่ ยังไม่มีการส่งสถานะ",
+    "System tray is unavailable; minimized to the taskbar.":
+        "ไม่พบถาดระบบ จึงย่อหน้าต่างไปที่แถบงาน",
+    "Loading pages...": "กำลังโหลดหน้า...",
+    "Camfrog Bot Manager": "ตัวจัดการบอท Camfrog",
+    "cloudbot parameter": "พารามิเตอร์ cloudbot",
+    "Connect": "เชื่อมต่อ",
+    "Disconnect": "ตัดการเชื่อมต่อ",
+    "Stop bot": "หยุดบอท",
+    "Log out": "ออกจากระบบ",
+    "Disconnected": "ยังไม่ได้เชื่อมต่อ",
+    "Connected": "เชื่อมต่อแล้ว",
+    "Connect to Camfrog Bot Manager to load Room, Profile, and Plugins.":
+        "เชื่อมต่อ Camfrog Bot Manager เพื่อโหลด Room, Profile และ Plugins",
+    "Room": "ห้อง",
+    "Profile": "โปรไฟล์",
+    "Plugins": "ปลั๊กอิน",
+    "Activity": "กิจกรรม",
+    "Plugin catalog": "รายการปลั๊กอิน",
+    "Find": "ค้นหา",
+    "Refresh": "โหลดใหม่",
+    "Apply changes": "ใช้การเปลี่ยนแปลง",
+    "No plugins loaded.": "ยังไม่ได้โหลดปลั๊กอิน",
+    "Reload settings": "โหลดการตั้งค่าใหม่",
+    "Save settings": "บันทึกการตั้งค่า",
+    "Save": "บันทึก",
+    "Reload": "โหลดใหม่",
+    "Choose file": "เลือกไฟล์",
+    "No file selected": "ยังไม่ได้เลือกไฟล์",
+    "Options": "ตัวเลือก",
+    "No options available from Camfrog.": "Camfrog ไม่มีตัวเลือกให้แสดง",
+    "No roles returned from Camfrog.": "Camfrog ไม่ได้ส่งรายการบทบาทกลับมา",
+    "No editable settings were returned.": "ไม่พบการตั้งค่าที่แก้ไขได้",
+    "Message formatting": "รูปแบบข้อความ",
+    "Font": "แบบอักษร",
+    "Size": "ขนาด",
+    "Color": "สี",
+    "Choose": "เลือก",
+    "Bold": "ตัวหนา",
+    "Italic": "ตัวเอียง",
+    "Underline": "ขีดเส้นใต้",
+    "Strikeout": "ขีดทับ",
+    "8 ball": "8 บอล",
+    "IM control": "ควบคุม IM",
+    "Messenger": "เมสเซนเจอร์",
+    "Greeter": "ระบบต้อนรับ",
+    "Math trivia": "เกมตอบคำถามคณิตศาสตร์",
+    "Bad words": "คำต้องห้าม",
+    "Trivia": "เกมตอบคำถาม",
+    "Word trivia": "เกมทายคำศัพท์",
+    "Roulette": "รูเล็ต",
+    "Ghost": "โกสต์",
+    "Who banned": "ใครแบน",
+    "Talkback": "ตอบกลับ",
+    "Dice": "ลูกเต๋า",
+    "DJ Manager": "จัดการดีเจ",
+    "Auto Moderator": "ผู้ดูแลอัตโนมัติ",
+    "Enabled": "เปิดใช้งาน",
+    "Disabled": "ปิดใช้งาน",
+    "Enable": "เปิดใช้งาน",
+    "Disable": "ปิดใช้งาน",
+    "Yes": "ใช่",
+    "No": "ไม่ใช่",
+    "On": "เปิด",
+    "Off": "ปิด",
+    "True": "จริง",
+    "False": "เท็จ",
+    "None": "ไม่มี",
+    "Any": "ทุกแบบ",
+    "All": "ทั้งหมด",
+    "Default": "ค่าเริ่มต้น",
+    "Basic": "พื้นฐาน",
+    "Simple": "ง่าย",
+    "Everyone": "ทุกคน",
+    "Everybody": "ทุกคน",
+    "User": "ผู้ใช้",
+    "Users": "ผู้ใช้",
+    "Owner": "เจ้าของ",
+    "Owners": "เจ้าของ",
+    "Administrator": "ผู้ดูแลระบบ",
+    "Administrators": "ผู้ดูแลระบบ",
+    "Admin": "ผู้ดูแลระบบ",
+    "Moderator": "ผู้ดูแลห้อง",
+    "Moderators": "ผู้ดูแลห้อง",
+    "Member": "สมาชิก",
+    "Members": "สมาชิก",
+    "Guest": "ผู้เยี่ยมชม",
+    "Guests": "ผู้เยี่ยมชม",
+    "Male": "ชาย",
+    "Female": "หญิง",
+    "Both": "ทั้งสองเพศ",
+    "Unknown": "ไม่ทราบ",
+    "Public": "สาธารณะ",
+    "Private": "ส่วนตัว",
+    "In the room": "ในห้อง",
+    "In chat": "ในแชท",
+    "Chat": "แชท",
+    "Room message": "ข้อความในห้อง",
+    "Notify everyone": "แจ้งเตือนทุกคน",
+    "Notify moderators only": "แจ้งเตือนผู้ดูแลเท่านั้น",
+    "Easy": "ง่าย",
+    "Medium": "ปานกลาง",
+    "Hard": "ยาก",
+    "Addition": "บวก",
+    "Subtraction": "ลบ",
+    "Multiplication": "คูณ",
+    "Division": "หาร",
+    "Second": "วินาที",
+    "Seconds": "วินาที",
+    "Minute": "นาที",
+    "Minutes": "นาที",
+    "Hour": "ชั่วโมง",
+    "Hours": "ชั่วโมง",
+    "Day": "วัน",
+    "Days": "วัน",
+    "Kick": "เตะออก",
+    "Ban": "แบน",
+    "Kick and ban": "เตะออกและแบน",
+    "Regular expression": "นิพจน์ทั่วไป",
+    "Regex": "Regex",
+    "Show answer": "แสดงคำตอบ",
+    "Hide answer": "ซ่อนคำตอบ",
+    "Notify": "แจ้งเตือน",
+    "Do not notify": "ไม่ต้องแจ้งเตือน",
+    "4-sided": "4 หน้า",
+    "6-sided": "6 หน้า",
+    "8-sided": "8 หน้า",
+    "10-sided": "10 หน้า",
+    "12-sided": "12 หน้า",
+    "20-sided": "20 หน้า",
+    "Bot name": "ชื่อบอท",
+    "Response message": "ข้อความตอบกลับ",
+    "Owner list": "รายชื่อเจ้าของ",
+    "Message interval": "ช่วงเวลาส่งข้อความ",
+    "Question interval": "ช่วงเวลาคำถาม",
+    "Time limit": "เวลาจำกัด",
+    "Violation count": "จำนวนการละเมิด",
+    "Number range": "ช่วงตัวเลข",
+    "Operator level": "ระดับตัวดำเนินการ",
+    "Dice type": "ชนิดลูกเต๋า",
+    "Number of dice": "จำนวนลูกเต๋า",
+    "Microphone turn duration": "ระยะเวลารับไมโครโฟน",
+    "Allow moderators only": "อนุญาตเฉพาะผู้ดูแล",
+    "Reports before penalty": "จำนวนรายงานก่อนลงโทษ",
+    "Loading settings:": "กำลังโหลดการตั้งค่า:",
+    "Loading settings for": "กำลังโหลดการตั้งค่าของ",
+    "Settings:": "การตั้งค่า:",
+    "Loaded settings for": "โหลดการตั้งค่าของ",
+    "Could not load settings:": "โหลดการตั้งค่าไม่สำเร็จ:",
+    "Select a plugin card to open its settings.":
+        "เลือกปลั๊กอินเพื่อเปิดการตั้งค่า",
+    "Connect to load the installed plugins.":
+        "เชื่อมต่อเพื่อโหลดรายการปลั๊กอินที่ติดตั้ง",
+    "No plugins match this search.": "ไม่พบปลั๊กอินที่ตรงกับคำค้น",
+    "Camfrog returned no installed plugins.":
+        "Camfrog ไม่พบปลั๊กอินที่ติดตั้งไว้",
+    "No installed plugin settings are available.":
+        "ไม่มีการตั้งค่าของปลั๊กอินที่ติดตั้ง",
+    "The selected plugin is no longer in Camfrog's list.":
+        "ปลั๊กอินที่เลือกไม่อยู่ในรายการของ Camfrog แล้ว",
+}
+
+
+class _WindowsTrayIcon:
+    """Native notification-area icon driven by Tk's existing message loop."""
+
+    WM_TRAY = 0x8000 + 41
+    ID_SHOW = 1001
+    ID_EXIT = 1002
+
+    def __init__(self, root, title, on_show, on_exit, icon_path=None):
+        self.root = root
+        self.on_show = on_show
+        self.on_exit = on_exit
+        self.title = str(title)[:127]
+        self.active = False
+        self._class_atom = None
+        self.hwnd = None
+        self.icon = None
+        if os.name != "nt":
+            return
+        try:
+            import win32con
+            import win32gui
+
+            self.win32con = win32con
+            self.win32gui = win32gui
+            self.hinstance = win32gui.GetModuleHandle(None)
+            self.class_name = "CamfrogWebStatusTray_{0}_{1:x}".format(
+                os.getpid(), id(self))
+            window_class = win32gui.WNDCLASS()
+            window_class.hInstance = self.hinstance
+            window_class.lpszClassName = self.class_name
+            window_class.lpfnWndProc = self._window_proc
+            self._class_atom = win32gui.RegisterClass(window_class)
+            self.hwnd = win32gui.CreateWindowEx(
+                0, self.class_name, self.title, 0,
+                0, 0, 0, 0, 0, 0, self.hinstance, None)
+            self.icon = self._load_icon(icon_path)
+            flags = (win32gui.NIF_ICON | win32gui.NIF_MESSAGE |
+                     win32gui.NIF_TIP)
+            data = (self.hwnd, 1, flags, self.WM_TRAY, self.icon, self.title)
+            # pywin32 returns None for a successful Shell_NotifyIcon call.
+            # Only an explicit False indicates that Windows rejected the icon.
+            if win32gui.Shell_NotifyIcon(win32gui.NIM_ADD, data) is False:
+                raise RuntimeError("Windows rejected the tray icon.")
+            self.active = True
+            self.root.after(100, self._pump)
+        except Exception:
+            self.shutdown()
+
+    def _load_icon(self, icon_path):
+        gui, con = self.win32gui, self.win32con
+        candidates = []
+        if icon_path:
+            candidates.append(Path(icon_path))
+        frozen_dir = getattr(__import__("sys"), "_MEIPASS", None)
+        if frozen_dir:
+            candidates.append(Path(frozen_dir) / "app.ico")
+        candidates.append(Path(__import__("sys").executable).resolve().parent /
+                          "app.ico")
+        candidates.append(Path(__file__).resolve().with_name("app.ico"))
+        for path in candidates:
+            try:
+                if path.is_file():
+                    icon = gui.LoadImage(
+                        0, str(path), con.IMAGE_ICON, 0, 0,
+                        con.LR_LOADFROMFILE | con.LR_DEFAULTSIZE)
+                    if icon:
+                        return icon
+            except Exception:
+                continue
+        return gui.LoadIcon(0, con.IDI_APPLICATION)
+
+    def _window_proc(self, hwnd, message, wparam, lparam):
+        gui, con = self.win32gui, self.win32con
+        if message == self.WM_TRAY:
+            if lparam in (con.WM_LBUTTONUP, con.WM_LBUTTONDBLCLK):
+                self.on_show()
+            elif lparam == con.WM_RBUTTONUP:
+                self._show_menu()
+            return 0
+        if message == con.WM_COMMAND:
+            command = wparam & 0xFFFF
+            if command == self.ID_SHOW:
+                self.on_show()
+            elif command == self.ID_EXIT:
+                self.on_exit()
+            return 0
+        return gui.DefWindowProc(hwnd, message, wparam, lparam)
+
+    def _show_menu(self):
+        gui, con = self.win32gui, self.win32con
+        menu = gui.CreatePopupMenu()
+        gui.AppendMenu(menu, con.MF_STRING, self.ID_SHOW, "Open window")
+        gui.AppendMenu(menu, con.MF_SEPARATOR, 0, None)
+        gui.AppendMenu(menu, con.MF_STRING, self.ID_EXIT, "Exit GUI")
+        x, y = gui.GetCursorPos()
+        gui.SetForegroundWindow(self.hwnd)
+        gui.TrackPopupMenu(menu, con.TPM_RIGHTBUTTON, x, y, 0, self.hwnd, None)
+        gui.PostMessage(self.hwnd, con.WM_NULL, 0, 0)
+        gui.DestroyMenu(menu)
+
+    def _pump(self):
+        if not self.active:
+            return
+        try:
+            self.win32gui.PumpWaitingMessages()
+        except Exception:
+            self.shutdown()
+            return
+        if self.active:
+            try:
+                self.root.after(100, self._pump)
+            except Exception:
+                self.shutdown()
+
+    def shutdown(self):
+        if not self.active and not self.hwnd and not self._class_atom:
+            return
+        gui = getattr(self, "win32gui", None)
+        if gui:
+            try:
+                if self.hwnd:
+                    gui.Shell_NotifyIcon(gui.NIM_DELETE, (self.hwnd, 1))
+            except Exception:
+                pass
+            try:
+                if self.hwnd:
+                    gui.DestroyWindow(self.hwnd)
+            except Exception:
+                pass
+            try:
+                if self._class_atom:
+                    gui.UnregisterClass(self.class_name, self.hinstance)
+            except Exception:
+                pass
+        self.active = False
+        self.hwnd = None
+        self._class_atom = None
+
+
+@dataclass
+class BotManagerOption:
+    value: str
+    label: str
+    selected: bool = False
+
+
+@dataclass
+class BotManagerField:
+    tag: str
+    name: str = ""
+    identifier: str = ""
+    kind: str = ""
+    value: str = field(default="", repr=False)
+    checked: bool = False
+    label: str = ""
+    options: list = field(default_factory=list, repr=False)
+    attributes: dict = field(default_factory=dict, repr=False)
+
+
+@dataclass
+class BotManagerPage:
+    path: str
+    method: str
+    action: str
+    enctype: str
+    fields: list = field(default_factory=list, repr=False)
+    links: list = field(default_factory=list, repr=False)
+    plugin_states: list = field(default_factory=list, repr=False)
+    headings: list = field(default_factory=list)
+
+
+class _BotManagerPageParser(HTMLParser):
+    """Read the remote manager's current form without retaining rendered markup."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.method = "GET"
+        self.action = ""
+        self.enctype = "application/x-www-form-urlencoded"
+        self.fields = []
+        self.labels = {}
+        self.links = []
+        self.plugin_states = []
+        self.headings = []
+        self._form_seen = False
+        self._label = None
+        self._link = None
+        self._heading = None
+        self._textarea = None
+        self._select = None
+        self._option = None
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "form" and not self._form_seen:
+            self._form_seen = True
+            self.method = attributes.get("method", "GET").upper()
+            self.action = attributes.get("action", "")
+            self.enctype = attributes.get(
+                "enctype", "application/x-www-form-urlencoded")
+        elif tag == "input":
+            kind = attributes.get("type", "text").lower()
+            if kind not in ("button", "submit", "reset", "image"):
+                if self._label is not None and not self._label[0]:
+                    self._label[0] = attributes.get("id", "")
+                self.fields.append(BotManagerField(
+                    tag="input", name=attributes.get("name", ""),
+                    identifier=attributes.get("id", ""), kind=kind,
+                    value=attributes.get("value", ""),
+                    checked="checked" in attributes,
+                    attributes=attributes))
+        elif tag == "textarea":
+            self._textarea = BotManagerField(
+                tag="textarea", name=attributes.get("name", ""),
+                identifier=attributes.get("id", ""), kind="textarea",
+                attributes=attributes)
+            self.fields.append(self._textarea)
+        elif tag == "select":
+            self._select = BotManagerField(
+                tag="select", name=attributes.get("name", ""),
+                identifier=attributes.get("id", ""), kind="select",
+                attributes=attributes)
+            self.fields.append(self._select)
+        elif tag == "option" and self._select is not None:
+            self._option = BotManagerOption(
+                value=attributes.get("value", ""), label="",
+                selected="selected" in attributes)
+        elif tag == "label":
+            self._label = [attributes.get("for", ""), []]
+        elif tag == "a":
+            self._link = [attributes.get("href", ""), [],
+                          attributes.get("class", "")]
+        plugin_link = re.fullmatch(
+            r"plugin_link_(\d+)", attributes.get("id", ""))
+        if plugin_link:
+            classes = set(attributes.get("class", "").split())
+            self.plugin_states.append((
+                int(plugin_link.group(1)),
+                "on" in classes or "active-on" in classes))
+        elif tag in ("h1", "h2", "h3", "h4"):
+            self._heading = [tag, []]
+
+    def handle_endtag(self, tag):
+        if tag == "option" and self._option is not None:
+            label = " ".join("".join(self._option.label).split())
+            self._option.label = label
+            if not self._option.value:
+                self._option.value = label
+            self._select.options.append(self._option)
+            self._option = None
+        elif tag == "textarea" and self._textarea is not None:
+            self._textarea.value = "".join(self._textarea.value).strip("\r\n")
+            self._textarea = None
+        elif tag == "select":
+            if (self._select is not None and
+                    "multiple" not in self._select.attributes and
+                    self._select.options and not any(
+                        option.selected for option in self._select.options)):
+                self._select.options[0].selected = True
+            self._select = None
+        elif tag == "label" and self._label is not None:
+            label = " ".join("".join(self._label[1]).split())
+            if self._label[0] and label:
+                self.labels[self._label[0]] = label
+            self._label = None
+        elif tag == "a" and self._link is not None:
+            label = " ".join("".join(self._link[1]).split())
+            self.links.append((self._link[0], label))
+            self._link = None
+        elif tag in ("h1", "h2", "h3", "h4") and self._heading is not None:
+            heading = " ".join("".join(self._heading[1]).split())
+            if heading:
+                self.headings.append(heading)
+            self._heading = None
+
+    def handle_data(self, data):
+        if self._textarea is not None:
+            self._textarea.value += data
+        if self._option is not None:
+            self._option.label += data
+        if self._label is not None:
+            self._label[1].append(data)
+        if self._link is not None:
+            self._link[1].append(data)
+        if self._heading is not None:
+            self._heading[1].append(data)
+
+    def make_page(self, path):
+        for item in self.fields:
+            item.label = self.labels.get(item.identifier, "")
+        return BotManagerPage(
+            path=path, method=self.method, action=self.action,
+            enctype=self.enctype, fields=self.fields, links=self.links,
+            plugin_states=self.plugin_states, headings=self.headings)
+
+
+class _BotManagerSameHostRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        parsed = urllib.parse.urlparse(newurl)
+        if parsed.scheme != "https" or parsed.hostname != BOT_MANAGER_HOST:
+            raise urllib.error.HTTPError(
+                newurl, code, "Camfrog redirected outside its manager host",
+                headers, fp)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class CamfrogBotManagerClient:
+    """In-memory cloudbot-cookie client for Camfrog's Bot Manager forms."""
+
+    def __init__(self, token, timeout=20):
+        if not re.fullmatch(r"[A-Za-z0-9_-]{16,128}", str(token or "")):
+            raise ValueError("Invalid cloudbot parameter format.")
+        self._token = str(token)
+        self.timeout = timeout
+        self._rpc_id = 0
+        self._opener = urllib.request.build_opener(_BotManagerSameHostRedirect())
+
+    def clear(self):
+        self._token = ""
+        self._opener = None
+
+    def _request(self, path, data=None, content_type=None, allow_signon=False,
+                 referer=None):
+        if not self._token or self._opener is None:
+            raise RuntimeError("Bot Manager is disconnected.")
+        parsed_path = urllib.parse.urlparse(path)
+        if (parsed_path.scheme or parsed_path.netloc or
+                not parsed_path.path.startswith("/bot/")):
+            raise ValueError("Invalid Bot Manager path.")
+        url = BOT_MANAGER_BASE_URL + path
+        headers = dict(BROWSER_HEADERS)
+        headers["Accept"] = "text/html,application/xhtml+xml"
+        headers["Cookie"] = "cloudbot=" + self._token
+        if referer:
+            headers["Referer"] = BOT_MANAGER_BASE_URL + referer
+        if content_type:
+            headers["Content-Type"] = content_type
+        request = urllib.request.Request(url, data=data, headers=headers,
+                                         method="POST" if data is not None else "GET")
+        try:
+            with self._opener.open(request, timeout=self.timeout) as response:
+                response_path = urllib.parse.urlparse(response.geturl()).path
+                content = response.read(3_000_000)
+                encoding = response.headers.get_content_charset() or "utf-8"
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError("Camfrog returned HTTP {0}.".format(exc.code)) from None
+        except (urllib.error.URLError, TimeoutError, OSError):
+            raise RuntimeError("Could not reach Camfrog Bot Manager.") from None
+        if (not allow_signon and
+                (response_path == "/bot/signon" or
+                 response_path.startswith("/bot/signon/"))):
+            raise RuntimeError("Camfrog did not accept this cloudbot session.")
+        return content.decode(encoding, "replace"), response_path
+
+    def fetch_page(self, path):
+        html, final_path = self._request(path)
+        parser = _BotManagerPageParser()
+        parser.feed(html)
+        page = parser.make_page(final_path)
+        if not parser._form_seen:
+            raise RuntimeError("Camfrog returned an unsupported Bot Manager page.")
+        if final_path == "/bot/signon":
+            raise RuntimeError("Camfrog did not accept this cloudbot session.")
+        return page
+
+    def plugin_catalog(self, page):
+        result = []
+        seen = set()
+        states = dict(page.plugin_states)
+        navigation_labels = {"plugins", "plugin settings", "ตั้งค่าปลั๊กอิน"}
+        for href, label in page.links:
+            path = urllib.parse.urlparse(urllib.parse.urljoin(
+                BOT_MANAGER_BASE_URL, href)).path
+            match = re.fullmatch(r"/bot/plugins/(\d+)", path)
+            if not match or not label or label.strip().lower() in navigation_labels:
+                continue
+            plugin_id = int(match.group(1))
+            if plugin_id not in seen:
+                if plugin_id not in states:
+                    raise RuntimeError(
+                        "Camfrog did not return the plugin activation state.")
+                result.append((plugin_id, label.strip(), states[plugin_id]))
+                seen.add(plugin_id)
+        return result
+
+    def set_plugin_enabled(self, plugin_id, enabled):
+        """Call Camfrog's plugin-switch JSON endpoint for one installed plugin."""
+        self._rpc_id += 1
+        payload = json.dumps({
+            "id": self._rpc_id,
+            "method": "switch_plugin",
+            "params": [int(plugin_id), bool(enabled)],
+        }, separators=(",", ":")).encode("utf-8")
+        self._request("/bot/ajax/", data=payload,
+                      content_type="application/json", referer="/bot/plugins/1")
+
+    def save_page(self, page, values, role_state=None, font_state=None):
+        pairs = []
+        files = []
+        role_state = role_state or {}
+        font_state = font_state or {}
+        for index, item in enumerate(page.fields):
+            if not item.name:
+                continue
+            value = values.get(index, item.value)
+            if item.kind == "radio":
+                selected_value = values.get(
+                    index, item.value if item.checked else None)
+                if selected_value is not None and str(selected_value) == item.value:
+                    pairs.append((item.name, item.value))
+                continue
+            if item.kind == "checkbox":
+                if values.get(index, item.checked):
+                    pairs.append((item.name, item.value or "on"))
+                continue
+            if item.tag == "select" and "multiple" in item.attributes:
+                selected_values = values.get(
+                    index, [option.value for option in item.options
+                            if option.selected])
+                selected_values = {str(value) for value in selected_values}
+                pairs.extend((item.name, option.value)
+                             for option in item.options
+                             if option.value in selected_values)
+                continue
+            if item.kind == "file":
+                filename = values.get(index, "")
+                if filename:
+                    path = Path(filename)
+                    files.append((item.name, path.name, path.read_bytes()))
+                continue
+            if item.name == "font_picker" and font_state:
+                value = json.dumps(font_state, ensure_ascii=False,
+                                   separators=(",", ":"))
+            if item.identifier == "_1" and item.name in ("_3", "_4") and role_state:
+                value = json.dumps(role_state, ensure_ascii=False,
+                                   separators=(",", ":"))
+            if item.kind == "password" and index not in values:
+                continue
+            pairs.append((item.name, str(value)))
+
+        action = urllib.parse.urljoin(BOT_MANAGER_BASE_URL + page.path,
+                                      page.action or page.path)
+        target = urllib.parse.urlparse(action)
+        if target.scheme != "https" or target.hostname != BOT_MANAGER_HOST or not target.path.startswith("/bot/"):
+            raise ValueError("Camfrog returned an invalid form action.")
+        target_path = target.path
+        if target.query:
+            target_path += "?" + target.query
+        if page.method != "POST":
+            raise ValueError("This Bot Manager form cannot be saved safely.")
+        if "multipart/form-data" in page.enctype.lower() or files:
+            boundary = "----CamfrogBotManagerBoundary" + str(random.getrandbits(64))
+            chunks = []
+            for name, value in pairs:
+                safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+                chunks.extend((
+                    ("--" + boundary + "\r\n").encode("ascii"),
+                    (f'Content-Disposition: form-data; name="{safe_name}"\r\n\r\n').encode("ascii"),
+                    str(value).encode("utf-8"), b"\r\n"))
+            for name, filename, content in files:
+                safe_name = re.sub(r"[^A-Za-z0-9_.-]", "_", name)
+                safe_filename = Path(filename).name.replace('"', "_").replace("\r", "_").replace("\n", "_")
+                chunks.extend((
+                    ("--" + boundary + "\r\n").encode("ascii"),
+                    (f'Content-Disposition: form-data; name="{safe_name}"; filename="{safe_filename}"\r\n').encode("utf-8"),
+                    b"Content-Type: application/octet-stream\r\n\r\n",
+                    content, b"\r\n"))
+            chunks.append(("--" + boundary + "--\r\n").encode("ascii"))
+            body = b"".join(chunks)
+            content_type = "multipart/form-data; boundary=" + boundary
+        else:
+            body = urllib.parse.urlencode(pairs).encode("utf-8")
+            content_type = "application/x-www-form-urlencoded"
+        self._request(target_path, data=body, content_type=content_type,
+                      referer=page.path)
+        return self.fetch_page(page.path)
 
 
 def parse_rotate_interval(raw):
@@ -846,8 +1845,17 @@ class WebStatusManager:
 
         self.tk = tk
         self.ttk = ttk
+        self._language = "en"
         self.q = queue.Queue()
+        self.bot_q = queue.Queue()
         self.busy = False
+        self.bot_busy = False
+        self.bot_client = None
+        self.bot_pages = {}
+        self.bot_plugin_catalog = []
+        self.bot_plugin_index_page = None
+        self.bot_selected_plugin_id = None
+        self.bot_generation = 0
         self.switching = False
         self.rotate_job = None
         self.chrome_mode = False
@@ -856,100 +1864,689 @@ class WebStatusManager:
         self.session_ready = False
         self._pending = None
         self._start_generation = 0
+        self._clipboard_bound_widgets = set()
         load_dotenv(BASE / ".env")  # pick up the encrypted account, if saved
         self.root = self.tk.Tk()
+        self.root.title("ZChat Web Status")
+        self.root.geometry("400x300")
+        self.root.minsize(300, 220)
+        self.root.resizable(True, True)
+        self._is_fullscreen = False
+        self._pre_fullscreen_geometry = "400x300"
+        self._tray_icon = None
+        self._create_initial_splash()
         style = self.ttk.Style(self.root)
         try:
             style.theme_use("clam")
         except self.tk.TclError:
             pass
-        style.configure("TFrame", background="#edf2f5")
-        style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
-        style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
-        style.configure("TRadiobutton", background="#edf2f5", foreground="#233548")
-        style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
-        style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
+        style.configure("TFrame", background=WEB_STATUS_THEME["background"])
+        style.configure("TLabel", background=WEB_STATUS_THEME["background"],
+                        foreground=WEB_STATUS_THEME["text"], font=("Segoe UI", 9))
+        style.configure("TCheckbutton", background=WEB_STATUS_THEME["background"],
+                        foreground=WEB_STATUS_THEME["text"])
+        style.configure("TRadiobutton", background=WEB_STATUS_THEME["background"],
+                        foreground=WEB_STATUS_THEME["text"])
+        style.configure("TLabelframe", background=WEB_STATUS_THEME["background"],
+                        bordercolor=WEB_STATUS_THEME["border"])
+        style.configure("TLabelframe.Label", background=WEB_STATUS_THEME["background"],
+                        foreground=WEB_STATUS_THEME["accent"],
                         font=("Segoe UI", 9, "bold"))
         style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
-                        background="#d9e8f0", foreground="#1a3a52")
-        style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
-        style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
-                        foreground="#152b3a")
-        style.configure("TNotebook", background="#edf2f5")
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["button_text"])
+        style.map("TButton", background=[
+            ("active", WEB_STATUS_THEME["button_active"]),
+            ("pressed", WEB_STATUS_THEME["button_pressed"])])
+        style.configure("TEntry", padding=(4, 4),
+                        fieldbackground=WEB_STATUS_THEME["entry"],
+                        foreground=WEB_STATUS_THEME["text"])
+        style.configure("TNotebook", background=WEB_STATUS_THEME["background"])
         style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
-        style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
-                  foreground=[("selected", "#096c7b")])
-        self.root.title("Camfrog Web Status (prototype)")
-        self.root.geometry("500x560")
-        self.root.minsize(480, 540)
+        style.map("TNotebook.Tab", background=[("selected", WEB_STATUS_THEME["surface"])],
+                  foreground=[("selected", WEB_STATUS_THEME["accent_hover"])])
+        style.configure("Brand.TLabel", font=("Segoe UI", 13, "bold"),
+                        foreground=WEB_STATUS_THEME["accent"])
+        style.configure("BrandBar.TFrame",
+                        background=WEB_STATUS_THEME["surface_high"])
+        style.configure("BrandLogo.TButton", padding=(4, 1), width=2,
+                        font=("Segoe UI", 11, "bold"),
+                        background=WEB_STATUS_THEME["accent"],
+                        foreground=WEB_STATUS_THEME["surface"])
+        style.map("BrandLogo.TButton", background=[
+            ("active", WEB_STATUS_THEME["accent_hover"]),
+            ("pressed", WEB_STATUS_THEME["accent_hover"])])
+        style.configure("BrandBar.TLabel",
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["text"],
+                        font=("Segoe UI", 9, "bold"))
+        style.configure("Loading.TLabel",
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["accent"],
+                        font=("Segoe UI", 8))
+        style.configure("Hint.TLabel", foreground=WEB_STATUS_THEME["muted"])
+        style.configure("BotHeader.TFrame",
+                        background=WEB_STATUS_THEME["surface_high"])
+        style.configure("BotHeader.TLabel",
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["text"])
+        style.configure("BotHeaderTitle.TLabel",
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["accent_hover"],
+                        font=("Segoe UI", 13, "bold"))
+        style.configure("BotHeaderHint.TLabel",
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["muted"])
+        style.configure("BotTab.TButton", padding=(14, 8),
+                        font=("Segoe UI", 9), anchor="center",
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["button_text"])
+        style.map("BotTab.TButton", background=[
+            ("active", WEB_STATUS_THEME["button_active"]),
+            ("pressed", WEB_STATUS_THEME["button_pressed"])])
+        style.configure("BotTabActive.TButton", padding=(14, 8),
+                        font=("Segoe UI", 9, "bold"), anchor="center",
+                        background=WEB_STATUS_THEME["surface"],
+                        foreground=WEB_STATUS_THEME["accent_hover"])
+        style.map("BotTabActive.TButton", background=[
+            ("active", WEB_STATUS_THEME["surface"]),
+            ("pressed", WEB_STATUS_THEME["surface"])])
+        style.configure("BotPrimary.TButton", padding=(12, 6),
+                        font=("Segoe UI", 9, "bold"),
+                        background=WEB_STATUS_THEME["accent"],
+                        foreground=WEB_STATUS_THEME["surface"])
+        style.map("BotPrimary.TButton", background=[
+            ("active", WEB_STATUS_THEME["accent_hover"]),
+            ("pressed", WEB_STATUS_THEME["accent_hover"])])
+        style.configure("SafetyBanner.TLabel",
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["muted"],
+                        padding=(10, 6), font=("Segoe UI", 9))
+        style.configure("AppFooter.TFrame",
+                        background=WEB_STATUS_THEME["surface_high"])
+        style.configure("AppFooter.TLabel",
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["muted"],
+                        font=("Segoe UI", 9))
+        style.configure("ActionPrimary.TButton", padding=(12, 6),
+                        font=("Segoe UI", 9, "bold"),
+                        background=WEB_STATUS_THEME["accent"],
+                        foreground=WEB_STATUS_THEME["surface"])
+        style.map("ActionPrimary.TButton", background=[
+            ("active", WEB_STATUS_THEME["accent_hover"]),
+            ("pressed", WEB_STATUS_THEME["accent_hover"])])
+        style.configure("ActionStop.TButton", padding=(9, 6),
+                        font=("Segoe UI", 9, "bold"),
+                        background=WEB_STATUS_THEME["surface_high"],
+                        foreground=WEB_STATUS_THEME["danger"])
+        style.map("ActionStop.TButton", background=[
+            ("active", WEB_STATUS_THEME["button_active"]),
+            ("pressed", WEB_STATUS_THEME["button_pressed"])])
+        style.configure("BotLink.TButton", padding=(2, 0), borderwidth=0,
+                        anchor="w", background=WEB_STATUS_THEME["background"],
+                        foreground=WEB_STATUS_THEME["accent_hover"],
+                        font=("Segoe UI", 9, "underline"))
+        style.map("BotLink.TButton",
+                  background=[("active", WEB_STATUS_THEME["background"])],
+                  foreground=[("active", WEB_STATUS_THEME["accent"])])
+        self.brand_bar = self.ttk.Frame(
+            self.root, style="BrandBar.TFrame", padding=(6, 3))
+        self.brand_bar.pack(fill="x", padx=10, pady=(5, 3))
+        self.logo_button = self.ttk.Button(
+            self.brand_bar, text="Z", style="BrandLogo.TButton",
+            command=self._toggle_fullscreen)
+        self.logo_button.pack(side="left", padx=(0, 6))
+        self.brand_title = self.ttk.Label(
+            self.brand_bar, text="ZChat Web Status", style="BrandBar.TLabel")
+        self.brand_title.pack(side="left")
+        self.page_loading_var = self.tk.StringVar(value="Loading pages...")
+        self.page_loading_label = self.ttk.Label(
+            self.brand_bar, textvariable=self.page_loading_var,
+            style="Loading.TLabel")
+        self.page_loading_label.pack(side="left", padx=(8, 0))
+        self.tray_button = self.ttk.Button(
+            self.brand_bar, text="Tray", width=5,
+            command=self._minimize_to_tray)
+        self.tray_button.pack(side="right", padx=(4, 0))
+        self.restore_size_button = self.ttk.Button(
+            self.brand_bar, text="800x600", width=7,
+            command=self._restore_800x600)
+        self.restore_size_button.pack(side="right")
+        self.language_button = self.ttk.Button(
+            self.brand_bar, text="TH/EN", width=5,
+            command=self.switch_language)
+        self.language_button.pack(side="right", padx=(4, 0))
 
-        self.ttk.Label(self.root, text=(
-            "Update status via profiles.camfrog.com. Dry-run is the default; "
-            "nothing is sent unless Send live is on. Passwords and cookie values "
-            "are never stored, logged, or shown."
-        ), wraplength=440).pack(fill="x", padx=10, pady=(8, 6))
+        self.safety_banner = self.ttk.Label(self.root, text=(
+            "Dry-run is on by default; enable Send live before status updates are sent."
+        ), style="SafetyBanner.TLabel", wraplength=350)
+        self.safety_banner.pack(fill="x", padx=10, pady=(5, 4))
+
+        self.app_footer = self.ttk.Frame(
+            self.root, style="AppFooter.TFrame", padding=(10, 6))
+        self.app_footer.pack(side="bottom", fill="x", padx=10, pady=(0, 8))
 
         self.nb = self.ttk.Notebook(self.root)
-        self.nb.pack(fill="both", expand=True, padx=10)
+        self.nb.pack(fill="both", expand=True, padx=10, pady=(0, 6))
         setup_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
         session_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
         self.nb.add(setup_tab, text="Setup")
         self.nb.add(session_tab, text="Account & Session")
-        pool_lines, pool_load_warning = load_web_text_slots()
+        self.bot_manager_tab = self.ttk.Frame(self.nb, padding=(10, 6, 10, 6))
+        self.nb.add(self.bot_manager_tab, text=self._text("bot_manager"))
+        self._register_language_widget(self.bot_manager_tab, "bot_manager", notebook_tab=True)
+        self._create_bot_manager_content(self.bot_manager_tab)
+        self._create_main_ui(setup_tab, session_tab)
+        self._install_clipboard_shortcuts(self.root)
+        self.nb.bind("<<NotebookTabChanged>>", self._on_main_tab_changed)
+        self.root.bind("<Configure>", self._on_root_resize, add="+")
+        self.root.bind("<Escape>", self._exit_fullscreen, add="+")
+        self.root.protocol("WM_DELETE_WINDOW", self._close_window)
+        self._show_page_loading(900)
+        self.splash_frame.lift()
+        self.root.after(500, lambda: self._tick_initial_splash(5))
+        self._apply_language()
 
-        form = self.ttk.Frame(setup_tab)
+    def _create_initial_splash(self):
+        """Show the branded loading page while the rest of the GUI is created."""
+        background = "#020a24"
+        self.root.configure(background=background)
+        self.splash_frame = self.tk.Frame(self.root, background=background)
+        self.splash_frame.place(relx=0, rely=0, relwidth=1, relheight=1)
+
+        content = self.tk.Frame(self.splash_frame, background=background)
+        content.place(relx=0.5, rely=0.5, anchor="center")
+
+        resource_root = Path(getattr(
+            sys, "_MEIPASS", Path(__file__).resolve().parent))
+        logo_image = None
+        try:
+            logo_image = self.tk.PhotoImage(
+                file=str(resource_root / "assets" / "zttato.png")).subsample(16, 16)
+        except (self.tk.TclError, OSError):
+            pass
+        self._splash_photo = logo_image
+
+        details = self.tk.Frame(content, background=background)
+        details.pack(side="left")
+        if logo_image is not None:
+            self.tk.Label(
+                details, image=logo_image, background=background,
+                borderwidth=0).pack(anchor="w", pady=(0, 8))
+        else:
+            self.tk.Label(
+                details, text="Z", background=background,
+                foreground="#55e4ff", font=("Segoe UI", 28, "bold"),
+                borderwidth=0).pack(anchor="w", pady=(0, 8))
+        self.splash_title = self.tk.Label(
+            details, text="ZChat Web Status", background=background,
+            foreground="#ffffff", font=("Segoe UI", 14, "bold"),
+            justify="left", wraplength=145)
+        self.splash_title.pack(anchor="w", pady=(0, 12))
+        self.splash_loading = self.tk.Label(
+            details, text="Loading pages...", background=background,
+            foreground="#55e4ff",
+            font=("Segoe UI", 10, "bold"), anchor="w")
+        self.splash_loading.pack(anchor="w", pady=(0, 8))
+        self.splash_countdown = self.tk.Label(
+            details, text="", background=background,
+            foreground="#b4c2dc",
+            font=("Segoe UI", 9), anchor="w")
+        self.splash_countdown.pack(anchor="w")
+
+        # Paint the splash before constructing the main interface.
+        self.root.update_idletasks()
+        self.root.update()
+
+    def _tick_initial_splash(self, seconds_left):
+        """Count down, then remove the splash to reveal the Setup page."""
+        try:
+            if not self.splash_frame.winfo_exists():
+                return
+            if seconds_left <= 0:
+                self.splash_frame.destroy()
+                self._splash_photo = None
+                return
+            self.splash_countdown.configure(
+                text="Opening the app in {0}...".format(seconds_left))
+            self.root.after(
+                1000, lambda: self._tick_initial_splash(seconds_left - 1))
+        except self.tk.TclError:
+            return
+
+    def _toggle_fullscreen(self, _event=None):
+        if self._is_fullscreen:
+            self._exit_fullscreen()
+            return
+        try:
+            self._pre_fullscreen_geometry = self.root.geometry()
+            self.root.attributes("-fullscreen", True)
+            self._is_fullscreen = True
+            self._show_page_loading(250)
+        except self.tk.TclError:
+            self._is_fullscreen = False
+
+    def _exit_fullscreen(self, _event=None):
+        if not self._is_fullscreen:
+            return
+        try:
+            self.root.attributes("-fullscreen", False)
+            self.root.geometry(self._pre_fullscreen_geometry or "400x300")
+            self._is_fullscreen = False
+        except self.tk.TclError:
+            self._is_fullscreen = False
+
+    def _restore_800x600(self):
+        try:
+            self.root.attributes("-fullscreen", False)
+            self._is_fullscreen = False
+            self.root.state("normal")
+            self.root.geometry("800x600")
+            self.root.lift()
+            self.root.focus_force()
+        except self.tk.TclError:
+            pass
+
+    def _minimize_to_tray(self):
+        if self._tray_icon is None:
+            self._tray_icon = _WindowsTrayIcon(
+                self.root, "ZChat Web Status", self._show_from_tray,
+                self._close_window, icon_path=BASE / "app.ico")
+        if self._tray_icon.active:
+            self.root.withdraw()
+        else:
+            self.note.set("System tray is unavailable; minimized to the taskbar.")
+            self.root.iconify()
+
+    def _show_from_tray(self):
+        try:
+            self.root.deiconify()
+            self.root.state("normal")
+            self.root.lift()
+            self.root.focus_force()
+        except self.tk.TclError:
+            pass
+
+    def _show_page_loading(self, duration=300):
+        generation = getattr(self, "_page_loading_generation", 0) + 1
+        self._page_loading_generation = generation
+        self.page_loading_var.set("Loading pages...")
+        self.root.after(duration, lambda: self._clear_page_loading(generation))
+
+    def _clear_page_loading(self, generation):
+        if generation == getattr(self, "_page_loading_generation", 0):
+            self.page_loading_var.set("")
+
+    def _on_root_resize(self, event):
+        if event.widget is not self.root:
+            return
+        width = max(event.width, 300)
+        height = max(event.height, 220)
+        try:
+            bot_active = str(self.nb.select()) == str(self.bot_manager_tab)
+        except self.tk.TclError:
+            bot_active = False
+        if bot_active or height < 330:
+            self.safety_banner.pack_forget()
+        elif not self.safety_banner.winfo_manager():
+            self.safety_banner.pack(fill="x", padx=10, pady=(5, 4), before=self.nb)
+        self.safety_banner.configure(wraplength=max(220, width - 46))
+        self.page_loading_label.configure(
+            wraplength=max(60, width - 225))
+        self.brand_title.configure(
+            text=self._ui_text(
+                "ZChat Web Status" if width >= 380 else "Web Status"))
+        self.restore_size_button.configure(
+            text=self._ui_text(
+                "Restore 800x600" if width >= 460 else "800x600"),
+            width=17 if width >= 460 else 7)
+        self.tray_button.configure(width=5)
+        self.language_button.configure(width=5)
+        tab_padding = (14, 8) if width >= 440 else (8, 4)
+        style = self.ttk.Style(self.root)
+        style.configure("BotTab.TButton", padding=tab_padding)
+        style.configure("BotTabActive.TButton", padding=tab_padding)
+        self.nb.tab(
+            1, text=self._ui_text(
+                "Account & Session" if width >= 440 else "Session"))
+        self.nb.tab(self.bot_manager_tab,
+                    text=self._ui_text(
+                        "Bot Manager" if width >= 380 else "Bot"))
+        self._layout_action_bar(width)
+        self._layout_status_pool(width)
+        self._layout_bot_header(width, height)
+        if height < 330:
+            self.bot_activity_frame.pack_forget()
+        elif not self.bot_activity_frame.winfo_manager():
+            self.bot_activity_frame.pack(
+                side="bottom", fill="x", pady=(6, 0), before=self.bot_page_host)
+        self.bot_log_text.configure(height=2 if height >= 320 else 1)
+        self.session_help_label.configure(wraplength=max(180, width - 100))
+        if hasattr(self, "note_label"):
+            self.note_label.configure(wraplength=max(210, width - 48))
+
+    def _on_main_tab_changed(self, _event=None):
+        """Give Bot Manager the full window; keep status actions on status tabs."""
+        self._show_page_loading(300)
+        try:
+            bot_manager_active = str(self.nb.select()) == str(self.bot_manager_tab)
+        except self.tk.TclError:
+            return
+        if bot_manager_active:
+            self.safety_banner.pack_forget()
+            self.app_footer.pack_forget()
+            return
+        if (self.root.winfo_height() >= 330 and
+                not self.safety_banner.winfo_manager()):
+            self.safety_banner.pack(fill="x", padx=10, pady=(5, 4), before=self.nb)
+        if not self.app_footer.winfo_manager():
+            self.app_footer.pack(
+                side="bottom", fill="x", padx=10, pady=(0, 8), before=self.nb)
+
+    # ---- Language support
+    def _register_language_widget(self, widget, name, notebook_tab=False):
+        """Register a widget for language support."""
+        # Store widget reference
+        if not hasattr(self, '_language_widgets'):
+            self._language_widgets = {}
+        self._language_widgets[name] = widget
+
+    def _text(self, key):
+        """Get translated text for the given key."""
+        translations = {
+            "bot_manager": {
+                "en": "Bot Manager",
+                "th": "ตัวจัดการบอท",
+            },
+            "bot_manager_subtitle": {
+                "en": "Manage room, profile, and bot plugins",
+                "th": "จัดการห้อง โปรไฟล์ และปลั๊กอินบอท",
+            },
+        }
+        return translations.get(key, {}).get(self._language, key)
+
+    def _ui_text(self, text, language=None):
+        """Translate a known UI label while leaving user data untouched."""
+        value = str(text)
+        english_to_thai = dict(WEB_STATUS_GUI_TEXT_TH)
+        english_to_thai.update({
+            english: thai for thai, english in self.BOT_LABELS.items()
+            if english not in english_to_thai
+        })
+        language = language or self._language
+        if language == "th":
+            translated = english_to_thai.get(value)
+            if translated is None:
+                translated = next((thai for english, thai in
+                                   english_to_thai.items()
+                                   if english.casefold() == value.casefold()), value)
+            return translated
+        thai_to_english = {thai: english for english, thai in
+                           english_to_thai.items()}
+        translated = thai_to_english.get(value)
+        if translated is None:
+            translated = next((english for thai, english in
+                               thai_to_english.items()
+                               if thai.casefold() == value.casefold()), value)
+        return translated
+
+    def _apply_language(self):
+        """Apply the selected language to static labels and current messages."""
+        self.root.title(self._ui_text("ZChat Web Status"))
+
+        def visit(widget):
+            try:
+                widget_class = widget.winfo_class()
+            except self.tk.TclError:
+                return
+            if widget is self.nb:
+                for tab_id in widget.tabs():
+                    current = widget.tab(tab_id, "text")
+                    translated = self._ui_text(current)
+                    if translated != current:
+                        widget.tab(tab_id, text=translated)
+            elif widget_class == "Menu":
+                try:
+                    last = widget.index("end")
+                    for index in range((last if last is not None else -1) + 1):
+                        current = widget.entrycget(index, "label")
+                        translated = self._ui_text(current)
+                        if translated != current:
+                            widget.entryconfigure(index, label=translated)
+                except self.tk.TclError:
+                    pass
+            else:
+                try:
+                    current = widget.cget("text")
+                    translated = self._ui_text(current)
+                    if translated != current:
+                        widget.configure(text=translated)
+                except (self.tk.TclError, TypeError):
+                    pass
+
+                if widget_class in ("Label", "TLabel"):
+                    try:
+                        variable_name = widget.cget("textvariable")
+                        if variable_name:
+                            current = self.root.getvar(variable_name)
+                            translated = self._ui_text(current)
+                            if translated != current:
+                                self.root.setvar(variable_name, translated)
+                    except self.tk.TclError:
+                        pass
+
+            try:
+                children = widget.winfo_children()
+            except self.tk.TclError:
+                return
+            for child in children:
+                visit(child)
+
+        visit(self.root)
+
+    def switch_language(self):
+        previous_language = self._language
+        self._language = "th" if self._language == "en" else "en"
+        self._apply_language()
+        self._refresh_bot_option_widgets(previous_language)
+        self._refresh_bot_plugin_summary()
+        self._refresh_bot_plugin_title()
+        self._layout_action_bar(self.root.winfo_width())
+
+    def _refresh_bot_plugin_summary(self):
+        if not hasattr(self, "bot_plugin_summary_var"):
+            return
+        if (not getattr(self, "bot_client", None) and
+                not getattr(self, "bot_plugin_catalog", [])):
+            self.bot_plugin_summary_var.set(
+                self._ui_text("Connect to load the installed plugins."))
+            return
+        enabled = sum(bool(variable.get()) for variable
+                      in getattr(self, "bot_plugin_switch_vars", {}).values())
+        installed = len(getattr(self, "bot_plugin_catalog", []))
+        if self._language == "th":
+            summary = "ติดตั้ง {0} รายการ · เปิดใช้งาน {1}".format(
+                installed, enabled)
+        else:
+            summary = "{0} installed · {1} enabled".format(installed, enabled)
+        self.bot_plugin_summary_var.set(summary)
+
+    def _refresh_bot_plugin_title(self):
+        if (not getattr(self, "bot_selected_plugin_id", None) or
+                "plugins" not in getattr(self, "bot_pages", {})):
+            return
+        selected = next((name for plugin_id, name, _enabled
+                         in self.bot_plugin_catalog
+                         if plugin_id == self.bot_selected_plugin_id), None)
+        if selected:
+            self.bot_plugin_selected_var.set(
+                "{0} {1}".format(self._ui_text("Settings:"),
+                                 self._ui_text(selected)))
+
+    def _refresh_bot_option_widgets(self, previous_language):
+        """Refresh translated choices without changing their submitted values."""
+        for controls in getattr(self, "bot_form_widgets", {}).values():
+            for control in controls.values():
+                if control.get("kind") == "multiselect":
+                    widget = control.get("widget")
+                    options = control.get("options", [])
+                    if widget is None or not options:
+                        continue
+                    selected = set(widget.curselection())
+                    widget.delete(0, "end")
+                    for option in options:
+                        widget.insert("end", self._ui_text(option.label))
+                    for index in selected:
+                        widget.selection_set(index)
+                    continue
+                if control.get("kind") not in ("select", "role_select"):
+                    continue
+                options = control.get("options", [])
+                widget = control.get("widget")
+                variable = control.get("variable")
+                if widget is None or variable is None or not options:
+                    continue
+                selected_value = control.get("selected_value")
+                selected = next((option for option in options
+                                 if option.value == selected_value), None)
+                if selected is None:
+                    current = variable.get()
+                    selected = next((option for option in options
+                                     if current in (
+                                         option.label,
+                                         self._ui_text(option.label,
+                                                       previous_language),
+                                         self._ui_text(option.label))), None)
+                widget.configure(values=[self._ui_text(option.label)
+                                         for option in options])
+                if selected is not None:
+                    control["selected_value"] = selected.value
+                    variable.set(self._ui_text(selected.label))
+
+    def _bot_option_label(self, option, language=None):
+        return self._ui_text(option.label, language=language)
+
+    def _bind_bot_option_selection(self, control):
+        """Remember the server value independently of the translated label."""
+        def remember(_event=None):
+            selected_index = control["widget"].current()
+            if 0 <= selected_index < len(control["options"]):
+                control["selected_value"] = control["options"][selected_index].value
+                return
+            selected = control["variable"].get()
+            option = next((candidate for candidate in control["options"]
+                           if self._bot_option_label(candidate) == selected), None)
+            if option is not None:
+                control["selected_value"] = option.value
+
+        control["widget"].bind("<<ComboboxSelected>>", remember)
+
+    def _language_button(self, parent, text, command=None, state="normal"):
+        """Create a language-aware button."""
+        button = self.ttk.Button(parent, text=text, command=command, state=state)
+        return button
+
+    def _create_scrollable_tab(self, parent):
+        holder = self.ttk.Frame(parent)
+        holder.pack(fill="both", expand=True)
+        canvas = self.tk.Canvas(
+            holder, highlightthickness=0,
+            background=WEB_STATUS_THEME["background"])
+        scrollbar = self.ttk.Scrollbar(
+            holder, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        content = self.ttk.Frame(canvas)
+        item = canvas.create_window((0, 0), window=content, anchor="nw")
+        content.bind(
+            "<Configure>",
+            lambda _event, c=canvas: c.configure(scrollregion=c.bbox("all")))
+        canvas.bind(
+            "<Configure>",
+            lambda event, c=canvas, window=item:
+            c.itemconfigure(window, width=event.width))
+        canvas.bind("<Enter>", lambda _event, c=canvas:
+                    c.bind_all("<MouseWheel>",
+                               lambda wheel: self._scroll_canvas(wheel, c)))
+        canvas.bind("<Leave>", lambda _event:
+                    self.root.unbind_all("<MouseWheel>"))
+        self._scrollable_canvases.append(canvas)
+        return content
+
+    def _scroll_canvas(self, event, canvas):
+        if getattr(event, "delta", 0):
+            canvas.yview_scroll(int(-event.delta / 120), "units")
+        elif getattr(event, "num", 0) == 4:
+            canvas.yview_scroll(-1, "units")
+        elif getattr(event, "num", 0) == 5:
+            canvas.yview_scroll(1, "units")
+        return "break"
+
+    def _create_main_ui(self, setup_tab, session_tab):
+        """Create the status setup and session controls."""
+        pool_lines, pool_load_warning = load_web_text_slots()
+        self._scrollable_canvases = []
+        setup_content = self._create_scrollable_tab(setup_tab)
+        session_content = self._create_scrollable_tab(session_tab)
+
+        form = self.ttk.LabelFrame(
+            setup_content, text="Status rotation", padding=(8, 6))
+        self.status_form = form
         form.pack(fill="x")
         form.columnconfigure(1, weight=1)
         self.ttk.Label(form, text="Nickname").grid(row=0, column=0, sticky="w")
         self.login = self.tk.StringVar(value="Seaza")
         self.ttk.Entry(form, textvariable=self.login).grid(row=0, column=1, sticky="ew", padx=6)
-        self.ttk.Label(form, text="Status lines").grid(
+        self.status_lines_label = self.ttk.Label(form, text="Status lines")
+        self.status_lines_label.grid(
             row=1, column=0, sticky="nw", pady=(5, 0))
-        pool_frame = self.ttk.Frame(form)
-        pool_frame.grid(row=1, column=1, sticky="ew", padx=6, pady=(5, 0))
+        self.pool_frame = self.ttk.Frame(form)
+        self.pool_frame.grid(row=1, column=1, sticky="ew", padx=6, pady=(5, 0))
         self.pool_vars = []
         self.pool_entries = []
-        for column in range(2):
-            pool_frame.columnconfigure(column, weight=1)
+        self.pool_cells = []
         for slot in range(WEB_TEXT_SLOT_COUNT):
-            cell = self.ttk.Frame(pool_frame)
-            cell.grid(row=slot % 5, column=slot // 5, sticky="ew",
-                      padx=(0, 8), pady=2)
+            cell = self.ttk.Frame(self.pool_frame)
             self.ttk.Label(cell, text="{0}.".format(slot + 1), width=3).pack(side="left")
             variable = self.tk.StringVar(value=pool_lines[slot])
             entry = self.ttk.Entry(cell, textvariable=variable, width=18)
             entry.pack(side="left", fill="x", expand=True)
+            self.pool_cells.append(cell)
             self.pool_vars.append(variable)
             self.pool_entries.append(entry)
-        pool_btns = self.ttk.Frame(form)
-        pool_btns.grid(row=1, column=2, sticky="n", pady=(5, 0))
+        self.pool_btns = self.ttk.Frame(form)
         self.btn_save_web_text = self.ttk.Button(
-            pool_btns, text="Save to webtext.db", command=self.save_web_texts)
+            self.pool_btns, text="Save to webtext.db", command=self.save_web_texts)
         self.btn_save_web_text.pack(fill="x")
-        self.ttk.Label(form, text="Switch every").grid(row=2, column=0, sticky="w", pady=(5, 0))
-        timing = self.ttk.Frame(form)
-        timing.grid(row=2, column=1, sticky="w", padx=6, pady=(5, 0))
+        self.switch_label = self.ttk.Label(form, text="Switch every")
+        self.switch_label.grid(row=2, column=0, sticky="w", pady=(5, 0))
+        self.timing = self.ttk.Frame(form)
+        self.timing.grid(row=2, column=1, sticky="w", padx=6, pady=(5, 0))
         self.interval = self.tk.StringVar(value=str(ROTATE_INTERVAL_DEFAULT))
-        self.ttk.Spinbox(timing, textvariable=self.interval,
-                         from_=ROTATE_INTERVAL_MIN, to=ROTATE_INTERVAL_MAX,
-                         increment=30, width=6).pack(side="left")
-        self.ttk.Label(timing, text="s (min 30)").pack(side="left", padx=(4, 0))
-        self.ttk.Label(timing, text="Timeout").pack(side="left", padx=(10, 0))
+        self.interval_spin = self.ttk.Spinbox(
+            self.timing, textvariable=self.interval,
+            from_=ROTATE_INTERVAL_MIN, to=ROTATE_INTERVAL_MAX,
+            increment=30, width=6)
+        self.interval_unit = self.ttk.Label(self.timing, text="s (min 30)")
+        self.timeout_label = self.ttk.Label(self.timing, text="Timeout")
         self.timeout = self.tk.StringVar(value=str(TIMEOUT_DEFAULT))
-        self.ttk.Entry(timing, textvariable=self.timeout, width=6).pack(side="left", padx=(3, 0))
+        self.timeout_entry = self.ttk.Entry(
+            self.timing, textvariable=self.timeout, width=6)
         self.live = self.tk.BooleanVar(value=False)
-        self.ttk.Checkbutton(form, text="Send live (otherwise dry-run preview only)",
-                             variable=self.live).grid(row=3, column=0, columnspan=3,
-                                                      sticky="w", pady=(6, 0))
+        self.live_check = self.ttk.Checkbutton(
+            form, text="Send live (otherwise dry-run preview only)",
+            variable=self.live)
 
-        browser = self.ttk.LabelFrame(session_tab, padding=(10, 6, 10, 6),
+        browser = self.ttk.LabelFrame(session_content, padding=(8, 6, 8, 6),
                                       text="Session (PHPSESSID via iframe / web login)")
         browser.pack(fill="x")
-        self.ttk.Label(browser, text=(
+        self.session_help_label = self.ttk.Label(browser, text=(
             "Log in in your browser (via iframe/web login). In devtools Network tab, "
             "inspect https://profiles.camfrog.com/home.php to get PHPSESSID=..., "
             "paste below, then press 'Login' to verify and arm automation."
-        ), wraplength=440, foreground="#555").pack(anchor="w", pady=(0, 4))
+        ), wraplength=340, foreground="#555")
+        self.session_help_label.pack(anchor="w", pady=(0, 4))
         row2 = self.ttk.Frame(browser)
         row2.pack(fill="x")
         self.ttk.Button(row2, text="Open login page",
@@ -967,24 +2564,396 @@ class WebStatusManager:
         self.paste_state = self.ttk.Label(browser, text="", foreground="#555")
         self.paste_state.pack(anchor="w", pady=(4, 0))
 
-        actions = self.ttk.Frame(self.root, padding=(10, 0, 10, 2))
+        actions = self.ttk.Frame(self.app_footer, style="AppFooter.TFrame")
         actions.pack(fill="x")
-        self.ttk.Button(actions, text="Preview plan", command=self.preview).pack(side="left", padx=5)
-        self.ttk.Button(actions, text="Probe session", command=self.probe).pack(side="left")
-        self.ttk.Button(actions, text="Update", command=self.check_update).pack(side="left", padx=5)
-        actions2 = self.ttk.Frame(self.root, padding=(10, 0, 10, 6))
-        actions2.pack(fill="x")
-        self.btn_start = self.ttk.Button(actions2, text="Start", command=self.start)
-        self.btn_start.pack(side="left", padx=(5, 0))
-        self.btn_stop = self.ttk.Button(actions2, text="Stop", command=self.stop)
-        self.btn_stop.pack(side="left", padx=5)
-        self.ttk.Button(actions2, text="How to capture", command=self.capture).pack(side="right")
+        self.action_frame = actions
+        self.action_buttons = {}
+        self.action_specs = (
+            ("preview", "Preview plan", "Preview", 7, self.preview),
+            ("start", "Start", "Start", 5, self.start),
+            ("stop", "Stop", "Stop", 5, self.stop),
+            ("probe", "Probe session", "Probe", 5, self.probe),
+            ("update", "Update", "Update", 6, self.check_update),
+            ("capture", "How to capture", "Help", 5, self.capture),
+        )
+        for key, label, compact, width_chars, command in self.action_specs:
+            button_style = ("ActionPrimary.TButton" if key == "start" else
+                            "ActionStop.TButton" if key == "stop" else "TButton")
+            button = self.ttk.Button(
+                actions, text=label, command=command, style=button_style)
+            self.action_buttons[key] = (button, label, compact, width_chars)
+        self.btn_start = self.action_buttons["start"][0]
+        self.btn_stop = self.action_buttons["stop"][0]
+        self.more_menu = self.tk.Menu(self.root, tearoff=False)
+        self.more_menu.add_command(label="Preview plan", command=self.preview)
+        self.more_menu.add_command(label="Probe session", command=self.probe)
+        self.more_menu.add_command(label="Update", command=self.check_update)
+        self.more_menu.add_command(label="How to capture", command=self.capture)
+        self.more_action_button = self.ttk.Menubutton(
+            actions, text="More", menu=self.more_menu)
         self.note = self.tk.StringVar(value="Dry-run is on. Nothing has been sent.")
         if pool_load_warning:
             self.note.set(pool_load_warning)
-        self.ttk.Label(self.root, textvariable=self.note, anchor="w",
-                       padding=(10, 0, 10, 8), wraplength=450).pack(fill="x")
+        self.note_label = self.ttk.Label(
+            self.app_footer, textvariable=self.note, style="AppFooter.TLabel",
+            anchor="w", wraplength=350)
+        self.note_label.pack(fill="x", pady=(5, 0))
+        self._layout_status_pool(400)
+        self._layout_action_bar(400)
+        self._layout_bot_header(400, 300)
         self.root.after(120, self._poll)
+
+    def _layout_action_bar(self, width):
+        if not hasattr(self, "action_buttons"):
+            return
+        for child in self.action_frame.winfo_children():
+            child.grid_forget()
+        for column in range(6):
+            self.action_frame.columnconfigure(column, weight=0, minsize=0)
+
+        compact = width < 560
+        if width < 360:
+            visible = ("start", "stop")
+            for key, (button, label, short, chars) in self.action_buttons.items():
+                button.configure(text=self._ui_text(short if compact else label),
+                                 width=chars if compact else 0)
+                if key not in visible:
+                    continue
+                index = visible.index(key)
+                button.grid(row=0, column=index, sticky="ew", padx=1, pady=1)
+            self.more_action_button.configure(width=5)
+            self.more_action_button.grid(row=0, column=2, sticky="ew",
+                                         padx=1, pady=1)
+            for column in range(3):
+                self.action_frame.columnconfigure(column, weight=1)
+            return
+
+        for column, (key, (button, label, short, chars)) in enumerate(
+                self.action_buttons.items()):
+            button.configure(
+                text=self._ui_text(short if compact else label),
+                width=(chars if compact and self._language == "en" else 0))
+            button.grid(row=0, column=column, sticky="ew" if compact else "w",
+                        padx=1, pady=1)
+            if compact:
+                self.action_frame.columnconfigure(column, weight=1)
+
+    def _layout_status_pool(self, width):
+        if not hasattr(self, "pool_cells"):
+            return
+        narrow = width < 560
+        one_column = width < 400
+        for cell in self.pool_cells:
+            cell.grid_forget()
+        for column in range(2):
+            self.pool_frame.columnconfigure(column, weight=0, minsize=0)
+        columns = 1 if one_column else 2
+        for column in range(columns):
+            self.pool_frame.columnconfigure(column, weight=1)
+        for slot, cell in enumerate(self.pool_cells):
+            row = slot if one_column else slot % 5
+            column = 0 if one_column else slot // 5
+            cell.grid(row=row, column=column, sticky="ew",
+                      padx=(0, 8 if column == 0 and columns == 2 else 0),
+                      pady=2)
+
+        self.pool_frame.grid_forget()
+        self.pool_btns.grid_forget()
+        self.timing.grid_forget()
+        if narrow:
+            self.pool_frame.grid(row=1, column=1, columnspan=2, sticky="ew",
+                                 padx=6, pady=(5, 0))
+            self.pool_btns.grid(row=2, column=1, columnspan=2, sticky="w",
+                                padx=6, pady=(3, 0))
+            self.switch_label.grid(row=3, column=0, sticky="w", pady=(5, 0))
+            self.timing.grid(row=3, column=1, columnspan=2, sticky="w",
+                             padx=6, pady=(5, 0))
+            self.live_check.grid(row=4, column=0, columnspan=3,
+                                 sticky="w", pady=(6, 0))
+        else:
+            self.pool_frame.grid(row=1, column=1, sticky="ew",
+                                 padx=6, pady=(5, 0))
+            self.pool_btns.grid(row=1, column=2, sticky="n", pady=(5, 0))
+            self.switch_label.grid(row=2, column=0, sticky="w", pady=(5, 0))
+            self.timing.grid(row=2, column=1, sticky="w", padx=6, pady=(5, 0))
+            self.live_check.grid(row=3, column=0, columnspan=3,
+                                 sticky="w", pady=(6, 0))
+
+        for widget in (self.interval_spin, self.interval_unit,
+                       self.timeout_label, self.timeout_entry):
+            widget.grid_forget()
+        if width < 480:
+            self.interval_spin.grid(row=0, column=0, sticky="w")
+            self.interval_unit.grid(row=0, column=1, sticky="w", padx=(4, 0))
+            self.timeout_label.grid(row=1, column=0, sticky="w", pady=(3, 0))
+            self.timeout_entry.grid(row=1, column=1, sticky="w",
+                                    padx=(3, 0), pady=(3, 0))
+        else:
+            self.interval_spin.grid(row=0, column=0, sticky="w")
+            self.interval_unit.grid(row=0, column=1, sticky="w", padx=(4, 0))
+            self.timeout_label.grid(row=0, column=2, sticky="w", padx=(10, 0))
+            self.timeout_entry.grid(row=0, column=3, sticky="w", padx=(3, 0))
+
+    def _layout_bot_header(self, width, height):
+        if not hasattr(self, "bot_header_widgets"):
+            return
+        (label, entry, connect, disconnect, stop, logout, status) = (
+            self.bot_header_widgets)
+        for widget in self.bot_header_widgets:
+            widget.grid_forget()
+        if width < 440:
+            self.bot_header_brand.grid_forget()
+        elif not self.bot_header_brand.winfo_manager():
+            self.bot_header_brand.grid(
+                row=0, column=0, columnspan=4, sticky="ew", pady=(0, 4))
+        if width >= 560:
+            label.configure(text=self._ui_text("cloudbot parameter"))
+            entry.configure(width=28)
+            connect.configure(width=0, text=self._ui_text("Connect"))
+            disconnect.configure(width=0, text=self._ui_text("Disconnect"))
+            stop.configure(width=0, text=self._ui_text("Stop bot"))
+            logout.configure(width=0, text=self._ui_text("Log out"))
+            label.grid(row=1, column=0, sticky="w")
+            entry.grid(row=1, column=1, sticky="ew", padx=6)
+            connect.grid(row=1, column=2, padx=3)
+            disconnect.grid(row=1, column=3, padx=3)
+            stop.grid(row=2, column=0, sticky="w", padx=(0, 3), pady=(5, 0))
+            logout.grid(row=2, column=1, sticky="w", padx=3, pady=(5, 0))
+            status.grid(row=2, column=2, columnspan=2, sticky="w",
+                        padx=6, pady=(5, 0))
+        else:
+            label.configure(text=self._ui_text(
+                "cloudbot" if width >= 340 else ""))
+            entry.configure(width=8)
+            connect.configure(width=6, text=self._ui_text("Connect"))
+            disconnect.configure(width=9, text=self._ui_text("Disconnect"))
+            stop.configure(width=6, text=self._ui_text("Stop"))
+            logout.configure(width=7, text=self._ui_text("Log out"))
+            if width < 340:
+                entry.grid(row=1, column=0, sticky="ew", padx=(0, 2))
+                connect.grid(row=1, column=1, sticky="w", padx=2)
+                disconnect.grid(row=1, column=2, sticky="w", padx=2)
+                stop.grid(row=2, column=0, sticky="w", padx=(0, 2), pady=(3, 0))
+                logout.grid(row=2, column=1, sticky="w", padx=2, pady=(3, 0))
+                status_row = 3
+            else:
+                label.grid(row=1, column=0, sticky="w")
+                entry.grid(row=1, column=1, sticky="ew", padx=3)
+                connect.grid(row=1, column=2, sticky="w", padx=2)
+                disconnect.grid(row=1, column=3, sticky="w", padx=2)
+                stop.grid(row=2, column=0, sticky="w", padx=(0, 2), pady=(3, 0))
+                logout.grid(row=2, column=1, sticky="w", padx=2, pady=(3, 0))
+                status_row = 2
+            status_column = 2 if width >= 340 else 0
+            status_span = 2 if width >= 340 else 3
+            status.grid(row=status_row, column=status_column,
+                        columnspan=status_span, sticky="w",
+                        padx=(3, 0) if width >= 340 else (0, 3), pady=(3, 0))
+            status.configure(wraplength=max(190, width - 55))
+
+    def _install_clipboard_shortcuts(self, parent):
+        """Install layout-independent editing shortcuts on Tk text controls."""
+        supported = {
+            "Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox", "Text",
+            "Listbox",
+        }
+        for widget in parent.winfo_children():
+            try:
+                widget_class = widget.winfo_class()
+                widget_path = str(widget)
+            except self.tk.TclError:
+                continue
+            if (widget_class in supported and
+                    widget_path not in self._clipboard_bound_widgets):
+                widget.bind(
+                    "<Control-KeyPress>", self._handle_clipboard_control_key,
+                    add="+")
+                self._clipboard_bound_widgets.add(widget_path)
+            self._install_clipboard_shortcuts(widget)
+
+    def _handle_clipboard_control_key(self, event):
+        """Recognize Ctrl shortcuts by keysym, control char, or Windows keycode."""
+        keysym = str(getattr(event, "keysym", "")).lower()
+        char = str(getattr(event, "char", "") or "")
+        try:
+            keycode = int(getattr(event, "keycode", -1))
+        except (TypeError, ValueError):
+            keycode = -1
+        shortcuts = {
+            "a": ({"a", "\x01"}, 65, "select_all"),
+            "c": ({"c", "\x03"}, 67, "copy"),
+            "v": ({"v", "\x16"}, 86, "paste"),
+            "x": ({"x", "\x18"}, 88, "cut"),
+        }
+        action = next((shortcut for name, (chars, code, shortcut)
+                       in shortcuts.items()
+                       if keysym == name or char in chars or keycode == code), None)
+        if action is None:
+            return None
+        self._perform_clipboard_action(event.widget, action)
+        return "break"
+
+    def _perform_clipboard_action(self, widget, action):
+        try:
+            widget_class = widget.winfo_class()
+        except self.tk.TclError:
+            return False
+        supported = {
+            "Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox", "Text",
+            "Listbox",
+        }
+        editable = supported - {"Listbox"}
+        if widget_class not in supported:
+            return False
+
+        if action == "select_all":
+            try:
+                if widget_class == "Text":
+                    widget.tag_add("sel", "1.0", "end-1c")
+                    widget.mark_set("insert", "end-1c")
+                elif widget_class == "Listbox":
+                    widget.selection_set(0, "end")
+                else:
+                    widget.selection_range(0, "end")
+                    widget.icursor("end")
+                widget.focus_set()
+                return True
+            except (self.tk.TclError, AttributeError):
+                return False
+
+        try:
+            if widget_class == "Text":
+                has_selection = bool(widget.tag_ranges("sel"))
+                selection = ("sel.first", "sel.last")
+            elif widget_class == "Listbox":
+                selected = widget.curselection()
+                has_selection = bool(selected)
+                selection = selected
+            else:
+                has_selection = bool(widget.selection_present())
+                selection = ("sel.first", "sel.last")
+        except (self.tk.TclError, AttributeError):
+            has_selection = False
+            selection = None
+
+        if action in {"copy", "cut"}:
+            if (not has_selection or
+                    (action == "cut" and (
+                        widget_class not in editable or
+                        not self._clipboard_widget_editable(widget)))):
+                return False
+            # A masked token/password field must accept paste but never export
+            # its contents through Ctrl+C or Ctrl+X.
+            try:
+                if str(widget.cget("show")):
+                    return False
+            except (self.tk.TclError, AttributeError):
+                pass
+            try:
+                if widget_class == "Text":
+                    value = widget.get(*selection)
+                elif widget_class == "Listbox":
+                    value = "\n".join(widget.get(index) for index in selection)
+                else:
+                    content = widget.get()
+                    start, end = (int(widget.index(index)) for index in selection)
+                    value = content[start:end]
+                if not self._write_clipboard_text(value):
+                    return False
+                if action == "cut":
+                    widget.delete(*selection)
+                return True
+            except (self.tk.TclError, AttributeError, TypeError, ValueError):
+                return False
+
+        if action == "paste":
+            if widget_class not in editable or not self._clipboard_widget_editable(widget):
+                return False
+            value = self._read_clipboard_text()
+            if not value:
+                return False
+            try:
+                if has_selection:
+                    widget.delete(*selection)
+                widget.insert("insert", value)
+                return True
+            except (self.tk.TclError, AttributeError, TypeError):
+                return False
+        return False
+
+    def _clipboard_widget_editable(self, widget):
+        try:
+            return str(widget.cget("state")) not in {"disabled", "readonly"}
+        except (self.tk.TclError, AttributeError):
+            return True
+
+    def _write_clipboard_text(self, value):
+        value = str(value)
+        if os.name == "nt":
+            try:
+                import win32clipboard
+                import win32con
+
+                for attempt in range(20):
+                    try:
+                        win32clipboard.OpenClipboard(None)
+                        break
+                    except Exception:
+                        if attempt == 19:
+                            raise
+                        time.sleep(0.025)
+                try:
+                    win32clipboard.EmptyClipboard()
+                    win32clipboard.SetClipboardText(value, win32con.CF_UNICODETEXT)
+                finally:
+                    win32clipboard.CloseClipboard()
+                return True
+            except Exception:
+                pass
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(value)
+            if os.name != "nt":
+                self.root.update()
+            return True
+        except self.tk.TclError:
+            return False
+
+    def _read_clipboard_text(self):
+        if os.name == "nt":
+            try:
+                import win32clipboard
+                import win32con
+
+                for attempt in range(20):
+                    try:
+                        win32clipboard.OpenClipboard(None)
+                        break
+                    except Exception:
+                        if attempt == 19:
+                            raise
+                        time.sleep(0.025)
+                try:
+                    if not win32clipboard.IsClipboardFormatAvailable(
+                            win32con.CF_UNICODETEXT):
+                        if not win32clipboard.IsClipboardFormatAvailable(
+                                win32con.CF_TEXT):
+                            return ""
+                        value = win32clipboard.GetClipboardData(win32con.CF_TEXT)
+                        if isinstance(value, bytes):
+                            value = value.decode("mbcs", errors="replace")
+                    else:
+                        value = win32clipboard.GetClipboardData(
+                            win32con.CF_UNICODETEXT)
+                    return value if isinstance(value, str) else str(value)
+                finally:
+                    win32clipboard.CloseClipboard()
+            except Exception:
+                pass
+        try:
+            return str(self.root.clipboard_get())
+        except self.tk.TclError:
+            return ""
 
     # ---- helpers
     def chrome_import(self):
@@ -994,6 +2963,1613 @@ class WebStatusManager:
             return "loaded session from Chrome: {0}".format(cookie_summary(jar))
 
         self._run_bg(do, on_done=lambda: setattr(self, "chrome_mode", True))
+
+    # ---- Bot Manager functionality
+    BOT_LABELS = {
+        "ห้อง": "Room",
+        "กุญแจเข้าห้อง": "Room password",
+        "ภาษาบอท": "Bot language",
+        "หยุดบอท (ห้ามเข้าห้อง)": "Pause bot (do not enter the room)",
+        "รหัสผ่านปัจจุบัน": "Current password",
+        "รหัสผ่านใหม่": "New password",
+        "อีเมล์ใหม่": "New email",
+        "ชื่อบอท": "Bot name",
+        "ข้อความ": "Message",
+        "รายการโอเนอร์": "Owner list",
+        "ช่วงเวลาที่จอแสดงผล (วินาที)": "Display interval (seconds)",
+        "บทบาท": "Role",
+        "ยินดี": "Greeting",
+        "เปิดใช้งานบทบาทในการตรวจสอบ": "Enable role matching",
+        "เปิดการใช้งานในการตรวจสอบเพศ": "Enable gender matching",
+        "ระยะเวลาคำถาม": "Question duration",
+        "หมดเวลา": "Time limit",
+        "แจ้งเเตือนผู้ใช้เมื่อเกมไม่สามารถใช้งาน": "Notify users when the game is unavailable",
+        "แสดงคำตอบที่ถูกต้องหากไม่ได้รับคำตอบ": "Show the answer when no one responds",
+        "จำนวนแทนค่าที่กำหนด": "Number range",
+        "คลาสตัวดำเนินการ": "Operator level",
+        "เปิดเงื่อนไขการใช้งาน": "Enable addition",
+        "เปิดการใช้งานในการลบ": "Enable subtraction",
+        "เปิดการใช้งานการเพิ่มจำนวน": "Enable multiplication",
+        "กฎกติกา": "Rules",
+        "จำนวนของการละเมิด": "Violation count",
+        "เตะช่อง/เหตุผลที่ทำโทษ": "Kick or ban reason",
+        "โหมด Regexp": "Regular expression mode",
+        "เตะ/ทำโทษ": "Kick or ban",
+        "ระดับเวลาที่เลือก": "Question interval",
+        "เริ่มเกมรูเล็ตทุกครั้ง": "Start roulette every",
+        "จับเวลาการใช้งาน": "Enable timer",
+        "แจ้งผู้ใช้รายอื่นในการแชท": "Notify other chat users",
+        "แจ้งเตือนผู้ดูแลเท่านั้น": "Notify moderators only",
+        "วันในการจัดเก็บบันทึก": "Keep records for days",
+        "ชนิดลูกเต๋า": "Dice type",
+        "นับลูกเต๋า": "Number of dice",
+        "เวลาในการรับไมค์": "Microphone turn duration",
+        "อนุญาตเฉพาะผู้ดูแลเท่านั้นที่สามารถรับไมค์ได้": "Allow moderators only",
+        "แจ้งเตือนผู้ใช้เมื่อมีการใช้งาน": "Notify users when active",
+        "ลงโทษ ชื่อเล่น อัตโนมัติ": "Automatically penalize nicknames",
+        "รายงานเพื่อลงโทษผู้ใช้": "Reports before penalty",
+    }
+
+    def _create_bot_manager_content(self, parent):
+        header = self.ttk.Frame(parent, style="BotHeader.TFrame", padding=8)
+        header.pack(fill="x", pady=(0, 6))
+        header.columnconfigure(1, weight=1)
+        brand = self.ttk.Frame(header, style="BotHeader.TFrame")
+        brand.grid(row=0, column=0, columnspan=4, sticky="ew", pady=(0, 4))
+        self.bot_header_brand = brand
+        self.ttk.Label(brand, text="Camfrog Bot Manager",
+                       style="BotHeaderTitle.TLabel").pack(anchor="w")
+
+        cloudbot_label = self.ttk.Label(
+            header, text="cloudbot parameter", style="BotHeader.TLabel")
+        cloudbot_label.grid(row=1, column=0, sticky="w")
+        self.bot_cloudbot_var = self.tk.StringVar(value="")
+        self.bot_cloudbot_entry = self.ttk.Entry(
+            header, textvariable=self.bot_cloudbot_var, show="*", width=28)
+        self.bot_cloudbot_entry.grid(row=1, column=1, sticky="ew", padx=6)
+        self.bot_connect_button = self.ttk.Button(
+            header, text="Connect", command=self.connect_bot)
+        self.bot_connect_button.grid(row=1, column=2, padx=3)
+        self.bot_disconnect_button = self.ttk.Button(
+            header, text="Disconnect", command=self.disconnect_bot,
+            state="disabled")
+        self.bot_disconnect_button.grid(row=1, column=3, padx=3)
+        self.bot_stop_button = self.ttk.Button(
+            header, text="Stop bot", command=self.stop_bot,
+            state="disabled")
+        self.bot_stop_button.grid(row=2, column=0, sticky="w", padx=(0, 3), pady=(5, 0))
+        self.bot_logout_button = self.ttk.Button(
+            header, text="Log out", command=self.logout_bot,
+            state="disabled")
+        self.bot_logout_button.grid(row=2, column=1, sticky="w", padx=3, pady=(5, 0))
+        self.bot_status_var = self.tk.StringVar(value="Disconnected")
+        status_label = self.ttk.Label(
+            header, textvariable=self.bot_status_var,
+            style="BotHeaderHint.TLabel", wraplength=500)
+        status_label.grid(row=2, column=2, columnspan=2, sticky="w",
+                          padx=6, pady=(5, 0))
+        self.bot_header_widgets = (
+            cloudbot_label, self.bot_cloudbot_entry, self.bot_connect_button,
+            self.bot_disconnect_button, self.bot_stop_button,
+            self.bot_logout_button, status_label)
+
+        navigation = self.ttk.Frame(parent)
+        navigation.pack(fill="x", pady=(0, 4), before=header)
+        for column in range(4):
+            navigation.columnconfigure(column, weight=1)
+        self.bot_page_host = self.ttk.Frame(parent)
+        self.bot_page_host.pack(fill="both", expand=True)
+        self.bot_tabs = {}
+        self.bot_section_buttons = {}
+        self.bot_active_tab = None
+        self.bot_page_hosts = {}
+        self.bot_save_buttons = {}
+        self.bot_reload_buttons = {}
+        self.bot_form_widgets = {}
+        self.bot_form_context = {}
+        self.bot_pages = {}
+        self.bot_disconnected_label = self.ttk.Label(
+            self.bot_page_host,
+            text="Connect to Camfrog Bot Manager to load Room, Profile, and Plugins.",
+            style="Hint.TLabel", wraplength=600, justify="left")
+        self.bot_disconnected_label.pack(anchor="nw", padx=16, pady=16)
+
+        for column, (key, title) in enumerate((
+                ("room", "Room"), ("profile", "Profile"),
+                ("plugins", "Plugins"), ("music_dj", "Music DJ"))):
+            button = self.ttk.Button(
+                navigation, text=self._ui_text(title), style="BotTab.TButton",
+                state="normal" if key == "music_dj" else "disabled",
+                command=lambda page_key=key: self._show_bot_tab(page_key))
+            button.grid(row=0, column=column, sticky="ew", padx=2)
+            self.bot_section_buttons[key] = button
+            tab = self.ttk.Frame(self.bot_page_host, padding=6)
+            self.bot_tabs[key] = tab
+            if key == "music_dj":
+                self._create_music_dj_controls(tab)
+            elif key == "plugins":
+                panes = self.ttk.Panedwindow(tab, orient="horizontal")
+                panes.pack(fill="both", expand=True)
+                catalog_panel = self.ttk.Frame(panes)
+                settings_panel = self.ttk.Frame(panes)
+                panes.add(catalog_panel, weight=2)
+                panes.add(settings_panel, weight=3)
+                self.bot_plugin_panes = panes
+                self._create_plugin_selector(catalog_panel)
+                self._create_bot_page_panel(settings_panel, key)
+                panes.bind(
+                    "<Configure>",
+                    lambda _event, widget=panes: self._position_plugin_pane(widget))
+            else:
+                self._create_bot_page_panel(tab, key)
+
+        log_frame = self.ttk.LabelFrame(
+            parent, text=self._ui_text("Activity"), padding=5)
+        self.bot_activity_frame = log_frame
+        log_frame.pack(side="bottom", fill="x", pady=(6, 0),
+                       before=self.bot_page_host)
+        self.bot_log_text = self.tk.Text(
+            log_frame, height=2, wrap="word", state="disabled",
+            background=WEB_STATUS_THEME["entry"],
+            foreground=WEB_STATUS_THEME["log_text"], font=("Consolas", 8))
+        self.bot_log_text.pack(fill="x")
+
+    def _show_bot_tab(self, key):
+        tab = self.bot_tabs.get(key)
+        if tab is None:
+            return
+        self._show_page_loading(250)
+        self.bot_disconnected_label.pack_forget()
+        for page in self.bot_tabs.values():
+            page.pack_forget()
+        tab.pack(fill="both", expand=True)
+        self.bot_active_tab = key
+        for page_key, button in self.bot_section_buttons.items():
+            button.configure(style=("BotTabActive.TButton" if page_key == key
+                                    else "BotTab.TButton"))
+
+    def _create_music_dj_controls(self, parent):
+        from tkinter import ttk
+
+        settings = self._load_local_media_settings()
+        executable = settings.get("music_dj_executable") or ""
+        if not executable:
+            found = default_music_dj_executable()
+            executable = str(found) if found else ""
+        self.music_dj_exe_var = self.tk.StringVar(value=executable)
+        self.music_dj_speech_var = self.tk.StringVar()
+        self.music_dj_status_var = self.tk.StringVar(
+            value=self._ui_text("Select music-dj.exe to connect to the local DJ."))
+
+        app_panel = self.ttk.LabelFrame(
+            parent, text=self._ui_text("Local ZeaZDev room Music DJ"), padding=6)
+        app_panel.pack(fill="both", expand=True, pady=(0, 6))
+        app_panel.columnconfigure(0, weight=1)
+        path_row = self.ttk.Frame(app_panel)
+        path_row.grid(row=0, column=0, sticky="ew")
+        path_row.columnconfigure(1, weight=1)
+        self.ttk.Label(path_row, text=self._ui_text("Music DJ executable")).grid(
+            row=0, column=0, sticky="w", padx=(0, 6))
+        self.ttk.Entry(path_row, textvariable=self.music_dj_exe_var).grid(
+            row=0, column=1, sticky="ew")
+        browse_button = self.ttk.Button(
+            path_row, text=self._ui_text("Browse..."), command=self._browse_music_dj)
+        browse_button.grid(row=0, column=2, padx=(5, 0))
+
+        action_row = self.ttk.Frame(app_panel)
+        action_row.grid(row=1, column=0, sticky="ew", pady=(5, 2))
+        actions = (
+            ("Open Music DJ", self._open_music_dj),
+            ("Start DJ worker", self._start_music_dj),
+            ("Stop DJ worker", self._stop_music_dj),
+            ("Refresh queue", self._refresh_music_dj),
+            ("Skip current", self._skip_music_dj),
+            ("Clear queue", self._clear_music_dj),
+        )
+        self.music_dj_action_buttons = []
+        for index, (label, command) in enumerate(actions):
+            button = self.ttk.Button(
+                action_row, text=self._ui_text(label), command=command)
+            column = index % 3
+            row = index // 3
+            button.grid(row=row, column=column, padx=2, pady=2, sticky="ew")
+            action_row.columnconfigure(column, weight=1)
+            self.music_dj_action_buttons.append(button)
+
+        voice_row = self.ttk.Frame(app_panel)
+        voice_row.grid(row=2, column=0, sticky="ew", pady=(2, 4))
+        voice_row.columnconfigure(0, weight=1)
+        self.ttk.Entry(voice_row, textvariable=self.music_dj_speech_var).grid(
+            row=0, column=0, sticky="ew", padx=(0, 6))
+        self.ttk.Button(
+            voice_row, text=self._ui_text("Speak to room"),
+            command=self._speak_music_dj).grid(row=0, column=1, sticky="ew")
+        self.ttk.Button(
+            voice_row, text=self._ui_text("Speak current song"),
+            command=self._speak_current_music_dj).grid(
+                row=0, column=2, sticky="ew", padx=(5, 0))
+        self.ttk.Label(app_panel, text=self._ui_text(
+            "Voice text: up to 240 characters. Route Windows output to the Camfrog mic.")).grid(
+                row=3, column=0, sticky="w", pady=(0, 3))
+        self.ttk.Label(app_panel, textvariable=self.music_dj_status_var,
+                       style="Hint.TLabel", wraplength=700).grid(
+            row=4, column=0, sticky="w", pady=(2, 4))
+        queue_frame = self.ttk.Frame(app_panel)
+        queue_frame.grid(row=5, column=0, sticky="nsew")
+        app_panel.rowconfigure(5, weight=1)
+        self.music_dj_tree = self.ttk.Treeview(
+            queue_frame, columns=("position", "title", "user"),
+            show="headings", height=5)
+        for key, title, width in (("position", "#", 50),
+                                  ("title", "Song", 360),
+                                  ("user", "Requested by", 140)):
+            self.music_dj_tree.heading(key, text=self._ui_text(title))
+            self.music_dj_tree.column(key, width=width, anchor="w")
+        scrollbar = self.ttk.Scrollbar(
+            queue_frame, orient="vertical", command=self.music_dj_tree.yview)
+        self.music_dj_tree.configure(yscrollcommand=scrollbar.set)
+        self.music_dj_tree.pack(side="left", fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+
+        vmix_panel = self.ttk.LabelFrame(
+            parent, text=self._ui_text("Local vMix control"), padding=6)
+        vmix_panel.pack(fill="x")
+        vmix_panel.columnconfigure(1, weight=1)
+        self.vmix_url_var = self.tk.StringVar(
+            value=settings.get("vmix_url") or "http://127.0.0.1:8088")
+        self.ttk.Label(vmix_panel, text=self._ui_text("vMix HTTP API")).grid(
+            row=0, column=0, sticky="w", padx=(0, 6))
+        self.ttk.Entry(vmix_panel, textvariable=self.vmix_url_var).grid(
+            row=0, column=1, sticky="ew")
+        refresh_inputs = self.ttk.Button(
+            vmix_panel, text=self._ui_text("Refresh inputs"),
+            command=self._refresh_vmix_inputs)
+        refresh_inputs.grid(row=0, column=2, padx=(5, 0))
+        self.vmix_input_var = self.tk.StringVar()
+        self.vmix_input_picker = self.ttk.Combobox(
+            vmix_panel, textvariable=self.vmix_input_var, state="readonly")
+        self.vmix_input_picker.grid(
+            row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
+        self.vmix_preview_button = self.ttk.Button(
+            vmix_panel, text=self._ui_text("Preview input"),
+            command=lambda: self._control_vmix("PreviewInput"))
+        self.vmix_preview_button.grid(row=1, column=2, padx=(5, 2), pady=(5, 0))
+        self.vmix_cut_button = self.ttk.Button(
+            vmix_panel, text=self._ui_text("Cut to output"),
+            command=lambda: self._control_vmix("CutDirect"))
+        self.vmix_cut_button.grid(row=1, column=3, padx=(2, 0), pady=(5, 0))
+        self.vmix_inputs = []
+        self.vmix_action_buttons = [refresh_inputs, self.vmix_preview_button,
+                                    self.vmix_cut_button]
+        self.vmix_status_var = self.tk.StringVar(value="")
+        self.ttk.Label(vmix_panel, textvariable=self.vmix_status_var,
+                       style="Hint.TLabel", wraplength=700).grid(
+            row=2, column=0, columnspan=4, sticky="w", pady=(3, 0))
+        self._save_local_media_settings()
+
+    def _load_local_media_settings(self):
+        try:
+            raw = (BASE / LOCAL_MEDIA_SETTINGS).read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict):
+                return {key: str(data.get(key) or "") for key in
+                        ("music_dj_executable", "vmix_url")}
+        except (OSError, ValueError):
+            pass
+        return {}
+
+    def _save_local_media_settings(self):
+        if not hasattr(self, "music_dj_exe_var"):
+            return
+        data = {
+            "music_dj_executable": self.music_dj_exe_var.get().strip(),
+            "vmix_url": (self.vmix_url_var.get().strip()
+                         if hasattr(self, "vmix_url_var") else
+                         "http://127.0.0.1:8088"),
+        }
+        path = BASE / LOCAL_MEDIA_SETTINGS
+        temporary = path.with_name(path.name + ".tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+                                 encoding="utf-8")
+            os.replace(temporary, path)
+        except OSError:
+            temporary.unlink(missing_ok=True)
+
+    def _browse_music_dj(self):
+        from tkinter import filedialog
+        selected = filedialog.askopenfilename(
+            parent=self.root, title=self._ui_text("Select music-dj.exe"),
+            filetypes=(("Music DJ", "music-dj.exe"), ("Executable", "*.exe")))
+        if selected:
+            self.music_dj_exe_var.set(selected)
+            self._save_local_media_settings()
+
+    def _music_dj_executable(self):
+        raw = self.music_dj_exe_var.get().strip()
+        if not raw:
+            found = default_music_dj_executable()
+            if found:
+                self.music_dj_exe_var.set(str(found))
+                raw = str(found)
+        path = Path(raw).expanduser().resolve() if raw else None
+        if path is None or path.name.casefold() != "music-dj.exe" or not path.is_file():
+            raise FileNotFoundError(self._ui_text(
+                "Select an existing packaged music-dj.exe application."))
+        self._save_local_media_settings()
+        return path
+
+    def _open_music_dj(self):
+        try:
+            executable = self._music_dj_executable()
+            if os.name != "nt":
+                raise OSError("Music DJ applications run on Windows.")
+            subprocess.Popen([str(executable)], cwd=str(executable.parent),
+                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                             stderr=subprocess.DEVNULL, close_fds=True,
+                             creationflags=0x08000000)
+            self.music_dj_status_var.set(self._ui_text("Opened the Music DJ window."))
+        except (OSError, ValueError) as exc:
+            self.music_dj_status_var.set(str(exc))
+
+    def _start_music_dj_task(self, action, work, done):
+        if self.bot_busy:
+            self.music_dj_status_var.set(self._ui_text(
+                "Wait for the current Bot Manager request to finish."))
+            return
+        self.bot_busy = True
+        self._set_bot_request_busy(True)
+
+        def worker():
+            try:
+                result, error = work(), ""
+            except Exception as exc:
+                result, error = None, str(exc)
+            self.bot_q.put((result, error, done))
+
+        self.music_dj_status_var.set(self._ui_text(action))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_music_dj_state(self, state):
+        self.music_dj_tree.delete(*self.music_dj_tree.get_children())
+        current = state.get("current")
+        if isinstance(current, dict):
+            self.music_dj_tree.insert("", "end", iid="current", values=(
+                self._ui_text("Now playing"), current.get("title", ""),
+                current.get("user", "")))
+        for index, item in enumerate(state.get("queue", [])[:50], 1):
+            if isinstance(item, dict):
+                self.music_dj_tree.insert("", "end", iid="q{0}".format(index),
+                                          values=(index, item.get("title", ""),
+                                                  item.get("user", "")))
+        self.music_dj_status_var.set(self._ui_text(
+            "DJ worker connected; queue read from the Music DJ owner."))
+
+    def _refresh_music_dj(self):
+        try:
+            executable = self._music_dj_executable()
+        except (OSError, ValueError) as exc:
+            self.music_dj_status_var.set(str(exc))
+            return
+
+        def done(state, error):
+            if error:
+                snapshot = music_dj_worker_state(executable)
+                if snapshot is not None:
+                    self._render_music_dj_state(snapshot)
+                else:
+                    self.music_dj_tree.delete(*self.music_dj_tree.get_children())
+                    self.music_dj_status_var.set(self._ui_text(error))
+                return
+            self._render_music_dj_state(state)
+
+        self._start_music_dj_task(
+            "Reading the Music DJ queue...",
+            lambda: music_dj_control_request(executable, "status"), done)
+
+    def _start_music_dj(self):
+        try:
+            executable = self._music_dj_executable()
+        except (OSError, ValueError) as exc:
+            self.music_dj_status_var.set(str(exc))
+            return
+
+        def work():
+            run_music_dj_command(executable, "start")
+            return music_dj_control_request(executable, "status", timeout=8.0)
+
+        def done(state, error):
+            if error:
+                self.music_dj_status_var.set(self._ui_text(error))
+            else:
+                self._render_music_dj_state(state)
+
+        self._start_music_dj_task("Starting the Music DJ worker...", work, done)
+
+    def _stop_music_dj(self):
+        try:
+            executable = self._music_dj_executable()
+        except (OSError, ValueError) as exc:
+            self.music_dj_status_var.set(str(exc))
+            return
+
+        def done(_result, error):
+            self.music_dj_tree.delete(*self.music_dj_tree.get_children())
+            self.music_dj_status_var.set(self._ui_text(
+                error or "Music DJ worker stopped."))
+
+        self._start_music_dj_task(
+            "Stopping the Music DJ worker...",
+            lambda: run_music_dj_command(executable, "stop"), done)
+
+    def _skip_music_dj(self):
+        self._music_dj_request("skip")
+
+    def _clear_music_dj(self):
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                self._ui_text("Clear queue"),
+                self._ui_text("Stop the current track and remove every queued song?"),
+                parent=self.root):
+            return
+        self._music_dj_request("clear")
+
+    def _speak_music_dj(self):
+        self._music_dj_request("speak", self.music_dj_speech_var.get())
+
+    def _speak_current_music_dj(self):
+        try:
+            executable = self._music_dj_executable()
+        except (OSError, ValueError) as exc:
+            self.music_dj_status_var.set(str(exc))
+            return
+
+        def work():
+            state = music_dj_control_request(executable, "status")
+            text = music_dj_speech_summary(state)
+            return music_dj_control_request(executable, "speak", text=text)
+
+        def done(_result, error):
+            self.music_dj_status_var.set(self._ui_text(
+                error or "Voice request accepted by Music DJ."))
+
+        self._start_music_dj_task(
+            "Preparing the current song voice summary...", work, done)
+
+    def _music_dj_request(self, action, text=None):
+        try:
+            executable = self._music_dj_executable()
+        except (OSError, ValueError) as exc:
+            self.music_dj_status_var.set(str(exc))
+            return
+
+        def done(state, error):
+            if error:
+                self.music_dj_status_var.set(self._ui_text(error))
+            else:
+                self._render_music_dj_state(state)
+                if action == "speak":
+                    self.music_dj_speech_var.set("")
+                    self.music_dj_status_var.set(self._ui_text(
+                        "Voice request accepted by Music DJ."))
+
+        self._start_music_dj_task(
+            "Sending {0} to Music DJ...".format(action),
+            lambda: music_dj_control_request(executable, action, text=text), done)
+
+    def _refresh_vmix_inputs(self):
+        address = self.vmix_url_var.get().strip()
+        self._save_local_media_settings()
+
+        def done(inputs, error):
+            if error:
+                self.vmix_status_var.set(self._ui_text(error))
+                return
+            self.vmix_inputs = inputs
+            labels = ["{0}: {1}".format(item["number"], item["title"])
+                      for item in inputs]
+            self.vmix_input_picker.configure(values=labels)
+            if labels and self.vmix_input_var.get() not in labels:
+                self.vmix_input_var.set(labels[0])
+            self.vmix_status_var.set(self._ui_text(
+                "vMix connected; {0} inputs returned by the local API.").format(len(inputs)))
+
+        self._start_music_dj_task(
+            "Reading local vMix inputs...",
+            lambda: fetch_vmix_inputs(address), done)
+
+    def _control_vmix(self, function):
+        label = self.vmix_input_var.get()
+        item = next((entry for entry in self.vmix_inputs
+                     if label == "{0}: {1}".format(entry["number"], entry["title"])), None)
+        if item is None:
+            self.vmix_status_var.set(self._ui_text("Refresh vMix inputs and select one first."))
+            return
+        if function == "CutDirect":
+            from tkinter import messagebox
+            if not messagebox.askyesno(
+                    self._ui_text("Cut to output"),
+                    self._ui_text("Send this input directly to the live vMix output?"),
+                    parent=self.root):
+                return
+        address = self.vmix_url_var.get().strip()
+
+        def done(inputs, error):
+            if error:
+                self.vmix_status_var.set(self._ui_text(error))
+                return
+            self.vmix_inputs = inputs
+            labels = ["{0}: {1}".format(value["number"], value["title"])
+                      for value in inputs]
+            self.vmix_input_picker.configure(values=labels)
+            self.vmix_input_var.set(next((value for value in labels
+                                          if value.startswith(str(item["number"]) + ":")), ""))
+            self.vmix_status_var.set(self._ui_text(
+                "vMix accepted {0}; confirm program output in vMix and Camfrog.").format(
+                    "preview" if function == "PreviewInput" else "cut"))
+
+        self._start_music_dj_task(
+            "Sending a command to local vMix...",
+            lambda: control_vmix_input(address, function, item["key"]), done)
+
+    def _show_bot_disconnected(self):
+        for page in self.bot_tabs.values():
+            page.pack_forget()
+        self.bot_active_tab = None
+        self.bot_disconnected_label.pack(anchor="nw", padx=16, pady=16)
+        for button in self.bot_section_buttons.values():
+            button.configure(style="BotTab.TButton")
+
+    def _position_plugin_pane(self, panes):
+        try:
+            if getattr(panes, "_default_sash_positioned", False):
+                return
+            width = panes.winfo_width()
+            if width >= 480:
+                panes.sashpos(0, int(width * 0.36))
+                panes._default_sash_positioned = True
+        except self.tk.TclError:
+            pass
+
+    def _create_plugin_selector(self, parent):
+        catalog = self.ttk.LabelFrame(
+            parent, text=self._ui_text("Plugin catalog"), padding=6)
+        catalog.pack(fill="both", expand=True)
+        toolbar = self.ttk.Frame(catalog)
+        toolbar.pack(fill="x", pady=(0, 5))
+        search_row = self.ttk.Frame(toolbar)
+        search_row.pack(fill="x")
+        self.bot_plugin_filter_var = self.tk.StringVar(value="")
+        filter_entry = self.ttk.Entry(
+            search_row, textvariable=self.bot_plugin_filter_var, width=24)
+        self.ttk.Label(search_row, text=self._ui_text("Find")).pack(side="left")
+        filter_entry.pack(side="left", fill="x", expand=True, padx=(5, 0))
+        self.bot_plugin_filter_var.trace_add(
+            "write", lambda *_args: self._layout_plugin_cards())
+        action_row = self.ttk.Frame(toolbar)
+        action_row.pack(fill="x", pady=(4, 0))
+        self.bot_plugin_refresh_button = self.ttk.Button(
+            action_row, text=self._ui_text("Refresh"),
+            command=self.refresh_bot_plugins,
+            state="disabled")
+        self.bot_plugin_refresh_button.pack(side="left", padx=(0, 4))
+        self.bot_plugin_activation_button = self.ttk.Button(
+            action_row, text=self._ui_text("Apply changes"),
+            command=self.apply_plugin_activation,
+            state="disabled")
+        self.bot_plugin_activation_button.pack(side="left")
+
+        self.bot_plugin_summary_var = self.tk.StringVar(
+            value="Connect to load the installed plugins.")
+        self.ttk.Label(catalog, textvariable=self.bot_plugin_summary_var,
+                       style="Hint.TLabel").pack(anchor="w", pady=(0, 4))
+        body = self.ttk.Frame(catalog)
+        body.pack(fill="both", expand=True)
+        self.bot_plugin_canvas = self.tk.Canvas(
+            body, highlightthickness=0, background=WEB_STATUS_THEME["background"])
+        scrollbar = self.ttk.Scrollbar(
+            body, orient="vertical", command=self.bot_plugin_canvas.yview)
+        self.bot_plugin_canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.bot_plugin_canvas.pack(side="left", fill="both", expand=True)
+        self.bot_plugin_switch_frame = self.ttk.Frame(
+            self.bot_plugin_canvas, padding=(2, 2))
+        self.bot_plugin_window = self.bot_plugin_canvas.create_window(
+            (0, 0), window=self.bot_plugin_switch_frame, anchor="nw")
+        self.bot_plugin_switch_frame.bind(
+            "<Configure>", lambda _event: self.bot_plugin_canvas.configure(
+                scrollregion=self.bot_plugin_canvas.bbox("all")))
+        self.bot_plugin_canvas.bind("<Configure>", self._layout_plugin_cards)
+        self.bot_plugin_switch_vars = {}
+        self.bot_plugin_switch_original = {}
+        self.bot_plugin_cards = {}
+        self.bot_plugin_configure_buttons = {}
+        self.bot_plugin_empty_label = self.ttk.Label(
+            self.bot_plugin_switch_frame,
+            text=self._ui_text("No plugins loaded."),
+            style="Hint.TLabel")
+        self.bot_plugin_selected_var = self.tk.StringVar(
+            value="Select a plugin card to open its settings.")
+
+    def _layout_plugin_cards(self, event=None):
+        if not hasattr(self, "bot_plugin_canvas"):
+            return
+        width = (event.width if event is not None and hasattr(event, "width")
+                 else self.bot_plugin_canvas.winfo_width())
+        width = max(1, width)
+        self.bot_plugin_canvas.itemconfigure(self.bot_plugin_window, width=width)
+        query = self.bot_plugin_filter_var.get().strip().casefold()
+        visible = [
+            (plugin_id, name, card)
+            for plugin_id, name, _enabled in self.bot_plugin_catalog
+            if query in str(plugin_id).casefold()
+            or query in str(name).casefold()
+            or query in self._ui_text(name).casefold()
+            for card in (self.bot_plugin_cards.get(plugin_id),)
+            if card is not None
+        ]
+        columns = max(1, min(len(visible) or 1, width // 250))
+        for column in range(max(columns, getattr(self, "bot_plugin_grid_columns", 0))):
+            self.bot_plugin_switch_frame.grid_columnconfigure(
+                column, weight=1 if column < columns else 0)
+        self.bot_plugin_grid_columns = columns
+        for card in self.bot_plugin_cards.values():
+            card.grid_forget()
+        self.bot_plugin_empty_label.grid_forget()
+        if not visible:
+            text = ("No plugins match this search." if self.bot_plugin_catalog
+                    else "Camfrog returned no installed plugins.")
+            self.bot_plugin_empty_label.configure(text=self._ui_text(text))
+            self.bot_plugin_empty_label.grid(row=0, column=0, sticky="w", padx=5, pady=5)
+            return
+        for index, (_plugin_id, _name, card) in enumerate(visible):
+            card.grid(row=index // columns, column=index % columns,
+                      sticky="nsew", padx=4, pady=4)
+
+    def _render_plugin_activation(self, catalog):
+        for child in self.bot_plugin_switch_frame.winfo_children():
+            if child is not self.bot_plugin_empty_label:
+                child.destroy()
+        self.bot_plugin_catalog = list(catalog)
+        self.bot_plugin_switch_vars = {}
+        self.bot_plugin_switch_original = {}
+        self.bot_plugin_cards = {}
+        self.bot_plugin_configure_buttons = {}
+        known_plugin_ids = {plugin_id for plugin_id, _name, _enabled in catalog}
+        if (self.bot_selected_plugin_id is not None and
+                self.bot_selected_plugin_id not in known_plugin_ids):
+            self.bot_selected_plugin_id = None
+            self.bot_plugin_selected_var.set(
+                "No installed plugin settings are available.")
+            self._clear_bot_plugin_settings(
+                "The selected plugin is no longer in Camfrog's list.")
+        for plugin_id, name, enabled in catalog:
+            variable = self.tk.BooleanVar(value=bool(enabled))
+            self.bot_plugin_switch_vars[plugin_id] = variable
+            self.bot_plugin_switch_original[plugin_id] = bool(enabled)
+            card = self.ttk.Frame(self.bot_plugin_switch_frame, padding=(4, 2))
+            self.ttk.Checkbutton(card, variable=variable).pack(side="left")
+            configure = self.ttk.Button(
+                card, text=self._ui_text(name), style="BotLink.TButton",
+                command=lambda selected_id=plugin_id: self.load_bot_plugin(selected_id),
+                state="disabled" if self.bot_client is None or self.bot_busy else "normal")
+            configure.pack(side="left", fill="x", expand=True, anchor="w")
+            self.bot_plugin_cards[plugin_id] = card
+            self.bot_plugin_configure_buttons[plugin_id] = configure
+        self._refresh_bot_plugin_summary()
+        self.bot_plugin_empty_label.lift()
+        self._layout_plugin_cards()
+
+    def apply_plugin_activation(self):
+        if self.bot_client is None:
+            self.bot_status_var.set("Connect to Bot Manager first.")
+            return
+        changes = [(plugin_id, bool(variable.get()))
+                   for plugin_id, variable in self.bot_plugin_switch_vars.items()
+                   if bool(variable.get()) !=
+                   self.bot_plugin_switch_original.get(plugin_id)]
+        if not changes:
+            self.bot_status_var.set("No plugin activation changes to apply.")
+            return
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                "Apply plugin activation",
+                "Send {0} plugin activation change(s) to Camfrog?".format(
+                    len(changes)), parent=self.root):
+            return
+        client = self.bot_client
+        generation = self.bot_generation
+        self.bot_status_var.set("Applying plugin activation changes...")
+
+        def work():
+            for plugin_id, enabled in changes:
+                client.set_plugin_enabled(plugin_id, enabled)
+            page = client.fetch_page("/bot/plugins/1")
+            return page, client.plugin_catalog(page)
+
+        def done(result, error):
+            if generation != self.bot_generation:
+                return
+            if error:
+                self.bot_status_var.set(
+                    "Activation may be partial. Refresh the plugin list to verify.")
+                self._bot_log("Plugin activation request needs read-back verification.")
+                return
+            index_page, catalog = result
+            self.bot_plugin_index_page = index_page
+            self._render_plugin_activation(catalog)
+            read_back = {plugin_id: enabled for plugin_id, _name, enabled
+                         in self.bot_plugin_catalog}
+            if all(read_back.get(plugin_id) == enabled
+                   for plugin_id, enabled in changes):
+                self.bot_status_var.set(
+                    "Camfrog read back the requested plugin activation states.")
+            else:
+                self.bot_status_var.set(
+                    "Camfrog returned different plugin states. Review before retrying.")
+            self._bot_log("Read back plugin activation states.")
+
+        self._start_bot_task(work, done)
+
+    def refresh_bot_plugins(self):
+        if self.bot_client is None:
+            self.bot_status_var.set("Connect to Bot Manager first.")
+            return
+        client = self.bot_client
+        generation = self.bot_generation
+        self.bot_status_var.set("Refreshing installed plugins...")
+
+        def done(page, error):
+            if generation != self.bot_generation:
+                return
+            if error:
+                self.bot_status_var.set(error)
+                return
+            catalog = client.plugin_catalog(page)
+            self.bot_plugin_index_page = page
+            self._render_plugin_activation(catalog)
+            self.bot_status_var.set(
+                "Refreshed {0} plugin states from Camfrog.".format(len(catalog)))
+            self._bot_log("Refreshed plugin list and activation states.")
+
+        self._start_bot_task(lambda: client.fetch_page("/bot/plugins/1"), done)
+
+    def _create_bot_page_panel(self, parent, key):
+        actions = self.ttk.Frame(parent)
+        actions.pack(fill="x", pady=(0, 5))
+        reload_button = self.ttk.Button(
+            actions, text=self._ui_text(
+                "Reload settings" if key == "plugins" else "Reload"),
+            command=lambda page_key=key:
+            self.reload_bot_page(page_key), state="disabled")
+        reload_button.pack(side="left")
+        if key == "plugins":
+            self.ttk.Label(actions, textvariable=self.bot_plugin_selected_var,
+                           style="Hint.TLabel").pack(side="left", padx=8)
+        self.bot_reload_buttons[key] = reload_button
+
+        body = self.ttk.Frame(parent)
+        body.pack(fill="both", expand=True)
+        canvas = self.tk.Canvas(
+            body, highlightthickness=1,
+            highlightbackground=WEB_STATUS_THEME["border"],
+            highlightcolor=WEB_STATUS_THEME["border"],
+            background=WEB_STATUS_THEME["surface"])
+        scrollbar = self.ttk.Scrollbar(
+            body, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        inner = self.ttk.Frame(canvas, padding=8)
+        window = canvas.create_window((0, 0), window=inner, anchor="nw")
+        inner.bind("<Configure>", lambda _event, c=canvas:
+                   c.configure(scrollregion=c.bbox("all")))
+        canvas.bind("<Configure>", lambda event, c=canvas, w=window:
+                    c.itemconfigure(w, width=event.width))
+        self.bot_page_hosts[key] = inner
+
+        save_footer = self.ttk.Frame(parent)
+        save_footer.pack(fill="x", pady=(6, 0))
+        save_button = self.ttk.Button(
+            save_footer, text=self._ui_text("Save settings"),
+            command=lambda page_key=key:
+            self.save_bot_page(page_key), state="disabled",
+            style="BotPrimary.TButton")
+        save_button.pack(anchor="center")
+        self.bot_save_buttons[key] = save_button
+
+    def _connect_bot_manager(self):
+        if self.bot_busy:
+            self.bot_status_var.set("Wait for the current Bot Manager request to finish.")
+            return
+        if self.bot_client is not None:
+            self.bot_status_var.set("Disconnect before connecting another session.")
+            return
+        raw = self.bot_cloudbot_var.get().strip()
+        self.bot_cloudbot_var.set("")
+        raw = raw.rstrip(";").strip()
+        match = re.fullmatch(r"cloudbot=([A-Za-z0-9_-]{16,128})", raw)
+        if not match:
+            self.bot_status_var.set(
+                "Enter a valid cloudbot=<token> parameter.")
+            return
+        try:
+            client = CamfrogBotManagerClient(match.group(1))
+        except ValueError as exc:
+            self.bot_status_var.set(str(exc))
+            return
+        self.bot_generation += 1
+        generation = self.bot_generation
+        self.bot_status_var.set("Connecting and loading manager pages...")
+        self.bot_connect_button.configure(state="disabled")
+
+        def work():
+            room = client.fetch_page("/bot/room")
+            profile = client.fetch_page("/bot/profile")
+            plugin_index = client.fetch_page("/bot/plugins/1")
+            catalog = client.plugin_catalog(plugin_index)
+            plugin_page = plugin_index
+            selected_id = catalog[0][0] if catalog else None
+            if selected_id is not None:
+                expected_path = "/bot/plugins/{0}".format(selected_id)
+                if plugin_index.path != expected_path:
+                    plugin_page = client.fetch_page(expected_path)
+            return room, profile, plugin_index, plugin_page, catalog, selected_id
+
+        def done(result, error):
+            if generation != self.bot_generation:
+                client.clear()
+                return
+            if error:
+                client.clear()
+                self.bot_connect_button.configure(state="normal")
+                self.bot_status_var.set(error)
+                return
+            self.bot_client = client
+            room, profile, plugin_index, plugin_page, catalog, selected_id = result
+            self.bot_plugin_catalog = catalog
+            self.bot_plugin_index_page = plugin_index
+            self.bot_selected_plugin_id = selected_id
+            self.bot_pages = {
+                "room": room,
+                "profile": profile,
+                "plugins": plugin_page,
+            }
+            for key in ("room", "profile", "plugins"):
+                self.bot_section_buttons[key].configure(state="normal")
+                self.bot_reload_buttons[key].configure(state="normal")
+                self.bot_save_buttons[key].configure(state="normal")
+            self.bot_disconnect_button.configure(state="normal")
+            self.bot_stop_button.configure(state="normal")
+            self.bot_logout_button.configure(state="normal")
+            self.bot_plugin_refresh_button.configure(state="normal")
+            self.bot_plugin_activation_button.configure(state="normal")
+            if selected_id is not None:
+                plugin_name = next(name for plugin_id, name, _enabled in catalog
+                                   if plugin_id == selected_id)
+                self.bot_plugin_selected_var.set(
+                    "{0} {1}".format(self._ui_text("Settings:"),
+                                     self._ui_text(plugin_name)))
+            else:
+                self.bot_plugin_selected_var.set(
+                    "No installed plugin settings are available.")
+            self._render_plugin_activation(catalog)
+            self.bot_status_var.set(
+                "Connected. Room, profile, and {0} plugins loaded.".format(
+                    len(catalog)))
+            self._render_bot_page("room", room)
+            self._render_bot_page("profile", profile)
+            if selected_id is not None:
+                self._render_bot_page("plugins", plugin_page)
+            else:
+                self._clear_bot_plugin_settings(
+                    "Camfrog returned no installed plugin settings.")
+            self._show_bot_tab("room")
+            self._bot_log("Connected to Camfrog Bot Manager.")
+            self._bot_log("Loaded room, profile, and plugin catalog.")
+
+        self._start_bot_task(work, done)
+
+    def connect_bot(self):
+        self._connect_bot_manager()
+
+    def _start_bot_task(self, work, callback):
+        if self.bot_busy:
+            self.bot_status_var.set("A Bot Manager request is already running.")
+            return
+        self.bot_busy = True
+        self._set_bot_request_busy(True)
+
+        def worker():
+            try:
+                result = work()
+                error = ""
+            except (RuntimeError, ValueError) as exc:
+                result, error = None, str(exc)
+            except Exception as exc:
+                result, error = None, "Request failed ({0}).".format(
+                    type(exc).__name__)
+            self.bot_q.put((result, error, callback))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_bot_request_busy(self, busy):
+        connected = self.bot_client is not None
+        self.bot_connect_button.configure(
+            state="disabled" if busy or connected else "normal")
+        for button in (self.bot_disconnect_button, self.bot_stop_button,
+                       self.bot_logout_button):
+            button.configure(state="disabled" if busy or not connected else "normal")
+        for key, button in self.bot_reload_buttons.items():
+            available = connected and key in self.bot_pages
+            button.configure(state="disabled" if busy or not available else "normal")
+        for key, button in self.bot_save_buttons.items():
+            available = connected and key in self.bot_pages
+            button.configure(state="disabled" if busy or not available else "normal")
+        if hasattr(self, "bot_plugin_activation_button"):
+            self.bot_plugin_activation_button.configure(
+                state="disabled" if busy or not connected else "normal")
+        if hasattr(self, "bot_plugin_refresh_button"):
+            self.bot_plugin_refresh_button.configure(
+                state="disabled" if busy or not connected else "normal")
+        for button in getattr(self, "bot_plugin_configure_buttons", {}).values():
+            button.configure(state="disabled" if busy or not connected else "normal")
+        for button in getattr(self, "music_dj_action_buttons", ()):
+            button.configure(state="disabled" if busy else "normal")
+        for button in getattr(self, "vmix_action_buttons", ()):
+            button.configure(state="disabled" if busy else "normal")
+
+    def _bot_page_path(self, key):
+        if key == "room":
+            return "/bot/room"
+        if key == "profile":
+            return "/bot/profile"
+        if key == "plugins":
+            plugin_id = self.bot_selected_plugin_id
+            if plugin_id is None or plugin_id not in {
+                    item[0] for item in self.bot_plugin_catalog}:
+                raise ValueError("The selected plugin is not in the server list.")
+            return "/bot/plugins/{0}".format(plugin_id)
+        raise ValueError("Unknown Bot Manager page.")
+
+    def reload_bot_page(self, key):
+        if self.bot_client is None:
+            self.bot_status_var.set("Connect to Bot Manager first.")
+            return
+        try:
+            path = self._bot_page_path(key)
+        except ValueError as exc:
+            self.bot_status_var.set(str(exc))
+            return
+        self.bot_status_var.set("Reloading {0} settings...".format(key))
+        client = self.bot_client
+        generation = self.bot_generation
+
+        def done(page, error):
+            if generation != self.bot_generation:
+                return
+            if error:
+                self.bot_status_var.set(error)
+                return
+            self.bot_pages[key] = page
+            self._render_bot_page(key, page)
+            self.bot_status_var.set("Loaded {0} settings.".format(key))
+            self._bot_log("Loaded {0} settings.".format(key))
+
+        self._start_bot_task(lambda: client.fetch_page(path), done)
+
+    def load_bot_plugin(self, plugin_id=None):
+        if self.bot_client is None:
+            self.bot_status_var.set("Connect to Bot Manager first.")
+            return
+        if plugin_id is not None:
+            try:
+                selected_id = int(plugin_id)
+            except (TypeError, ValueError):
+                self.bot_status_var.set("Choose a plugin from the loaded catalog.")
+                return
+            if selected_id not in {item[0] for item in self.bot_plugin_catalog}:
+                self.bot_status_var.set("That plugin is not in Camfrog's list.")
+                return
+            self.bot_selected_plugin_id = selected_id
+        try:
+            path = self._bot_page_path("plugins")
+        except ValueError as exc:
+            self.bot_status_var.set(str(exc))
+            return
+        selected = next((name for candidate_id, name, _enabled
+                         in self.bot_plugin_catalog
+                         if candidate_id == self.bot_selected_plugin_id), "plugin")
+        display_name = self._ui_text(selected)
+        self.bot_plugin_selected_var.set(
+            "{0} {1}".format(self._ui_text("Loading settings:"), display_name))
+        self._clear_bot_plugin_settings(
+            "{0} {1}…".format(self._ui_text("Loading settings for"), display_name))
+        self.bot_status_var.set(
+            "{0} {1}…".format(self._ui_text("Loading settings for"), display_name))
+        client = self.bot_client
+        generation = self.bot_generation
+
+        def done(page, error):
+            if generation != self.bot_generation:
+                return
+            if error:
+                self.bot_plugin_selected_var.set(
+                    "{0} {1}".format(
+                        self._ui_text("Could not load settings:"),
+                        self._ui_text(selected)))
+                self._clear_bot_plugin_settings(
+                    "Could not load settings for {0}. Use Refresh and try again.".format(
+                        self._ui_text(selected)))
+                self.bot_status_var.set(error)
+                return
+            self.bot_pages["plugins"] = page
+            self._render_bot_page("plugins", page)
+            self.bot_plugin_selected_var.set(
+                "{0} {1}".format(self._ui_text("Settings:"),
+                                 self._ui_text(selected)))
+            self.bot_status_var.set(
+                "{0} {1}.".format(self._ui_text("Loaded settings for"),
+                                  self._ui_text(selected)))
+            self._bot_log("Loaded settings for plugin {0}.".format(selected))
+
+        self._start_bot_task(lambda: client.fetch_page(path), done)
+
+    def _render_bot_page(self, key, page):
+        host = self.bot_page_hosts[key]
+        for child in host.winfo_children():
+            child.destroy()
+        self.bot_form_widgets[key] = {}
+        context = {
+            "role_state": {},
+            "role_field": None,
+            "role_text": None,
+            "role_var": None,
+            "role_active": None,
+            "font_state": {},
+            "font_field": None,
+            "font_controls": {},
+        }
+        self.bot_form_context[key] = context
+        host.columnconfigure(1, weight=1)
+
+        rendered_radio_groups = set()
+        for index, item in enumerate(page.fields):
+            if item.kind == "hidden":
+                if item.name == "font_picker":
+                    context["font_field"] = index
+                    try:
+                        state = json.loads(item.value or "{}")
+                        if not isinstance(state, dict):
+                            state = {}
+                    except (TypeError, ValueError):
+                        state = {}
+                    context["font_state"] = {
+                        "color": str(state.get("color") or "#000000"),
+                        "name": str(state.get("name") or "Tahoma"),
+                        "size": int(state.get("size") or 12),
+                        "bold": bool(state.get("bold", False)),
+                        "italic": bool(state.get("italic", False)),
+                        "underline": bool(state.get("underline", False)),
+                        "strikeout": bool(state.get("strikeout", False)),
+                    }
+                elif item.identifier == "_1" and item.name in ("_3", "_4"):
+                    context["role_field"] = index
+                    try:
+                        state = json.loads(item.value or "{}")
+                        if isinstance(state, dict):
+                            context["role_state"] = state
+                    except (TypeError, ValueError):
+                        context["role_state"] = {}
+                continue
+
+            if item.kind == "radio":
+                group_key = item.name or "__radio_{0}".format(index)
+                if group_key in rendered_radio_groups:
+                    continue
+                rendered_radio_groups.add(group_key)
+                group = [(field_index, candidate)
+                         for field_index, candidate in enumerate(page.fields)
+                         if candidate.kind == "radio" and
+                         (candidate.name or "__radio_{0}".format(field_index))
+                         == group_key]
+                self._render_bot_radio_group(key, host, index, group)
+                continue
+
+            if item.tag == "select" and item.identifier in (
+                    "fnamefont_picker", "fsizefont_picker"):
+                continue
+            if item.tag == "select" and item.identifier == "rolesel":
+                self._render_bot_role_select(key, host, index, item, context)
+                continue
+            if item.tag == "textarea" and item.identifier == "rolegreet":
+                self._render_bot_role_text(key, host, index, item, context)
+                continue
+            self._render_bot_field(key, host, index, item)
+
+        if context["font_field"] is not None:
+            self._render_bot_font_picker(key, host, page, context)
+        if not page.fields:
+            self.ttk.Label(
+                host, text=self._ui_text(
+                    "No editable settings were returned.")).grid(
+                row=0, column=0, sticky="w")
+        self._install_clipboard_shortcuts(host)
+        self.bot_save_buttons[key].configure(state="normal")
+        self.bot_reload_buttons[key].configure(state="normal")
+
+    def _clear_bot_plugin_settings(self, message):
+        host = self.bot_page_hosts.get("plugins")
+        if host is not None:
+            for child in host.winfo_children():
+                child.destroy()
+            self.ttk.Label(
+                host, text=self._ui_text(message), style="Hint.TLabel").grid(
+                row=0, column=0, sticky="w")
+        self.bot_pages.pop("plugins", None)
+        self.bot_save_buttons["plugins"].configure(state="disabled")
+        self.bot_reload_buttons["plugins"].configure(state="disabled")
+
+    def _bot_label(self, item):
+        if item.kind == "file":
+            return self._ui_text("Quiz file")
+        label = (item.label or item.name or item.identifier or
+                 item.kind or "Setting").strip().rstrip(":：")
+        return self._ui_text(self.BOT_LABELS.get(label, label))
+
+    def _render_bot_field(self, key, host, index, item):
+        row = self.ttk.Frame(host)
+        row.grid(row=index, column=0, columnspan=2, sticky="ew", pady=3)
+        row.columnconfigure(1, weight=1)
+        label = self._bot_label(item)
+        if item.kind == "checkbox":
+            variable = self.tk.BooleanVar(value=item.checked)
+            widget = self.ttk.Checkbutton(row, text=label, variable=variable)
+            widget.grid(row=0, column=0, columnspan=2, sticky="w")
+            self.bot_form_widgets[key][index] = {
+                "kind": "checkbox", "variable": variable}
+            return
+        self.ttk.Label(row, text=label, wraplength=230).grid(
+            row=0, column=0, sticky="nw", padx=(0, 10))
+        if item.tag == "textarea":
+            widget = self.tk.Text(row, height=5, width=65, wrap="word")
+            widget.insert("1.0", item.value)
+            widget.grid(row=0, column=1, sticky="nsew")
+            self.bot_form_widgets[key][index] = {
+                "kind": "textarea", "widget": widget}
+        elif item.tag == "select":
+            options = item.options
+            if not options:
+                self.ttk.Label(row, text=self._ui_text(
+                    "No options available from Camfrog.")).grid(
+                    row=0, column=1, sticky="w")
+                return
+            if "multiple" in item.attributes:
+                widget = self.tk.Listbox(
+                    row, height=min(max(len(options), 2), 7),
+                    selectmode="extended", exportselection=False)
+                for option_index, option in enumerate(options):
+                    widget.insert("end", self._bot_option_label(option))
+                    if option.selected:
+                        widget.selection_set(option_index)
+                widget.grid(row=0, column=1, sticky="ew")
+                self.bot_form_widgets[key][index] = {
+                    "kind": "multiselect", "widget": widget,
+                    "options": options}
+                return
+            labels = [self._bot_option_label(option) for option in options]
+            selected_option = next(
+                (option for option in options if option.selected), options[0])
+            variable = self.tk.StringVar(
+                value=self._bot_option_label(selected_option))
+            widget = self.ttk.Combobox(
+                row, textvariable=variable, values=labels, state="readonly")
+            widget.grid(row=0, column=1, sticky="ew")
+            control = {
+                "kind": "select", "variable": variable, "options": options,
+                "widget": widget, "selected_value": selected_option.value}
+            self.bot_form_widgets[key][index] = control
+            self._bind_bot_option_selection(control)
+        elif item.kind == "file":
+            variable = self.tk.StringVar(value="")
+            widget = self.ttk.Label(
+                row, text=self._ui_text("No file selected"))
+            def choose_file(var=variable, target=widget):
+                from tkinter import filedialog
+                selected = filedialog.askopenfilename(parent=self.root)
+                if selected:
+                    var.set(selected)
+                    target.configure(text=Path(selected).name)
+            self.ttk.Button(row, text=self._ui_text("Choose file"),
+                            command=choose_file).grid(
+                row=0, column=1, sticky="w")
+            self.bot_form_widgets[key][index] = {
+                "kind": "file", "variable": variable}
+        else:
+            variable = self.tk.StringVar(value=item.value)
+            show = "*" if item.kind == "password" else ""
+            widget = self.ttk.Entry(row, textvariable=variable, show=show)
+            widget.grid(row=0, column=1, sticky="ew")
+            self.bot_form_widgets[key][index] = {
+                "kind": item.kind or "text", "variable": variable}
+
+    def _render_bot_radio_group(self, key, host, index, group):
+        if not group:
+            return
+        first = group[0][1]
+        row = self.ttk.Frame(host)
+        row.grid(row=index, column=0, columnspan=2, sticky="ew", pady=3)
+        row.columnconfigure(1, weight=1)
+        group_label = (first.attributes.get("aria-label") or first.name or
+                       first.label or "Options")
+        self.ttk.Label(row, text=self._ui_text(group_label),
+                       wraplength=230).grid(
+            row=0, column=0, sticky="nw", padx=(0, 10))
+        selected = next((item.value for _field_index, item in group
+                         if item.checked), "")
+        variable = self.tk.StringVar(value=selected)
+        options_frame = self.ttk.Frame(row)
+        options_frame.grid(row=0, column=1, sticky="w")
+        for option_index, (field_index, item) in enumerate(group):
+            label = (item.label or item.value or item.name).strip()
+            label = self._ui_text(self.BOT_LABELS.get(label, label))
+            self.ttk.Radiobutton(
+                options_frame, text=label, value=item.value,
+                variable=variable).grid(
+                    row=option_index, column=0, sticky="w")
+            self.bot_form_widgets[key][field_index] = {
+                "kind": "radio", "variable": variable,
+                "option_value": item.value}
+
+    def _render_bot_role_select(self, key, host, index, item, context):
+        options = list(item.options)
+        role_state = context["role_state"]
+        if not options and role_state:
+            options = [BotManagerOption(str(value), str(value))
+                       for value in role_state]
+        row = self.ttk.Frame(host)
+        row.grid(row=index, column=0, columnspan=2, sticky="ew", pady=3)
+        row.columnconfigure(1, weight=1)
+        self.ttk.Label(row, text=self._bot_label(item)).grid(
+            row=0, column=0, sticky="w", padx=(0, 10))
+        if not options:
+            self.ttk.Label(row, text=self._ui_text(
+                "No roles returned from Camfrog.")).grid(
+                row=0, column=1, sticky="w")
+            return
+        labels = [self._bot_option_label(option) for option in options]
+        selected_option = next(
+            (option for option in options if option.selected), options[0])
+        variable = self.tk.StringVar(
+            value=self._bot_option_label(selected_option))
+        widget = self.ttk.Combobox(
+            row, textvariable=variable, values=labels, state="readonly")
+        widget.grid(row=0, column=1, sticky="ew")
+        context["role_field_options"] = options
+        context["role_var"] = variable
+        context["role_text"] = None
+        control = {
+            "kind": "role_select", "variable": variable, "options": options,
+            "widget": widget, "selected_value": selected_option.value}
+        self.bot_form_widgets[key][index] = control
+        context["role_control"] = control
+        self._bind_bot_option_selection(control)
+        widget.bind(
+            "<<ComboboxSelected>>",
+            lambda _event, role_context=context:
+            self._sync_bot_role_editor(role_context), add="+")
+
+    def _render_bot_role_text(self, key, host, index, item, context):
+        row = self.ttk.Frame(host)
+        row.grid(row=index, column=0, columnspan=2, sticky="ew", pady=3)
+        row.columnconfigure(1, weight=1)
+        self.ttk.Label(row, text=self._bot_label(item)).grid(
+            row=0, column=0, sticky="nw", padx=(0, 10))
+        widget = self.tk.Text(row, height=5, width=65, wrap="word")
+        selected_role = self._selected_bot_role(context)
+        widget.insert("1.0", str(context["role_state"].get(selected_role, "")))
+        widget.grid(row=0, column=1, sticky="nsew")
+        context["role_text"] = widget
+        context["role_active"] = (
+            str(selected_role) if selected_role is not None else None)
+        self.bot_form_widgets[key][index] = {
+            "kind": "role_text", "widget": widget}
+
+    def _selected_bot_role(self, context):
+        variable = context.get("role_var")
+        options = context.get("role_field_options", [])
+        if variable is None:
+            return None
+        label = variable.get()
+        return next((option.value for option in options
+                     if label in (option.label,
+                                  self._bot_option_label(option))), label)
+
+    def _sync_bot_role_editor(self, context):
+        """Save the current role text and load the newly selected greeting."""
+        widget = context.get("role_text")
+        if widget is None:
+            return
+        previous_role = context.get("role_active")
+        if previous_role is not None:
+            context["role_state"][str(previous_role)] = widget.get(
+                "1.0", "end-1c")
+        selected_role = self._selected_bot_role(context)
+        if selected_role is None:
+            return
+        selected_role = str(selected_role)
+        if selected_role != previous_role:
+            widget.delete("1.0", "end")
+            widget.insert(
+                "1.0", str(context["role_state"].get(selected_role, "")))
+            context["role_active"] = selected_role
+
+    def _render_bot_font_picker(self, key, host, page, context):
+        row = self.ttk.LabelFrame(
+            host, text=self._ui_text("Message formatting"), padding=6)
+        row.grid(row=len(page.fields) + 1, column=0, columnspan=2,
+                 sticky="ew", pady=6)
+        row.columnconfigure(1, weight=1)
+        state = context["font_state"]
+        name_options = next((field.options for field in page.fields
+                             if field.identifier == "fnamefont_picker"), [])
+        size_options = next((field.options for field in page.fields
+                             if field.identifier == "fsizefont_picker"), [])
+        font_names = [option.value for option in name_options]
+        if not font_names:
+            font_names = [state["name"]]
+        sizes = [option.value for option in size_options] or [
+            str(state["size"])]
+        current_name = state["name"] if state["name"] in font_names else font_names[0]
+        current_size = str(state["size"])
+        if current_size not in sizes:
+            sizes.append(current_size)
+
+        self.ttk.Label(row, text=self._ui_text("Font")).grid(
+            row=0, column=0, sticky="w")
+        font_var = self.tk.StringVar(value=current_name)
+        self.ttk.Combobox(row, textvariable=font_var, values=font_names,
+                          state="readonly", width=26).grid(
+            row=0, column=1, sticky="ew", padx=4, pady=2)
+        self.ttk.Label(row, text=self._ui_text("Size")).grid(
+            row=0, column=2, sticky="w")
+        size_var = self.tk.StringVar(value=current_size)
+        self.ttk.Combobox(row, textvariable=size_var, values=sizes,
+                          state="readonly", width=5).grid(
+            row=0, column=3, padx=4, pady=2)
+        color_var = self.tk.StringVar(value=state["color"])
+        self.ttk.Label(row, text=self._ui_text("Color")).grid(
+            row=0, column=4, sticky="w")
+        def choose_color():
+            from tkinter import colorchooser
+            chosen = colorchooser.askcolor(
+                initialcolor=color_var.get(), parent=self.root)[1]
+            if chosen:
+                color_var.set(chosen)
+        self.ttk.Button(row, text=self._ui_text("Choose"),
+                        command=choose_color).grid(
+            row=0, column=5, padx=4, pady=2)
+        self.ttk.Label(row, textvariable=color_var, width=10).grid(
+            row=0, column=6, sticky="w")
+        toggles = {}
+        for column, key_name, label in (
+                (0, "bold", "Bold"), (1, "italic", "Italic"),
+                (2, "underline", "Underline"), (3, "strikeout", "Strikeout")):
+            variable = self.tk.BooleanVar(value=bool(state[key_name]))
+            self.ttk.Checkbutton(
+                row, text=self._ui_text(label), variable=variable).grid(
+                row=1, column=column, sticky="w", padx=2, pady=(4, 0))
+            toggles[key_name] = variable
+        context["font_controls"] = {
+            "name": font_var, "size": size_var, "color": color_var,
+            "toggles": toggles}
+
+    def _collect_bot_form(self, key):
+        page = self.bot_pages[key]
+        controls = self.bot_form_widgets.get(key, {})
+        values = {}
+        for index, item in enumerate(page.fields):
+            control = controls.get(index)
+            if control is None:
+                continue
+            kind = control["kind"]
+            if kind == "checkbox":
+                values[index] = bool(control["variable"].get())
+            elif kind in ("textarea", "role_text"):
+                values[index] = control["widget"].get("1.0", "end-1c")
+            elif kind == "radio":
+                values[index] = control["variable"].get()
+            elif kind == "multiselect":
+                values[index] = [control["options"][int(option_index)].value
+                                 for option_index in
+                                 control["widget"].curselection()]
+            elif kind == "file":
+                values[index] = control["variable"].get()
+            elif kind in ("select", "role_select"):
+                selected = control["variable"].get()
+                option = next((opt for opt in control["options"]
+                               if opt.value == control.get("selected_value") and
+                               self._bot_option_label(opt) == selected), None)
+                if option is None:
+                    option = next((opt for opt in control["options"]
+                                   if self._bot_option_label(opt) == selected), None)
+                if option is not None and item.name:
+                    control["selected_value"] = option.value
+                    values[index] = option.value
+                elif control.get("selected_value") is not None and item.name:
+                    values[index] = control["selected_value"]
+            else:
+                values[index] = control["variable"].get()
+
+        context = self.bot_form_context.get(key, {})
+        self._sync_bot_role_editor(context)
+        role_state = dict(context.get("role_state", {}))
+        role = self._selected_bot_role(context)
+        role_text = context.get("role_text")
+        if role is not None and role_text is not None:
+            role_state[str(role)] = role_text.get("1.0", "end-1c")
+        font_state = dict(context.get("font_state", {}))
+        font_controls = context.get("font_controls", {})
+        if font_controls:
+            font_state["name"] = font_controls["name"].get()
+            try:
+                font_state["size"] = int(font_controls["size"].get())
+            except (ValueError, TypeError):
+                font_state["size"] = 12
+            font_state["color"] = font_controls["color"].get()
+            for name, variable in font_controls["toggles"].items():
+                font_state[name] = bool(variable.get())
+        return values, role_state, font_state
+
+    def save_bot_page(self, key):
+        if self.bot_client is None or key not in self.bot_pages:
+            self.bot_status_var.set("Connect to Bot Manager first.")
+            return
+        from tkinter import messagebox
+        label = "selected plugin" if key == "plugins" else key
+        if not messagebox.askyesno(
+                "Save Camfrog settings",
+                "Send the current {0} settings to Camfrog?".format(label),
+                parent=self.root):
+            return
+        page = self.bot_pages[key]
+        values, role_state, font_state = self._collect_bot_form(key)
+        client = self.bot_client
+        generation = self.bot_generation
+        self.bot_status_var.set("Saving {0} settings...".format(label))
+
+        def done(updated_page, error):
+            if generation != self.bot_generation:
+                return
+            if error:
+                self.bot_status_var.set(error)
+                self._bot_log("Save failed for {0} settings.".format(label))
+                return
+            self.bot_pages[key] = updated_page
+            self._render_bot_page(key, updated_page)
+            self.bot_status_var.set(
+                "Camfrog returned the {0} form. Review the displayed values.".format(label))
+            self._bot_log("Submitted {0} settings to Camfrog.".format(label))
+
+        self._start_bot_task(
+            lambda: client.save_page(page, values, role_state, font_state), done)
+
+    def stop_bot(self):
+        if self.bot_client is None:
+            self.bot_status_var.set("Connect to Bot Manager first.")
+            return
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                "Stop Camfrog bot",
+                "Send the Stop Bot command to Camfrog now?",
+                parent=self.root):
+            return
+        client = self.bot_client
+        generation = self.bot_generation
+        self.bot_status_var.set("Sending Stop Bot command...")
+
+        def work():
+            client._request("/bot/stop")
+            return client.fetch_page("/bot/room")
+
+        def done(page, error):
+            if generation != self.bot_generation:
+                return
+            if error:
+                self.bot_status_var.set(error)
+                return
+            self.bot_pages["room"] = page
+            self._render_bot_page("room", page)
+            self.bot_status_var.set(
+                "Stop request sent. Check the room settings page for bot state.")
+            self._bot_log("Sent Stop Bot command.")
+
+        self._start_bot_task(work, done)
+
+    def logout_bot(self):
+        if self.bot_client is None:
+            self.disconnect_bot()
+            return
+        from tkinter import messagebox
+        if not messagebox.askyesno(
+                "Log out of Camfrog Bot Manager",
+                "End this Camfrog Bot Manager session?",
+                parent=self.root):
+            return
+        client = self.bot_client
+        generation = self.bot_generation
+        self.bot_status_var.set("Logging out...")
+
+        def work():
+            client._request("/bot/logout", allow_signon=True)
+            return True
+
+        def done(_result, error):
+            if generation != self.bot_generation:
+                return
+            if error:
+                self.bot_status_var.set(error)
+                return
+            self.disconnect_bot()
+            self.bot_status_var.set("Logged out of Camfrog Bot Manager.")
+
+        self._start_bot_task(work, done)
+
+    def disconnect_bot(self):
+        self.bot_generation += 1
+        if self.bot_client is not None:
+            self.bot_client.clear()
+        self.bot_client = None
+        self.bot_pages = {}
+        self.bot_plugin_catalog = []
+        self.bot_plugin_index_page = None
+        self.bot_selected_plugin_id = None
+        self.bot_status_var.set("Disconnected. Cloudbot session cleared from memory.")
+        self.bot_connect_button.configure(state="normal")
+        self.bot_disconnect_button.configure(state="disabled")
+        self.bot_stop_button.configure(state="disabled")
+        self.bot_logout_button.configure(state="disabled")
+        self.bot_plugin_filter_var.set("")
+        self.bot_plugin_selected_var.set("Select a plugin card to open its settings.")
+        self.bot_plugin_refresh_button.configure(state="disabled")
+        self._render_plugin_activation([])
+        self.bot_plugin_activation_button.configure(state="disabled")
+        for key in ("room", "profile", "plugins"):
+            self.bot_section_buttons[key].configure(state="disabled")
+            self.bot_save_buttons[key].configure(state="disabled")
+            self.bot_reload_buttons[key].configure(state="disabled")
+            for child in self.bot_page_hosts[key].winfo_children():
+                child.destroy()
+            self.bot_form_widgets[key] = {}
+            self.bot_form_context[key] = {}
+        self.bot_section_buttons["music_dj"].configure(state="normal")
+        self._show_bot_disconnected()
+        self._set_bot_request_busy(self.bot_busy)
+        self._bot_log("Disconnected and cleared the local session.")
+
+    def _bot_log(self, message):
+        widget = getattr(self, "bot_log_text", None)
+        if widget is None:
+            return
+        import datetime
+        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
+        widget.configure(state="normal")
+        widget.insert(self.tk.END, "[{0}] {1}\n".format(timestamp, message))
+        widget.see(self.tk.END)
+        widget.configure(state="disabled")
+
+    def _close_window(self):
+        if self.bot_client is not None:
+            self.bot_client.clear()
+            self.bot_client = None
+        if self._tray_icon is not None:
+            self._tray_icon.shutdown()
+            self._tray_icon = None
+        self.root.destroy()
+
+    def _set_note(self, message):
+        self.note.set(message)
 
     def _run_bg(self, fn, force=False, on_done=None):
         if self.busy and not force:
@@ -1020,6 +4596,19 @@ class WebStatusManager:
                         on_done()
                     except Exception as exc:
                         self.note.set("{0} ({1})".format(text, exc))
+        except queue.Empty:
+            pass
+        try:
+            while True:
+                result, error, callback = self.bot_q.get_nowait()
+                self.bot_busy = False
+                try:
+                    callback(result, error)
+                except Exception as exc:
+                    self.bot_status_var.set(
+                        "Could not update the Bot Manager view ({0}).".format(
+                            type(exc).__name__))
+                self._set_bot_request_busy(False)
         except queue.Empty:
             pass
         try:

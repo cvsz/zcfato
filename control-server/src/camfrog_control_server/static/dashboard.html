@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>ZChat Control</title>
+  <link rel="stylesheet" href="/dashboard/assets/dashboard.css">
+  <script src="/dashboard/assets/dashboard.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div>
+      <p class="eyebrow">ZEAZDEV</p>
+      <h1>ZChat Control</h1>
+    </div>
+    <div class="auth-box">
+      <label for="admin-token">Bootstrap admin token</label>
+      <input id="admin-token" type="password" autocomplete="off" spellcheck="false">
+      <button id="connect-button" class="primary">Connect</button>
+      <button id="clear-token-button" class="secondary">Clear</button>
+    </div>
+  </header>
+
+  <main>
+    <p id="notice" class="notice" role="status" aria-live="polite">Enter the control-plane admin token to load data.</p>
+
+    <section aria-labelledby="overview-heading">
+      <div class="section-heading">
+        <div><p class="eyebrow">CONTROL PLANE</p><h2 id="overview-heading">Overview</h2></div>
+        <button id="refresh-button" class="secondary">Refresh</button>
+      </div>
+      <div id="overview-cards" class="cards"></div>
+    </section>
+
+    <section aria-labelledby="agents-heading">
+      <div class="section-heading"><div><p class="eyebrow">WINDOWS RUNTIMES</p><h2 id="agents-heading">Agents</h2></div></div>
+      <form id="agent-form" class="inline-form">
+        <label>Agent name <input name="name" required maxlength="120"></label>
+        <button class="primary" type="submit">Register agent</button>
+      </form>
+      <div id="agent-token-result" class="token-result" hidden></div>
+      <div class="table-wrap" role="region" aria-label="Agent list" tabindex="0"><table><thead><tr><th>Name</th><th>Process state</th><th>Last seen</th><th>Action</th></tr></thead><tbody id="agents-table"></tbody></table></div>
+    </section>
+
+    <section aria-labelledby="accounts-heading">
+      <div class="section-heading"><div><p class="eyebrow">ACCOUNT REGISTRY</p><h2 id="accounts-heading">Accounts</h2></div></div>
+      <form id="account-form" class="inline-form">
+        <label>Camfrog nickname <input name="nickname" required maxlength="256"></label>
+        <label>Assign agent <select name="agent_id"><option value="">Unassigned</option></select></label>
+        <button class="primary" type="submit">Add account</button>
+      </form>
+      <div class="table-wrap" role="region" aria-label="Account list" tabindex="0"><table><thead><tr><th>Nickname</th><th>Agent</th><th>Enabled</th><th>Created</th></tr></thead><tbody id="accounts-table"></tbody></table></div>
+    </section>
+
+    <section aria-labelledby="profiles-heading">
+      <div class="section-heading"><div><p class="eyebrow">ACCOUNT SNAPSHOTS</p><h2 id="profiles-heading">Profile and presence</h2></div></div>
+      <div class="table-wrap" role="region" aria-label="Profile and presence snapshots" tabindex="0"><table><thead><tr><th>Nickname</th><th>Client process</th><th>Room state</th><th>Auth state</th><th>Presence</th><th>Subscription</th><th>Profile observed</th></tr></thead><tbody id="profiles-table"></tbody></table></div>
+      <p class="hint">Snapshots are reported by the assigned agent. Client process state only tracks a process launched by that agent; absent or stale evidence is shown as unknown. Room membership is not inferred from opening a room URI.</p>
+    </section>
+
+    <section aria-labelledby="commands-heading">
+      <div class="section-heading"><div><p class="eyebrow">LEASED COMMAND QUEUE</p><h2 id="commands-heading">Commands</h2></div></div>
+      <form id="command-form" class="inline-form">
+        <label>Account <select name="account_id" required></select></label>
+        <label>Operation
+          <select name="operation">
+            <option value="launch">Launch client</option>
+            <option value="stop">Stop agent-launched client</option>
+            <option value="restart">Restart agent-launched client</option>
+            <option value="join_room">Open room link</option>
+            <option value="leave_room" disabled>Leave room (not available yet)</option>
+            <option value="add_friend">Open add-friend link</option>
+            <option value="open_im">Open private-message link</option>
+          </select>
+        </label>
+        <label>Room or nickname <input name="target" maxlength="256" aria-describedby="command-target-help"></label>
+        <p class="hint" id="command-target-help">Enter a room or nickname when the selected action requires one.</p>
+        <button class="primary" type="submit">Queue command</button>
+      </form>
+      <p class="hint">A queued command is not proof that Camfrog completed the action. Room membership needs a separate live status provider.</p>
+      <div class="table-wrap" role="region" aria-label="Command queue" tabindex="0"><table><thead><tr><th>Created</th><th>Account</th><th>Operation</th><th>State</th><th>Result</th><th>Action</th></tr></thead><tbody id="commands-table"></tbody></table></div>
+    </section>
+
+    <section aria-labelledby="audit-heading">
+      <div class="section-heading"><div><p class="eyebrow">CHANGE HISTORY</p><h2 id="audit-heading">Audit log</h2></div></div>
+      <div class="table-wrap" role="region" aria-label="Audit history" tabindex="0"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Resource</th><th>Details</th></tr></thead><tbody id="audit-table"></tbody></table></div>
+    </section>
+
+    <section aria-labelledby="cloud-bots-heading">
+      <div class="section-heading"><div><p class="eyebrow">CLOUD BOT SNAPSHOTS</p><h2 id="cloud-bots-heading">Cloud Bots</h2></div></div>
+      <div class="table-wrap" role="region" aria-label="Cloud Bot snapshots" tabindex="0"><table><thead><tr><th>Name</th><th>State</th><th>Reason</th><th>Uptime</th><th>Observed</th></tr></thead><tbody id="cloud-bots-table"></tbody></table></div>
+    </section>
+
+    <section aria-labelledby="store-heading">
+      <div class="section-heading"><div><p class="eyebrow">IMPORTED METADATA</p><h2 id="store-heading">Store catalog</h2></div></div>
+      <div class="table-wrap" role="region" aria-label="Store catalog" tabindex="0"><table><thead><tr><th>Type</th><th>Item</th><th>Price</th><th>Availability</th><th>Updated</th></tr></thead><tbody id="store-table"></tbody></table></div>
+      <p class="hint">Catalog entries are operator-imported. The live Camfrog catalog and all purchase execution remain disabled.</p>
+    </section>
+
+    <section aria-labelledby="integrations-heading" class="integration-note">
+      <p class="eyebrow">ADAPTERS</p>
+      <h2 id="integrations-heading">Integration state</h2>
+      <p>Profile, friends, presence, Cloud Bot status, Store catalog, and subscription records have protected API routes. Live Camfrog authentication and purchase execution are not configured in this server.</p>
+      <p>Purchase confirmation records operator consent only. It does not submit an order or charge an account.</p>
+      <p><strong>ZChat Control by ZEAZDEV</strong> is an independent product. Camfrog is a third-party integration and a trademark of its respective owner. ZChat is not affiliated with or endorsed by Camfrog.</p>
+    </section>
+  </main>
+</body>
+</html>

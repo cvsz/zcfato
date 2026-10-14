@@ -26,7 +26,7 @@ def test_verify_feature_hashes_accepts_all_expected_files(tmp_path, monkeypatch)
     files = {}
     lines = []
     for name in ("room-control", "chat-im-private", "status-random",
-                 "status-marquee", "im-autoreply", "music-dj", "web-status"):
+                 "status-marquee", "status-changer", "im-autoreply", "music-dj", "web-status"):
         path = dist / name / (name + ".exe")
         path.parent.mkdir()
         path.write_bytes(("test-" + name).encode())
@@ -46,6 +46,15 @@ def test_verify_feature_hashes_rejects_missing_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "DIST", tmp_path)
     with pytest.raises(SystemExit, match="missing dist/SHA256SUMS"):
         release.verify_feature_hashes()
+
+
+def test_music_dj_packages_zeazdev_room_mascot_with_the_executable():
+    root = Path(__file__).resolve().parents[1]
+    build = (root / "build.bat").read_text(encoding="utf-8")
+    artwork = root / "assets" / "zeazdev-room.png"
+    assert 'assets\\zeazdev-room.png;assets' in build
+    assert artwork.is_file()
+    assert artwork.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_release_rejects_existing_tag_without_upload(monkeypatch, tmp_path):

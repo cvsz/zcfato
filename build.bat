@@ -91,11 +91,13 @@ echo === PYTHON COMPILE CHECK ===
     im_autoreply_gui.py ^
     status_random_gui.py ^
     status_marquee_gui.py ^
+    status_changer_gui.py ^
     chat_im_private_gui.py ^
     room_control_entry.py ^
     chat_im_private_entry.py ^
     status_random_entry.py ^
     status_marquee_entry.py ^
+    status_changer_entry.py ^
     im_autoreply_entry.py ^
     music_dj_entry.py ^
     camfrog_tray.py ^
@@ -165,6 +167,7 @@ if exist "dist\room-control\room-control.exe" del /q "dist\room-control\room-con
 if exist "dist\chat-im-private\chat-im-private.exe" del /q "dist\chat-im-private\chat-im-private.exe"
 if exist "dist\status-random\status-random.exe" del /q "dist\status-random\status-random.exe"
 if exist "dist\status-marquee\status-marquee.exe" del /q "dist\status-marquee\status-marquee.exe"
+if exist "dist\status-changer\status-changer.exe" del /q "dist\status-changer\status-changer.exe"
 if exist "dist\im-autoreply\im-autoreply.exe" del /q "dist\im-autoreply\im-autoreply.exe"
 if exist "dist\music-dj\music-dj.exe" del /q "dist\music-dj\music-dj.exe"
 if exist "dist\web-status\web-status.exe" del /q "dist\web-status\web-status.exe"
@@ -247,6 +250,18 @@ if errorlevel 1 goto :fail
 
 
 echo.
+echo === BUILD COMBINED STATUS CHANGER ===
+
+"%VENV_PY%" -m PyInstaller ^
+    --noconfirm --clean --onefile --windowed ^
+    --distpath dist\status-changer --workpath build\status-changer ^
+    --name status-changer %ICONARG% ^
+    --collect-all pywinauto --collect-submodules comtypes ^
+    status_changer_entry.py
+if errorlevel 1 goto :fail
+
+
+echo.
 echo === BUILD PRIVATE IM AUTO-REPLY ===
 
 "%VENV_PY%" -m PyInstaller ^
@@ -265,6 +280,7 @@ echo === BUILD WEB STATUS UPDATER (GUI + CONSOLE PROTOTYPE) ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\web-status --workpath build\web-status ^
     --name web-status %ICONARG% ^
+    --add-data "assets\zttato.png;assets" ^
     web_status_entry.py
 if errorlevel 1 goto :fail
 
@@ -275,6 +291,7 @@ echo === BUILD MUSIC DJ ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\music-dj --workpath build\music-dj ^
     --name music-dj %ICONARG% ^
+    --add-data "assets\zeazdev-room.png;assets" ^
     --collect-all pywinauto --collect-submodules comtypes ^
     music_dj_entry.py
 if errorlevel 1 goto :fail
@@ -301,13 +318,14 @@ if not exist "dist\room-control\room-control.exe" goto :fail
 if not exist "dist\chat-im-private\chat-im-private.exe" goto :fail
 if not exist "dist\status-random\status-random.exe" goto :fail
 if not exist "dist\status-marquee\status-marquee.exe" goto :fail
+if not exist "dist\status-changer\status-changer.exe" goto :fail
 if not exist "dist\im-autoreply\im-autoreply.exe" goto :fail
 if not exist "dist\web-status\web-status.exe" goto :fail
 if not exist "dist\music-dj\music-dj.exe" goto :fail
 if not exist "dist\SHA256SUMS.txt" goto :fail
 if not exist "%FEATURE_NAME%-windows.zip" goto :fail
 if not exist "app.ico" goto :skip_icon_copy
-for %%D in (room-control chat-im-private status-random status-marquee im-autoreply music-dj web-status) do (
+for %%D in (room-control chat-im-private status-random status-marquee status-changer im-autoreply music-dj web-status) do (
     copy /y "app.ico" "dist\%%D\app.ico" >nul
     if errorlevel 1 goto :fail
 )
@@ -320,6 +338,7 @@ echo dist\room-control\room-control.exe
 echo dist\chat-im-private\chat-im-private.exe
 echo dist\status-random\status-random.exe
 echo dist\status-marquee\status-marquee.exe
+echo dist\status-changer\status-changer.exe
 echo dist\im-autoreply\im-autoreply.exe
 echo dist\music-dj\music-dj.exe
 echo dist\web-status\web-status.exe

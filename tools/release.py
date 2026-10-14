@@ -2,6 +2,7 @@
 
 Usage:
   python tools/release.py              # tag from camfrog_auto.APP_VERSION, upload assets
+  python tools/release.py --release APP_VERSION  # require version to match configured APP_VERSION
   python tools/release.py --dry-run    # print the plan, change nothing
 
 Run full-build.bat on the exact clean `main` commit after its PR checks pass.
@@ -36,6 +37,7 @@ FEATURE_EXES = {
     "chat-im-private.exe": DIST / "chat-im-private" / "chat-im-private.exe",
     "status-random.exe": DIST / "status-random" / "status-random.exe",
     "status-marquee.exe": DIST / "status-marquee" / "status-marquee.exe",
+    "status-changer.exe": DIST / "status-changer" / "status-changer.exe",
     "im-autoreply.exe": DIST / "im-autoreply" / "im-autoreply.exe",
     "music-dj.exe": DIST / "music-dj" / "music-dj.exe",
     "web-status.exe": DIST / "web-status" / "web-status.exe",
@@ -177,7 +179,7 @@ def verify_feature_hashes():
             raise SystemExit("unexpected or duplicate SHA256SUMS entry: " + name)
         found[name] = parts[0].lower()
     if set(found) != set(expected):
-        raise SystemExit("SHA256SUMS.txt does not cover exactly seven feature EXEs")
+        raise SystemExit("SHA256SUMS.txt does not cover exactly the expected feature EXEs")
     for name, path in expected.items():
         h = hashlib.sha256()
         with path.open("rb") as source:
@@ -195,11 +197,20 @@ def gh_ready():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--tag", default=None, help="override vX.Y.Z (must match APP_VERSION)")
+    parser.add_argument("--tag", default=None, help="override release tag (must match APP_VERSION)")
+    parser.add_argument("--release", nargs="?", const="", default=None,
+                        help="require release version to match APP_VERSION")
     args = parser.parse_args(argv)
 
     version = app_version()
-    tag = args.tag or "v{0}".format(version)
+    expected_tag = "v{0}".format(version)
+    if args.release is not None:
+        requested_tag = args.release or expected_tag
+        if not re.fullmatch(r"v\d+\.\d+\.\d+", requested_tag):
+            raise SystemExit("invalid release version; expected v followed by three numeric components")
+        if requested_tag != expected_tag:
+            raise SystemExit("release version must match APP_VERSION before publishing")
+    tag = args.tag or expected_tag
     if tag != "v{0}".format(version):
         raise SystemExit("release tag must match APP_VERSION to prevent mismatched releases")
     check_assets()

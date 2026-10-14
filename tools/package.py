@@ -21,6 +21,7 @@ FEATURE_EXECUTABLES = (
     "room-control/room-control.exe",
     "status-marquee/status-marquee.exe",
     "status-random/status-random.exe",
+    "status-changer/status-changer.exe",
     "web-status/web-status.exe",
 )
 
