@@ -2,7 +2,7 @@
 
 ## Scope and artifact identity
 
-This note records a static analysis of the supplied legacy utility at [`Camfrog Status 2009.exe`](Camfrog%20Status%202009.exe). The executable was inspected as data and was **not run**.
+This note records a static analysis of the supplied legacy utility `Camfrog Status 2009.exe`. The executable was inspected as data and was **not run**.
 
 | Property | Observed value | Evidence |
 |---|---|---|
