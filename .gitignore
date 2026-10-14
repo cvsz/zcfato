@@ -23,8 +23,13 @@ im-autoreply-data/
 chat-im-private-data/
 random-data/
 marquee-data/
+status-data/
 music-dj-data/
+/dj-control/
+/dj_queue.json
+/web_status_media.json
 *.tmp
+*.egg-info/
 /config.json
 .env
 .env.enc
@@ -41,3 +46,5 @@ camfrog_status_changer_stats.json
 # Stray device-probe artifacts (UPnP SCPD dumps, bundled VB6 binaries, etc.)
 samsung-*.xml
 docs/Camfrog Status 2009.exe
+presence-evidence/
+presence-evidence.sqlite3*

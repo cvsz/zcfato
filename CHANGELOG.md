@@ -7,6 +7,24 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- Combined Status Changer executable with Random, Marquee, and Activity Log tabs; its configuration and runtime data stay under `status-data/`.
+- Bot Manager plugin names, field labels, and known choices now follow the TH/EN setting while submitted option values remain unchanged.
+- Bot Manager's local Music DJ page starts/stops the packaged worker and controls its queue through bounded, expiring local JSON requests; Music DJ remains the queue owner.
+- Music DJ accepts YouTube video URLs/IDs in the persistent queue, plays them in a visible standard iframe player, and uses current-player events for announcements and auto-advance.
+- Music DJ can open a visible YouTube search in its dedicated Edge/Chrome profile for assisted discovery.
+- Music DJ is branded as ZeaZDev room with a bundled microphone mascot, adds `!randommusic` with bounded JSON history, reports playback details, and provides local Windows TTS controls.
+- Bot Manager can read local vMix inputs, set Preview, and issue a confirmed Cut through a loopback-only HTTP API client.
+- Added a read-only Camfrog public presence probe that fingerprints bounded GIF responses and persists raw evidence locally while classifying every observation as UNKNOWN.
+
+### Fixed
+- Release uploads now use the `SHA256SUMS.txt` asset name expected by app updaters.
+
+### Changed
+- Web Status now defaults to switching non-empty status slots every 60 seconds.
+- Status Changer records completed status text in its worker log and clears its status logs daily at 12:00 local time.
+- Music DJ queue paths are restricted to the app data folder.
+
 ## [2.19.2] - 2026-10-11
 
 ### Added

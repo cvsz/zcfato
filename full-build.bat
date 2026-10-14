@@ -10,14 +10,29 @@ echo.
 echo Usage: full-build.bat [--release]
 echo   --release  publish the GitHub release after a green build
 echo              (version from APP_VERSION, needs: gh auth login).
+echo Use full-build.ps1 --release APP_VERSION to require the configured release version.
 echo Without --release, no GitHub release is created.
 echo.
+
+if /i "%~1"=="--release" if not "%~2"=="" (
+    echo ERROR: full-build.bat accepts only --release without a version.
+    echo Use full-build.ps1 --release APP_VERSION to request the configured release version.
+    exit /b 2
+)
 
 rem --- Capture the source used for this build; release.py checks this marker ---
 set "BUILD_SOURCE_COMMIT=unknown"
 set "BUILD_SOURCE_CLEAN=true"
 for /f "delims=" %%i in ('git rev-parse HEAD 2^>nul') do set "BUILD_SOURCE_COMMIT=%%i"
-for /f "delims=" %%i in ('git status --porcelain --untracked-files=normal 2^>nul') do set "BUILD_SOURCE_CLEAN=false"
+set "BUILD_SOURCE_STATUS=%TEMP%\camfrog-build-source-%RANDOM%.tmp"
+git status --porcelain --untracked-files=normal > "%BUILD_SOURCE_STATUS%" 2>nul
+if errorlevel 1 set "BUILD_SOURCE_CLEAN=false"
+if exist "%BUILD_SOURCE_STATUS%" (
+    for %%A in ("%BUILD_SOURCE_STATUS%") do if %%~zA GTR 0 set "BUILD_SOURCE_CLEAN=false"
+    del /q "%BUILD_SOURCE_STATUS%" >nul 2>nul
+) else (
+    set "BUILD_SOURCE_CLEAN=false"
+)
 
 rem --- Build Camfrog feature apps ---
 echo [1/3] Building Camfrog feature apps...
@@ -58,6 +73,10 @@ if not exist dist\status-random\status-random.exe (
 )
 if not exist dist\status-marquee\status-marquee.exe (
     echo ERROR: dist\status-marquee\status-marquee.exe not found
+    exit /b 1
+)
+if not exist dist\status-changer\status-changer.exe (
+    echo ERROR: dist\status-changer\status-changer.exe not found
     exit /b 1
 )
 if not exist dist\im-autoreply\im-autoreply.exe (
@@ -128,6 +147,7 @@ echo   dist\room-control\room-control.exe
 echo   dist\chat-im-private\chat-im-private.exe
 echo   dist\status-random\status-random.exe
 echo   dist\status-marquee\status-marquee.exe
+echo   dist\status-changer\status-changer.exe
 echo   dist\im-autoreply\im-autoreply.exe
 echo   dist\web-status\web-status.exe
 echo   dist\music-dj\music-dj.exe
