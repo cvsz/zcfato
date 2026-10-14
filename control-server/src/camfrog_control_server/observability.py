@@ -28,16 +28,32 @@ def format_duration_ms(ms: float) -> str:
 
 
 def redact_db_url(url: str) -> str:
-    """Mask credentials (username, password) in database URLs."""
-    if not url or "@" not in url:
+    """Mask credentials (username, password) in database URLs including query parameters."""
+    if not url or (
+        "@" not in url
+        and not any(s in url.lower() for s in ("password=", "secret=", "token=", "key="))
+    ):
         return url
     parsed = urlsplit(url)
-    if not parsed.netloc or "@" not in parsed.netloc:
-        return url
-    userinfo, hostinfo = parsed.netloc.rsplit("@", 1)
-    masked_userinfo = "***:***" if ":" in userinfo else "***"
-    netloc = f"{masked_userinfo}@{hostinfo}"
-    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+    netloc = parsed.netloc
+    if parsed.netloc and "@" in parsed.netloc:
+        userinfo, hostinfo = parsed.netloc.rsplit("@", 1)
+        masked_userinfo = "***:***" if ":" in userinfo else "***"
+        netloc = f"{masked_userinfo}@{hostinfo}"
+    query = parsed.query
+    if query:
+        qs_pairs: list[str] = []
+        for pair in query.split("&"):
+            if "=" in pair:
+                k, v = pair.split("=", 1)
+                if any(s in k.lower() for s in ("pass", "secret", "token", "key")):
+                    qs_pairs.append(f"{k}=[REDACTED]")
+                else:
+                    qs_pairs.append(pair)
+            else:
+                qs_pairs.append(pair)
+        query = "&".join(qs_pairs)
+    return urlunsplit((parsed.scheme, netloc, parsed.path, query, parsed.fragment))
 
 
 class StructuredLogger:
@@ -162,6 +178,8 @@ def log_http_request(
 ) -> None:
     """Emit only allowlisted request metadata; never include query, headers, or bodies."""
     record: dict[str, Any] = {
+        "ts": datetime.now(UTC).isoformat(),
+        "level": "INFO",
         "event": "http_request",
         "request_id": request_id,
         "method": method,

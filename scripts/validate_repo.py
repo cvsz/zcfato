@@ -93,7 +93,7 @@ def find_markdown_files() -> list[Path]:
         for filename in filenames:
             if filename.endswith(".md"):
                 md = Path(dirpath) / filename
-                if not any(part in EXCLUDED_DIRS for part in md.parts):
+                if not any(part in EXCLUDED_DIRS for part in md.relative_to(ROOT).parts):
                     md_paths.append(md)
     return sorted(md_paths)
 
@@ -101,7 +101,7 @@ def find_markdown_files() -> list[Path]:
 def validate_markdown_links() -> list[str]:
     errors: list[str] = []
     for md in find_markdown_files():
-        if any(part in EXCLUDED_DIRS for part in md.parts):
+        if any(part in EXCLUDED_DIRS for part in md.relative_to(ROOT).parts):
             continue
         try:
             text = md.read_text(encoding="utf-8")

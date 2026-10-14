@@ -105,3 +105,14 @@ def test_ci_workflow_required(tmp_path, monkeypatch):
     errors = validate_repo.validate_required_paths()
     assert any(".github/workflows/ci.yml" in e for e in errors)
 
+
+def test_root_under_excluded_named_directory(tmp_path, monkeypatch):
+    nested_root = tmp_path / "build" / "project"
+    nested_root.mkdir(parents=True, exist_ok=True)
+    _skeleton(nested_root)
+    (nested_root / "README.md").write_text("[broken](missing.md)\n", encoding="utf-8")
+    monkeypatch.setattr(validate_repo, "ROOT", nested_root)
+    errors = validate_repo.validate_markdown_links()
+    assert any("missing.md" in e for e in errors)
+
+
