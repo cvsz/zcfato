@@ -1,11 +1,14 @@
-PYTHON ?= python3
+PYTHON ?= $(if $(wildcard $(CURDIR)/venv/bin/python),$(CURDIR)/venv/bin/python,python3)
 RUFF := $(PYTHON) -m ruff
 PYTEST := $(PYTHON) -m pytest
 
-.PHONY: help setup validate-template format lint test build security ci
+.PHONY: help venv setup validate validate-template format lint test build security clean ci
 
 help:
-	@printf '%s\n' 'Project tasks:' '  setup             Install the root and control-server development dependencies' '  validate-template Run repository structure and Markdown link validation' '  format            Check control-server formatting' '  lint              Lint the control-server source and tests' '  test              Run root and control-server test suites' '  build             Package desktop apps on Windows' '  security          Audit root and installed Python dependencies' '  ci                Run repository, format, lint, test, and security checks'
+	@printf '%s\n' 'Project tasks:' '  venv              Create virtual environment if it does not exist' '  setup             Install the root and control-server development dependencies' '  validate-template Run repository structure and Markdown link validation' '  format            Check control-server formatting' '  lint              Lint the control-server source and tests' '  test              Run root and control-server test suites' '  build             Package desktop apps on Windows' '  security          Audit root and installed Python dependencies' '  clean             Remove cache directories' '  ci                Run repository, format, lint, test, and security checks'
+
+venv:
+	@test -d $(CURDIR)/venv || python3 -m venv $(CURDIR)/venv
 
 setup:
 	$(PYTHON) -m pip install --upgrade pip
@@ -15,6 +18,8 @@ setup:
 validate-template:
 	python3 scripts/validate_repo.py
 	python3 -m unittest discover -s tests -p 'test_bootstrap.py' -v
+
+validate: validate-template
 
 format:
 	$(RUFF) format --check control-server/src control-server/tests
@@ -42,5 +47,9 @@ endif
 security:
 	$(PYTHON) -m pip_audit -r requirements-dev.txt
 	$(PYTHON) -m pip_audit --local --skip-editable
+
+clean:
+	find . \( -name .git -o -name venv -o -name .venv \) -prune -o -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
+	find . \( -name .git -o -name venv -o -name .venv \) -prune -o -type d -name '.pytest_cache' -exec rm -rf {} + 2>/dev/null || true
 
 ci: validate-template format lint test security
