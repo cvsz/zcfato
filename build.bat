@@ -106,16 +106,22 @@ if errorlevel 1 goto :fail
 echo.
 echo === TESTS ===
 
+rem Use an isolated base temp directory in build/ to avoid WinError 5 / permission
+rem errors on Windows when %TEMP%\pytest-of-* has restrictive ACLs.
+set "PYTEST_TMP_DIR=%CD%\build\pytest_tmp"
+if exist "%PYTEST_TMP_DIR%" rmdir /s /q "%PYTEST_TMP_DIR%" >nul 2>nul
+if not exist "build" mkdir "build"
+
 rem Tk initialization on Windows is process-global. GUI fixtures that create or
 rem destroy a root in one test module can invalidate Tcl's tcl_findLibrary
 rem command for a later module. Run the private-chat GUI module in an isolated
 rem interpreter while still testing every test (no skips or xfails).
-"%VENV_PY%" -m pytest -q tests --ignore=tests/test_private_chat_gui.py
+"%VENV_PY%" -m pytest -q tests --basetemp="%PYTEST_TMP_DIR%" --ignore=tests/test_private_chat_gui.py
 if errorlevel 1 goto :fail
 
 echo.
 echo === ISOLATED PRIVATE-CHAT GUI TESTS ===
-"%VENV_PY%" -m pytest -q tests/test_private_chat_gui.py
+"%VENV_PY%" -m pytest -q tests/test_private_chat_gui.py --basetemp="%PYTEST_TMP_DIR%_private"
 if errorlevel 1 goto :fail
 
 
