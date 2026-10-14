@@ -28,29 +28,29 @@ Review `git diff` and commit the generated identity marker only after confirming
 make validate-template
 ```
 
-This validates repository structure, local Markdown links, and bootstrap behavior. Application-specific Makefile targets intentionally fail until replaced.
+This validates required repository structure and local Markdown links, then runs only the isolated bootstrap unit tests. It does not discover project-wide tests; application-specific Makefile targets intentionally fail until replaced.
 
 ## 3. Configure repository administration
 
 The inherited script is dry-run by default:
 
 ```bash
-python3 scripts/github_admin.py --repo my-org/my-service
+python3 scripts/github_admin.py --repo my-org/my-service --branch main --required-check "EXACT_CHECK_NAME"
 ```
 
 Apply and read back effective settings:
 
 ```bash
-python3 scripts/github_admin.py --repo my-org/my-service --apply
+python3 scripts/github_admin.py --repo my-org/my-service --branch main --required-check "EXACT_CHECK_NAME" --apply
 ```
 
 Later verification:
 
 ```bash
-python3 scripts/github_admin.py --repo my-org/my-service --verify
+python3 scripts/github_admin.py --repo my-org/my-service --branch main --required-check "EXACT_CHECK_NAME" --verify
 ```
 
-This step requires an authenticated `gh` identity with repository Administration permission.
+Replace `main` with the target branch and repeat `--required-check` for every exact status-check context. The helper has no built-in repository or check names. Dry-run does not need authentication; apply and verify require an authenticated `gh` identity with repository Administration permission.
 
 Do not treat the presence of the script as proof that branch/security settings are enabled.
 

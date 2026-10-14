@@ -68,8 +68,10 @@ Before merge, capture exact-head evidence for the checks that apply to the chang
 For repository administration changes, use the read-back verifier:
 
 ```bash
-python3 scripts/github_admin.py --repo OWNER/REPO --verify
+python3 scripts/github_admin.py --repo OWNER/REPOSITORY --branch DEFAULT_BRANCH --required-check "EXACT_CHECK_NAME" --verify
 ```
+
+Pass `--branch DEFAULT_BRANCH` and one `--required-check "EXACT_CHECK_NAME"` per actual status-check context. The helper requires these explicit target values before it can verify GitHub state.
 
 ## Documentation
 

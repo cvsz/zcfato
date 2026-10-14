@@ -10,7 +10,7 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `sta
 
 ## 1. Install
 
-1. Install 64-bit Python 3.12 or 3.13.
+1. Install standard CPython 3.12 64-bit.
 2. Run `doctor.bat` first. It checks your Python, flags bad setups, and tests the `pywin32` download.
 3. Double-click `build.bat` for the eight Camfrog apps, or run `full-build.ps1` in PowerShell to build them with the LINE app. Executables land in `dist\<app>\`.
 4. If the build says `pywin32 ... no matching distribution`, your Python has no wheel: install 64-bit Python 3.13, delete `.venv`, rerun.
@@ -36,6 +36,9 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `sta
 - **Mandatory friend allowlist** (`only_nicknames`): only listed nicknames are ever answered.
 - Stricter limits by default (one reply per friend per hour, 3 per day, 10 per hour). Every reply starts with `[auto] `, and such lines are never answered.
 - Windows already open when the bot starts are never answered.
+- After a live reply, IM Auto-reply looks for the outgoing line in that private chat's local history and scrolls it into the chat viewport. This is local UI evidence only; Camfrog exposes no recipient-delivery acknowledgement here. A send that fails before submission stays pending for the next polling pass; an ambiguous send is not repeated automatically to avoid duplicates. Set `safety.restore_previous_window` to `false` if you want the Camfrog chat window left in front.
+- The **Activity Log** tab follows the configured app log. It records application open/close, config saves/reloads, Start/Stop and helper results, worker lifecycle, IM filters, unmatched rules, previews, replies, and failures with available error details. It refreshes while the GUI is open. The **Log chat text** setting in Advanced controls whether message contents appear in worker entries; turn it off to keep message text out of the log. Each app keeps its own log file and worker.
+- Only one worker can run for this app's data folder. The Activity Log records when an incoming message has no matching reply rule or is filtered.
 
 ## 5. Chat IM Private
 
@@ -43,13 +46,15 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `sta
 - **Window title filter** (regex) + **Max windows** limit the list; **Save filters** stores them in this app's own config.
 - **Discover controls** dumps the control tree to `controls.txt` for selector setup.
 
-## 6. Status Random
+## 6. Status Changer: Random, Marquee, and Activity Log
 
-- Ten message slots. The active status is picked from these entries.
-- **Switch every** (seconds, minimum 0.3): how long each status stays before switching. Saved to `status.interval_seconds`.
-- **Start** rotates immediately (first status goes out at once), **Stop** ends rotation. Pools live in `random-data\`, separate from Marquee.
+- `status-changer.exe` puts Random and Marquee in separate tabs with separate ten-slot pools. It reuses existing mode pool databases when it finds their data folders. The legacy `status-random.exe` and `status-marquee.exe` remain available for compatibility.
+- **Random:** each switch picks a status from its ten slots. **Switch every** is in seconds and has a minimum of 0.3 seconds.
+- **Marquee:** **Step** sets seconds per frame and the delay between whole-line slots when Scroll is off (minimum 0.3); **Stride** sets character clusters per frame, and **Scroll** turns frame scrolling on or off. Marquee follows the populated slots in order; History source cannot reorder them. With scrolling on, each populated slot completes its frames before the next slot starts. **Loop slots** restarts at slot 1 after the last populated slot; with it off, the sequence stops after the last slot. Thai vowel/tone clusters stay together. **Switch every** applies to Random only.
+- **Start** applies the selected mode immediately; only one status worker can run at a time. The window shows which mode is active. **Stop** ends that worker.
+- **Activity Log** combines GUI actions with both worker logs. GUI events omit status text; worker logs may include the status that Camfrog received. Use **Open log folder** to inspect the files.
 
-## 7. Status Marquee
+## 7. Status history, schedules, language
 
 - Long statuses scroll across a window of `width` characters: **Step** (seconds per frame, min 0.5), **Stride** (clusters per frame), **Loop** (repeat without settling). With **Scroll** off (default), each pool line is applied whole, one per tick, rotating 1..N and wrapping.
 - Every frame is a real status change on Camfrog, so keep frames slow and few. Start with dry-run.
@@ -63,7 +68,7 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `sta
 - `status.language_cycle: ["th","en"]` alternates Thai/English on each change. Status items can be `{th, en}` pairs.
 - `"language": "auto"` follows the Windows UI language.
 
-## 9. Music DJ
+## 8. Music DJ
 
 - A room bot that also plays music: it answers song requests from chat and announces what is playing. It needs Camfrog open and `autoreply` enabled (the DJ reuses the chat plumbing); set `dj.enabled`.
 - Chat commands, prefix `!` by default: `!request <song>` (or `!req`, `!song`), `!randommusic`, `!queue`, `!current` (or `!np`), `!skip`, `!help`. `!randommusic` posts a random YouTube music search and saves it in `youtube_random_music.json` (up to 200 entries). `!current` reports the requester, elapsed/total playback time when available, and next queued song. The Music tab can speak custom text or the current-song summary with Windows TTS; route Windows playback output to the Camfrog microphone input with a virtual cable or Stereo Mix. The queue view in the app mirrors the file, with **Skip current** / **Clear queue** owner buttons.
@@ -121,11 +126,11 @@ This feature configures Camfrog's server-installed plugins; it does not create o
 
 | Symptom | Fix |
 |---|---|
-| `pywin32 ... no matching distribution` | 64-bit Python 3.13, delete `.venv`, rerun `build.bat`. |
+| `pywin32 ... no matching distribution` | Install CPython 3.12 64-bit, delete `.venv`, rerun `build.bat`. |
 | Auto-detect finds nothing | Open a chat room (not tray-minimized) and retry; then Discover controls. |
 | Old `requirements.txt (line 1)` pywinauto-only error | You run an older copy — extract the newest zip into a new empty folder. |
 | Status never sends (status apps) | Enable **Send statuses live to Camfrog**; dry-run is default. |
-| Error sound on every status change | Try **combo Enter (test)**; verify with Apply Now before marquee use. |
+| Error sound on every status change | Try **combo Enter (test)** in dry-run mode first. Review the activity log before enabling live status changes. |
 | Wrong/old window driven | Fix **Window title regex**, re-run Auto-detect. |
 | Explorer shows old icon after rebuild | Windows icon cache: rename/move the exe or restart Explorer. |
 

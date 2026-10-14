@@ -26,4 +26,4 @@ Avoid unbounded retry/search loops and repeated unchanged scans. Prefer targeted
 
 ## Repository administration
 
-Use `scripts/github_admin.py` only when the task concerns GitHub repository controls. Dry-run is the default. Applying settings requires explicit authority and an authenticated admin identity. Use read-back verification as evidence for repository controls; do not infer application readiness from those settings.
+Use `scripts/github_admin.py` only when the task concerns GitHub repository controls. Dry-run is the default. Applying or verifying settings requires an explicit repository, branch, exact required-check names, and an authenticated admin identity; the helper has no project-specific defaults. Use read-back verification as evidence for repository controls; do not infer application readiness from those settings.

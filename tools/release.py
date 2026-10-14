@@ -50,10 +50,20 @@ OTHER_ASSETS = {
 
 def app_version():
     src = (ROOT / "camfrog_auto.py").read_text(encoding="utf-8")
-    match = re.search(r'^APP_VERSION = "([^"]+)"', src, re.M)
+    match = re.search(r'^APP_VERSION = "([^\"]+)\"', src, re.M)
     if not match:
         raise SystemExit("APP_VERSION not found in camfrog_auto.py")
     return match.group(1)
+
+
+def release_version(args):
+    """Return the version to use for the release, or None for default."""
+    if not args:
+        return None
+    version = args[0]
+    if version.startswith("v2.") and re.match(r"^v2\\.(\\d+)\\.(\\d+)$", version):
+        return version
+    raise SystemExit(f"Invalid version format: {version}. Use format: v2.xx.x")
 
 
 def flat_sums(assets):
@@ -163,7 +173,7 @@ def verify_remote_tag(tag, target):
 
 
 def verify_feature_hashes():
-    """Verify the seven packaged EXEs against the build-produced SHA256SUMS."""
+    """Verify the packaged feature EXEs against the build-produced SHA256SUMS."""
     manifest = DIST / "SHA256SUMS.txt"
     if not manifest.is_file():
         raise SystemExit("missing dist/SHA256SUMS.txt; run a full build first")

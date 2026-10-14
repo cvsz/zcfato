@@ -36,9 +36,9 @@ RELEASE = {
     "body": "notes here",
     "assets": [
         {"name": "room-control.exe",
-         "browser_download_url": "https://example.test/room-control.exe"},
+         "browser_download_url": "https://github.com/OWNER/PROJECT/releases/download/v2.20.0/room-control.exe"},
         {"name": "SHA256SUMS.txt",
-         "browser_download_url": "https://example.test/SHA256SUMS.txt"},
+         "browser_download_url": "https://github.com/OWNER/PROJECT/releases/download/v2.20.0/SHA256SUMS.txt"},
     ],
 }
 
@@ -54,7 +54,7 @@ def test_github_latest_release_parses_tag_and_assets(monkeypatch):
     calls = _fake_github(monkeypatch, RELEASE)
     tag, notes, assets = ca.github_latest_release()
     assert tag == "2.20.0" and notes == "notes here"
-    assert assets["room-control.exe"] == "https://example.test/room-control.exe"
+    assert assets["room-control.exe"].endswith("/room-control.exe")
     assert calls and "releases/latest" in calls[0]
 
 
@@ -76,6 +76,19 @@ def test_check_for_update_ignores_missing_asset(monkeypatch):
 def test_check_for_update_ignores_same_version(monkeypatch):
     payload = dict(RELEASE, tag_name="v2.19.0")
     _fake_github(monkeypatch, payload)
+    assert ca.check_for_update("room-control.exe") is None
+
+
+def test_check_for_update_requires_trusted_urls_and_a_checksum(monkeypatch):
+    missing_sums = dict(RELEASE, assets=RELEASE["assets"][:1])
+    _fake_github(monkeypatch, missing_sums)
+    assert ca.check_for_update("room-control.exe") is None
+
+    untrusted = dict(RELEASE, assets=[
+        {"name": "room-control.exe", "browser_download_url": "file:///tmp/evil.exe"},
+        RELEASE["assets"][1],
+    ])
+    _fake_github(monkeypatch, untrusted)
     assert ca.check_for_update("room-control.exe") is None
 
 
@@ -103,6 +116,26 @@ def test_stage_and_swap_requires_the_packaged_exe():
     assert "packaged executable" in message
 
 
+@pytest.mark.parametrize("asset_name", [
+    "../room-control.exe",
+    r"..\\room-control.exe",
+    'room-control.exe"&calc.exe',
+    "not-an-executable.zip",
+])
+def test_stage_and_swap_rejects_unsafe_asset_names_before_download(
+        asset_name, monkeypatch):
+    monkeypatch.setattr(ca.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(
+        ca, "download_update",
+        lambda *args, **kwargs: pytest.fail("unsafe asset must not download"))
+    ok, message = ca.stage_and_swap_update(
+        "https://github.com/OWNER/PROJECT/releases/download/v2.20.0/asset.exe",
+        asset_name,
+        "https://github.com/OWNER/PROJECT/releases/download/v2.20.0/SHA256SUMS.txt")
+    assert ok is False
+    assert "invalid update asset name" in message
+
+
 def test_verify_against_sums_matches_the_release_list(tmp_path, monkeypatch):
     target = tmp_path / "room-control.exe"
     target.write_bytes(b"payload")
@@ -114,9 +147,9 @@ def test_verify_against_sums_matches_the_release_list(tmp_path, monkeypatch):
         return FakeResponse(sums)
 
     monkeypatch.setattr(ca.urllib.request, "urlopen", fake_urlopen)
-    assert ca.verify_against_sums("https://example.test/sums", "room-control.exe",
+    assert ca.verify_against_sums(RELEASE["assets"][1]["browser_download_url"], "room-control.exe",
                                   target) is True
-    assert ca.verify_against_sums("https://example.test/sums", "other.exe",
+    assert ca.verify_against_sums(RELEASE["assets"][1]["browser_download_url"], "other.exe",
                                   target) is False
 
 
@@ -134,7 +167,8 @@ def test_verify_accepts_dist_relative_sums(tmp_path, monkeypatch):
         return FakeResponse(sums)
 
     monkeypatch.setattr(ca.urllib.request, "urlopen", fake_urlopen)
-    assert ca.verify_against_sums("https://x/sums", "room-control.exe", target) is True
+    assert ca.verify_against_sums(RELEASE["assets"][1]["browser_download_url"],
+                                  "room-control.exe", target) is True
 
 
 def test_verify_accepts_flat_sums(tmp_path, monkeypatch):
@@ -148,7 +182,8 @@ def test_verify_accepts_flat_sums(tmp_path, monkeypatch):
         return FakeResponse(("{0}  room-control.exe\n".format(digest)).encode())
 
     monkeypatch.setattr(ca.urllib.request, "urlopen", fake_urlopen)
-    assert ca.verify_against_sums("https://x/sums", "room-control.exe", target) is True
+    assert ca.verify_against_sums(RELEASE["assets"][1]["browser_download_url"],
+                                  "room-control.exe", target) is True
 
 
 def test_cmd_update_dispatches_without_config(monkeypatch, capsys):
@@ -193,14 +228,14 @@ def test_sums_lookup_falls_back_to_prefixed_sums_file(monkeypatch):
     """v2.19.1 published the flat sums as release-SHA256SUMS.txt."""
     payload = dict(RELEASE, assets=[
         {"name": "room-control.exe",
-         "browser_download_url": "https://example.test/room-control.exe"},
+         "browser_download_url": RELEASE["assets"][0]["browser_download_url"]},
         {"name": "release-SHA256SUMS.txt",
-         "browser_download_url": "https://example.test/release-SHA256SUMS.txt"},
+         "browser_download_url": "https://github.com/OWNER/PROJECT/releases/download/v2.20.0/release-SHA256SUMS.txt"},
     ])
     _fake_github(monkeypatch, payload)
     tag, url, sums, notes = ca.check_release_assets("room-control.exe")
     assert tag == "2.20.0"
-    assert sums == "https://example.test/release-SHA256SUMS.txt"
+    assert sums.endswith("/release-SHA256SUMS.txt")
 
 
 def test_download_update_streams_bytes(tmp_path, monkeypatch):
@@ -211,8 +246,42 @@ def test_download_update_streams_bytes(tmp_path, monkeypatch):
 
     monkeypatch.setattr(ca.urllib.request, "urlopen", fake_urlopen)
     target = tmp_path / "asset.exe"
-    assert ca.download_update("https://example.test/a.exe", str(target)) == len(body)
+    assert ca.download_update(
+        "https://github.com/OWNER/PROJECT/releases/download/v2.20.0/a.exe",
+        str(target)) == len(body)
     assert target.read_bytes() == body
+
+
+@pytest.mark.parametrize("url", [
+    "file:///tmp/asset.exe",
+    "http://github.com/OWNER/PROJECT/releases/download/v2.20.0/asset.exe",
+    "https://github.com.evil.example/OWNER/PROJECT/releases/download/v2.20.0/asset.exe",
+    "https://github.com@evil.example/OWNER/PROJECT/releases/download/v2.20.0/asset.exe",
+    "https://github.com:8443/OWNER/PROJECT/releases/download/v2.20.0/asset.exe",
+])
+def test_download_rejects_untrusted_release_urls_before_network(url, tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        ca.urllib.request, "urlopen",
+        lambda *args, **kwargs: pytest.fail("untrusted URL must not reach the network"))
+    target = tmp_path / "asset.exe"
+    with pytest.raises(ValueError, match="update URL"):
+        ca.download_update(url, target)
+    assert not target.exists()
+
+
+def test_download_rejects_untrusted_redirect_before_writing(tmp_path, monkeypatch):
+    class RedirectResponse(FakeResponse):
+        def geturl(self):
+            return "file:///tmp/asset.exe"
+
+    monkeypatch.setattr(ca.urllib.request, "urlopen",
+                        lambda *args, **kwargs: RedirectResponse(b"asset"))
+    target = tmp_path / "asset.exe"
+    with pytest.raises(ValueError, match="update URL"):
+        ca.download_update(
+            "https://github.com/OWNER/PROJECT/releases/download/v2.20.0/asset.exe",
+            target)
+    assert not target.exists()
 
 
 def test_self_update_full_flow_stages_the_swap(tmp_path, monkeypatch):
@@ -280,20 +349,34 @@ def test_self_update_refuses_a_checksum_mismatch(tmp_path, monkeypatch):
     assert not (exe_dir / "room-control.exe.new").exists()
 
 
-def test_run_remote_tests_targets_windows_host(monkeypatch):
-    """Windows-only tests run on 192.168.1.85 via tools/run_remote_tests.py."""
+def test_run_remote_tests_uses_explicit_windows_target(monkeypatch):
     import run_remote_tests as rrt
 
-    assert rrt.HOST == "192.168.1.85"
+    monkeypatch.setattr(rrt, "HOST", "windows.example")
+    monkeypatch.setattr(rrt, "USER", "tester")
+    monkeypatch.setattr(rrt, "REMOTE_DIR", r"C:\project")
     cmd = rrt.build_command(["tests/test_web_status_gui.py", "-q"])
     joined = " ".join(cmd)
-    assert "cvsz@192.168.1.85" in joined
+    assert "tester@windows.example" in joined
     assert "-m pytest tests/test_web_status_gui.py -q" in joined
+
+
+def test_run_remote_tests_requires_explicit_windows_target(monkeypatch):
+    import run_remote_tests as rrt
+
+    monkeypatch.setattr(rrt, "HOST", "")
+    monkeypatch.setattr(rrt, "USER", "")
+    monkeypatch.setattr(rrt, "REMOTE_DIR", "")
+    with pytest.raises(ValueError, match="CAMFROG_WINDOWS_HOST"):
+        rrt.build_command(["tests/test_web_status_gui.py", "-q"])
 
 
 def test_run_remote_tests_default_is_the_gui_suite(monkeypatch):
     import run_remote_tests as rrt
 
+    monkeypatch.setattr(rrt, "HOST", "windows.example")
+    monkeypatch.setattr(rrt, "USER", "tester")
+    monkeypatch.setattr(rrt, "REMOTE_DIR", r"C:\project")
     seen = []
     monkeypatch.setattr(rrt.subprocess, "run",
                         lambda cmd: seen.append(cmd) or type("R", (), {"returncode": 0})())

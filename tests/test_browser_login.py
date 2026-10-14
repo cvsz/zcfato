@@ -1,6 +1,7 @@
 """Offline tests for the browser-login harvester (fake CDP server)."""
 import base64
 import hashlib
+import http.server
 import json
 import socket
 import sys
@@ -58,7 +59,8 @@ def fake_cdp():
             key = [ln.split(b": ", 1)[1] for ln in req.split(b"\r\n")
                    if b"Sec-WebSocket-Key" in ln][0]
             accept = base64.b64encode(hashlib.sha1(
-                key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11").digest())
+                key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
+                usedforsecurity=False).digest())
             conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n"
                          b"Connection: Upgrade\r\nSec-WebSocket-Accept: " + accept
                          + b"\r\n\r\n")
@@ -116,3 +118,141 @@ def test_find_browser_returns_none_off_windows():
 def test_websocket_rejects_non_ws_urls():
     with pytest.raises(ValueError):
         bl._WebSocket("http://example.test")
+
+
+@pytest.mark.parametrize("url", [
+    "ws://example.test:9222/devtools/page/1",
+    "ws://127.0.0.1.evil.test:9222/devtools/page/1",
+    "ws://user@127.0.0.1:9222/devtools/page/1",
+])
+def test_websocket_rejects_non_loopback_targets_before_connect(url, monkeypatch):
+    monkeypatch.setattr(
+        bl.socket, "create_connection",
+        lambda *args, **kwargs: pytest.fail("untrusted target must not connect"))
+    with pytest.raises(ValueError):
+        bl._WebSocket(url)
+
+
+def test_find_page_target_rejects_remote_websocket(monkeypatch):
+    monkeypatch.setattr(bl, "_http_json", lambda _url: [{
+        "type": "page",
+        "webSocketDebuggerUrl": "ws://evil.example:9222/devtools/page/1",
+    }])
+    with pytest.raises(OSError, match="no browser page target"):
+        bl._find_page_target(9222)
+
+
+def test_websocket_handshake_keeps_early_frame_bytes():
+    key = b"dGhlIHNhbXBsZSBub25jZQ=="
+    accept = base64.b64encode(hashlib.sha1(
+        key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
+        usedforsecurity=False).digest())
+    frame = b"\x81\x02{}"
+
+    class FakeSocket:
+        def recv(self, _size):
+            return (b"HTTP/1.1 101 Switching Protocols\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n" + frame)
+
+    ws = bl._WebSocket.__new__(bl._WebSocket)
+    ws.sock = FakeSocket()
+    ws.buf = b""
+    ws._read_http_headers(key)
+    assert ws.buf == frame
+
+
+def test_websocket_rejects_invalid_accept_header():
+    class FakeSocket:
+        def recv(self, _size):
+            return (b"HTTP/1.1 101 Switching Protocols\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    b"Sec-WebSocket-Accept: invalid\r\n\r\n")
+
+    ws = bl._WebSocket.__new__(bl._WebSocket)
+    ws.sock = FakeSocket()
+    ws.buf = b""
+    with pytest.raises(OSError, match="handshake refused"):
+        ws._read_http_headers(b"dGhlIHNhbXBsZSBub25jZQ==")
+
+
+def test_local_devtools_http_does_not_follow_redirects():
+    redirects = []
+
+    class RedirectHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            redirects.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", "http://example.invalid/collect")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        with pytest.raises(OSError, match="HTTP 302"):
+            bl._http_json("http://127.0.0.1:{0}/json/list".format(port))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert redirects == ["/json/list"]
+
+
+def test_browser_login_removes_temporary_profile_and_closes_browser(
+        tmp_path, monkeypatch):
+    profile = tmp_path / "temporary-login-profile"
+
+    class FakeProcess:
+        pid = 43210
+
+    class FakeWebSocket:
+        closed = False
+
+        def close(self):
+            self.closed = True
+
+    process, websocket = FakeProcess(), FakeWebSocket()
+    closed_processes = []
+    monkeypatch.setattr(bl, "find_browser", lambda: "fake-browser")
+    monkeypatch.setattr(bl, "_free_port", lambda: 43211)
+    monkeypatch.setattr(bl.tempfile, "mkdtemp", lambda **_kwargs: str(profile))
+    monkeypatch.setattr(bl.subprocess, "Popen", lambda *a, **k: process)
+    monkeypatch.setattr(bl, "_close_browser_process",
+                        lambda child: closed_processes.append(child))
+    monkeypatch.setattr(bl, "_find_page_target", lambda _port: "ws://127.0.0.1:43211/x")
+    monkeypatch.setattr(bl, "_WebSocket", lambda _url: websocket)
+    monkeypatch.setattr(bl, "_cdp_call", lambda *_args: {"result": {"cookies": _COOKIES}})
+
+    cookies, retained_profile = bl.browser_login(timeout=1)
+
+    assert "PHPSESSID=abc123" in cookies
+    assert retained_profile is None
+    assert not profile.exists()
+    assert websocket.closed
+    assert closed_processes == [process]
+
+
+def test_browser_login_can_keep_explicitly_requested_profile(
+        tmp_path, monkeypatch):
+    profile = tmp_path / "retained-login-profile"
+    process = SimpleNamespace(pid=43212)
+    websocket = SimpleNamespace(close=lambda: None)
+    monkeypatch.setattr(bl, "find_browser", lambda: "fake-browser")
+    monkeypatch.setattr(bl, "_free_port", lambda: 43213)
+    monkeypatch.setattr(bl.tempfile, "mkdtemp", lambda **_kwargs: str(profile))
+    monkeypatch.setattr(bl.subprocess, "Popen", lambda *a, **k: process)
+    monkeypatch.setattr(bl, "_close_browser_process",
+                        lambda _child: pytest.fail("browser should remain open"))
+    monkeypatch.setattr(bl, "_find_page_target", lambda _port: "ws://127.0.0.1:43213/x")
+    monkeypatch.setattr(bl, "_WebSocket", lambda _url: websocket)
+    monkeypatch.setattr(bl, "_cdp_call", lambda *_args: {"result": {"cookies": _COOKIES}})
+
+    _cookies, retained_profile = bl.browser_login(timeout=1, keep_browser=True)
+
+    assert retained_profile == str(profile)
+    assert profile.is_dir()

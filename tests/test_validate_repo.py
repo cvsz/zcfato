@@ -31,3 +31,12 @@ def test_broken_link_still_reported(tmp_path, monkeypatch):
     (tmp_path / "README.md").write_text("[x](docs/missing.md)\n", encoding="utf-8")
     monkeypatch.setattr(validate_repo, "ROOT", tmp_path)
     assert any("missing.md" in e for e in validate_repo.validate_markdown_links())
+
+
+def test_make_target_runs_only_template_checks_without_pytest_tree_discovery():
+    makefile = validate_repo.ROOT / "Makefile"
+    text = makefile.read_text(encoding="utf-8")
+    target = text.split("validate-template:\n", 1)[1].split("\n\n", 1)[0]
+    assert "python3 scripts/validate_repo.py" in target
+    assert "-p 'test_bootstrap.py'" in target
+    assert "unittest discover -s tests -v" not in target

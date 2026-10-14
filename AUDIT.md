@@ -1,4 +1,4 @@
-# AUDIT.md — camfrog-auto v2.18 review
+# AUDIT.md — Source Audit (2026-10-11)
 
 **Historical audit snapshot.** This review records findings for the v2.18 source state only. Later features and the ZChat Control Server have separate current documentation; do not use this file as current release evidence.
 

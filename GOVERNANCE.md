@@ -16,8 +16,10 @@ This document defines the default governance model for projects created from thi
 Normal changes flow through pull requests with required checks and review. Repository administration controls should be verified with:
 
 ```bash
-python3 scripts/github_admin.py --repo OWNER/REPO --verify
+python3 scripts/github_admin.py --repo OWNER/REPOSITORY --branch DEFAULT_BRANCH --required-check "EXACT_CHECK_NAME" --verify
 ```
+
+Include `--branch DEFAULT_BRANCH` and repeat `--required-check "EXACT_CHECK_NAME"` for every exact status-check context configured in that repository. The helper does not assume a repository or check name.
 
 A generated repository should not rely on documentation alone to prove that its branch protections or security settings are effective.
 

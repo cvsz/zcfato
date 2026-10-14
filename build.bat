@@ -9,13 +9,8 @@ rem ============================================================
 rem Select supported 64-bit Python
 rem ============================================================
 set "PYSEL="
-
-for %%V in (3.12 3.13 3.11 3.14) do (
-    if not defined PYSEL (
-        py -%%V-64 -c "import sys" >nul 2>&1
-        if not errorlevel 1 set "PYSEL=py -%%V-64"
-    )
-)
+py -3.12-64 -c "import sys" >nul 2>&1
+if not errorlevel 1 set "PYSEL=py -3.12-64"
 
 if not defined PYSEL set "PYSEL=python"
 
@@ -171,6 +166,7 @@ if exist "dist\status-changer\status-changer.exe" del /q "dist\status-changer\st
 if exist "dist\im-autoreply\im-autoreply.exe" del /q "dist\im-autoreply\im-autoreply.exe"
 if exist "dist\music-dj\music-dj.exe" del /q "dist\music-dj\music-dj.exe"
 if exist "dist\web-status\web-status.exe" del /q "dist\web-status\web-status.exe"
+if exist "dist\web-status.exe" del /q "dist\web-status.exe"
 if exist "dist\camfrog-auto.exe" del /q "dist\camfrog-auto.exe"
 if exist "dist\camfrog-auto-gui.exe" del /q "dist\camfrog-auto-gui.exe"
 if exist "dist\zcfato.exe" del /q "dist\zcfato.exe"
@@ -357,12 +353,12 @@ rem Error handlers
 
 echo.
 echo pywin32 has no wheel for this Python.
-echo Install Python 3.13 64-bit, delete .venv, then run build.bat again.
+echo Install CPython 3.12 64-bit, delete .venv, then run build.bat again.
 echo.
 echo ไม่มี pywin32 สำหรับ Python ตัวนี้
-echo ติดตั้ง Python 3.13 แบบ 64-bit ลบ .venv แล้วรัน build.bat ใหม่
+echo ติดตั้ง CPython 3.12 แบบ 64-bit ลบ .venv แล้วรัน build.bat ใหม่
 echo.
-echo winget install Python.Python.3.13
+echo winget install Python.Python.3.12
 
 goto :fail
 
@@ -370,9 +366,9 @@ goto :fail
 :nopython
 echo.
 echo Python not found or unusable.
-echo Install Python 3.13 64-bit:
+echo Install CPython 3.12 64-bit:
 echo.
-echo winget install Python.Python.3.13
+echo winget install Python.Python.3.12
 echo.
 echo ไม่พบ Python หรือ Python ไม่รองรับ
 

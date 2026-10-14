@@ -28,7 +28,7 @@ Root policy documents define ownership, contribution, security, evidence, and re
 
 `scripts/validate_repo.py` checks required template structure and local Markdown links.
 
-`tests/` validates bootstrap behavior.
+`tests/` validates bootstrap behavior. `make validate-template` runs those isolated bootstrap tests after the structure/link validator; it does not discover project-wide tests.
 
 Application-specific lint/test/build/security validation must be added by generated projects.
 

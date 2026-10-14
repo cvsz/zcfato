@@ -121,8 +121,9 @@ def test_doctor_bat_runs_once_and_matches_build_selection():
     doc = (root / "doctor.bat").read_text(encoding="utf-8")
     bld = (root / "build.bat").read_text(encoding="utf-8")
     assert "||" not in doc  # the old `py ... || python ...` ran doctor twice on failure
-    cand = "for %%V in (3.12 3.13 3.11 3.14) do ("
-    assert cand in doc and cand in bld
+    selection = 'py -3.12-64 -c "import sys"'
+    assert selection in doc and selection in bld
+    assert 'set "PYSEL=py -3.12-64"' in doc and 'set "PYSEL=py -3.12-64"' in bld
 
 
 def test_missing_window_is_a_clean_error_not_a_traceback(tmp_path, monkeypatch):
@@ -198,3 +199,11 @@ def test_bat_files_are_crlf():
     for p in list(root.glob("*.bat")) + list((root / "extras").glob("*.bat")):
         b = p.read_bytes()
         assert b.count(b"\n") == b.count(b"\r\n"), f"{p.name} has bare LF (cmd.exe breaks)"
+
+
+def test_build_cleans_stale_root_web_status_exe_before_packaging():
+    root = Path(__file__).resolve().parent.parent
+    build = (root / "build.bat").read_text(encoding="utf-8")
+    cleanup = r'if exist "dist\web-status.exe" del /q "dist\web-status.exe"'
+    assert cleanup in build
+    assert build.index(cleanup) < build.index("tools\\package.py")

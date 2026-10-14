@@ -1,5 +1,9 @@
 """Tk-free tests for the web status GUI routing (no display needed)."""
+import base64
+import hashlib
+import http.server
 import sys
+import threading
 
 import pytest
 from pathlib import Path
@@ -18,15 +22,107 @@ def test_any_args_mean_cli():
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ("20", 20.0),
-    ("20.0", 20.0),
+    ("2", 2.0),
+    ("2.0", 2.0),
     ("5", 5.0),
-    ("1", 5.0),      # clamped to the minimum
+    ("1", 2.0),      # clamped to the minimum
     ("500", 120.0),  # clamped to the maximum
-    (20, 20.0),
+    (2, 2.0),
 ])
 def test_parse_timeout_accepts_and_clamps(raw, expected):
     assert wsg.parse_timeout(raw) == expected
+
+
+def test_web_status_gui_timeout_defaults_to_fifteen_seconds():
+    assert wsg.TIMEOUT_DEFAULT == 15.0
+    assert wsg.build_parser().parse_args(["--status", "hello"]).timeout == 15.0
+
+
+@pytest.mark.parametrize("url", [
+    "ws://evil.example:9222/devtools/page/1",
+    "ws://127.0.0.1.evil.example:9222/devtools/page/1",
+])
+def test_inlined_browser_login_rejects_non_loopback_websocket(url, monkeypatch):
+    monkeypatch.setattr(
+        wsg.socket, "create_connection",
+        lambda *args, **kwargs: pytest.fail("untrusted target must not connect"))
+    with pytest.raises(ValueError):
+        wsg._WebSocket(url)
+
+
+def test_inlined_browser_login_keeps_early_websocket_frame():
+    key = b"dGhlIHNhbXBsZSBub25jZQ=="
+    accept = base64.b64encode(hashlib.sha1(
+        key + b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11",
+        usedforsecurity=False).digest())
+    frame = b"\x81\x02{}"
+
+    class FakeSocket:
+        def recv(self, _size):
+            return (b"HTTP/1.1 101 Switching Protocols\r\n"
+                    b"Upgrade: websocket\r\nConnection: Upgrade\r\n"
+                    b"Sec-WebSocket-Accept: " + accept + b"\r\n\r\n" + frame)
+
+    ws = wsg._WebSocket.__new__(wsg._WebSocket)
+    ws.sock = FakeSocket()
+    ws.buf = b""
+    ws._read_http_headers(key)
+    assert ws.buf == frame
+
+
+def test_inlined_devtools_http_rejects_redirects_without_following():
+    requested_paths = []
+
+    class RedirectHandler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            requested_paths.append(self.path)
+            self.send_response(302)
+            self.send_header("Location", "http://example.invalid/collect")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        port = server.server_address[1]
+        with pytest.raises(OSError, match="HTTP 302"):
+            wsg._http_json("http://127.0.0.1:{0}/json/list".format(port))
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+    assert requested_paths == ["/json/list"]
+
+
+def test_inlined_browser_login_cleans_temporary_profile(tmp_path, monkeypatch):
+    profile = tmp_path / "temporary-login-profile"
+    process = object()
+    websocket = type("FakeWebSocket", (), {"close": lambda self: None})()
+    closed_processes = []
+    cookies = [
+        {"name": "PHPSESSID", "value": "abc123", "domain": ".camfrog.com"},
+    ]
+    monkeypatch.setattr(wsg, "find_browser", lambda: "fake-browser")
+    monkeypatch.setattr(wsg, "_free_port", lambda: 43211)
+    monkeypatch.setattr(wsg.tempfile, "mkdtemp", lambda **_kwargs: str(profile))
+    monkeypatch.setattr(wsg.subprocess, "Popen", lambda *a, **k: process)
+    monkeypatch.setattr(wsg, "_close_browser_process",
+                        lambda child: closed_processes.append(child))
+    monkeypatch.setattr(wsg, "_find_page_target",
+                        lambda _port: "ws://127.0.0.1:43211/x")
+    monkeypatch.setattr(wsg, "_WebSocket", lambda _url: websocket)
+    monkeypatch.setattr(
+        wsg, "_cdp_call", lambda *_args: {"result": {"cookies": cookies}})
+
+    captured, retained_profile = wsg.browser_login(timeout=1)
+
+    assert "PHPSESSID=abc123" in captured
+    assert retained_profile is None
+    assert not profile.exists()
+    assert closed_processes == [process]
 
 
 @pytest.mark.parametrize("bad", ["", "abc", "nan", "inf", None])
@@ -118,7 +214,7 @@ def test_pasted_cookie_is_the_session_source(tmp_path, monkeypatch):
                         lambda url: opened.append(url) or True)
     manager.open_login_page()
     assert opened == [wsg.LOGIN_PAGE_URL]
-    assert "capture PHPSESSID" in manager.paste_state.cget("text")
+    assert "PHPSESSID" in manager.paste_state.cget("text")
 
 
 class _Value:
@@ -141,7 +237,11 @@ class _Label:
 
 
 class _Root:
+    def __init__(self):
+        self.scheduled = []
+
     def after(self, *args):
+        self.scheduled.append(args)
         return "rotation-id"
 
 
@@ -160,6 +260,9 @@ def _bare_manager(cookie_text="", cookie_paste="", live=True):
     manager.switching = False
     manager.rotate_job = None
     manager.chrome_mode = False
+    manager._start_generation = 0
+    manager.marquee_mode = _Value(False)
+    manager.infinity_loop = _Value(True)
     manager.root = object()
     manager.pool_vars = [_Value("hello")] + [_Value("") for _ in range(9)]
     manager._fields = lambda: ("Seaza", ["hello"])
@@ -322,15 +425,25 @@ def test_start_without_session_reports_guidance_instead_of_crashing(monkeypatch,
     assert "PHPSESSID" in manager.note.get()
 
 
-def test_live_cycle_calls_perform_update_with_supported_arguments(monkeypatch):
+def test_live_cycle_calls_perform_update_with_supported_arguments(monkeypatch, tmp_path):
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
     manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123")
     manager.switching = True
     manager.root = _Root()
     manager._session_jar = lambda: object()
-    manager._run_bg = lambda fn, force=False: fn()
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        fn()
+        if on_done:
+            on_done()
+
+    manager._run_bg = run_bg
     calls = []
 
-    def perform_update(opener, status, timeout, confirm=False):
+    def perform_update(opener, status, timeout, confirm=False, cancelled=None,
+                       on_post_started=None):
+        if on_post_started:
+            on_post_started()
         calls.append((status, timeout, confirm))
         return True, "status acknowledged"
 
@@ -340,6 +453,342 @@ def test_live_cycle_calls_perform_update_with_supported_arguments(monkeypatch):
     manager._cycle("Seaza", ["hello"], 30, 20.0, True, 0)
 
     assert calls == [("hello", 20.0, True)]
+
+
+def test_web_status_marquee_scrolls_each_message_and_settles_on_full_text():
+    text = "This is a long web status message that should scroll."
+
+    frames = wsg.web_status_frames(text, enabled=True)
+
+    assert len(frames) > 1
+    assert frames[-1] == text
+    assert len(frames) <= wsg.WEB_MARQUEE_MAX_FRAMES + 1
+    assert wsg.web_status_frames("short", enabled=True) == ["short"]
+    assert wsg.web_status_frames(text, enabled=False) == [text]
+
+
+def test_web_status_marquee_sends_one_slot_then_advances_to_next(monkeypatch, tmp_path):
+    assert wsg.WEB_MARQUEE_STEP_SECONDS == 0.5
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123")
+    manager.pool_vars = [_Value("This is a long web status message that should scroll."),
+                         _Value("next slot")] + [_Value("") for _ in range(8)]
+    manager.marquee_mode = _Value(True)
+    manager.switching = True
+    manager._start_generation = 7
+    manager.root = _Root()
+    manager._session_jar = lambda: object()
+    sent = []
+    monkeypatch.setattr(wsg.urllib.request, "build_opener", lambda *args: object())
+    def fake_update(opener, status, timeout, confirm=False, cancelled=None,
+                    on_post_started=None):
+        if on_post_started:
+            on_post_started()
+        sent.append(status)
+        return True, "status acknowledged"
+
+    monkeypatch.setattr(wsg, "perform_update", fake_update)
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        try:
+            fn()
+        except Exception:
+            if on_error:
+                on_error()
+        else:
+            if on_done:
+                on_done()
+
+    manager._run_bg = run_bg
+    manager._cycle("Seaza", [value.get() for value in manager.pool_vars if value.get()],
+                   30, 20.0, True, 0)
+
+    frames = wsg.web_status_frames(
+        "This is a long web status message that should scroll.", enabled=True)
+    assert sent == [frames[0]]
+    assert manager.root.scheduled[0][0] == 500
+
+    for _ in range(len(frames) - 1):
+        delay, callback, *args = manager.root.scheduled.pop(0)
+        assert delay == wsg.WEB_MARQUEE_STEP_SECONDS * 1000
+        callback(*args)
+
+    assert sent == frames
+    next_delay, _callback, *next_args = manager.root.scheduled[0]
+    assert next_delay == wsg.WEB_MARQUEE_STEP_SECONDS * 1000
+    assert next_args[-3] == 1
+
+
+def test_web_status_switch_every_schedules_half_second_fractional_interval():
+    manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123", live=False)
+    manager.pool_vars = [_Value("first"), _Value("next")] + [_Value("") for _ in range(8)]
+    manager.marquee_mode = _Value(False)
+    manager.infinity_loop = _Value(True)
+    manager.switching = True
+    manager._start_generation = 0
+    manager.root = _Root()
+    manager._record_activity = lambda _event: None
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        fn()
+        if on_done:
+            on_done()
+
+    manager._run_bg = run_bg
+    manager._cycle("Seaza", ["first", "next"], 0.5, 2.0, False, 0)
+
+    assert manager.root.scheduled[0][0] == 500
+
+
+def test_web_status_infinity_loop_wraps_from_last_populated_slot_to_first(monkeypatch,
+                                                                          tmp_path):
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123", live=False)
+    manager.pool_vars = [_Value("first slot")] + [_Value("") for _ in range(8)] + [
+        _Value("last slot")]
+    manager.marquee_mode = _Value(True)
+    manager.infinity_loop = _Value(True)
+    manager.switching = True
+    manager.root = _Root()
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        fn()
+        if on_done:
+            on_done()
+
+    manager._run_bg = run_bg
+
+    manager._cycle("Seaza", ["first slot", "last slot"], 30, 20.0, False, 1)
+
+    scheduled = manager.root.scheduled[0]
+    assert scheduled[0] == wsg.WEB_MARQUEE_STEP_SECONDS * 1000
+    assert scheduled[-3] == 0
+
+
+def test_web_status_marquee_without_infinity_stops_after_last_slot(monkeypatch, tmp_path):
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123", live=False)
+    manager.pool_vars = [_Value("first slot"), _Value("last slot")] + [
+        _Value("") for _ in range(8)]
+    manager.marquee_mode = _Value(True)
+    manager.infinity_loop = _Value(False)
+    manager.switching = True
+    manager.root = _Root()
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        fn()
+        if on_done:
+            on_done()
+
+    manager._run_bg = run_bg
+
+    manager._cycle("Seaza", ["first slot", "last slot"], 30, 20.0, False, 1)
+
+    assert manager.root.scheduled == []
+    assert manager.switching is False
+
+
+def test_failed_live_marquee_update_stops_without_scheduling_another_frame(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123")
+    manager.marquee_mode = _Value(True)
+    manager.switching = True
+    manager.root = _Root()
+    manager._session_jar = lambda: object()
+    monkeypatch.setattr(wsg.urllib.request, "build_opener", lambda *args: object())
+    monkeypatch.setattr(wsg, "perform_update",
+                        lambda *args, **kwargs: (False, "server refused"))
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        try:
+            fn()
+        except Exception:
+            if on_error:
+                on_error()
+        else:
+            if on_done:
+                on_done()
+
+    manager._run_bg = run_bg
+
+    manager._cycle("Seaza", ["hello"], 30, 20.0, True, 0)
+
+    assert manager.switching is False
+    assert manager.root.scheduled == []
+    log = (tmp_path / "web_status.log").read_text(encoding="utf-8")
+    assert "Live status update failed" in log
+    assert "server refused" in log
+    assert "hello" not in log
+
+
+def test_failed_live_http_error_logs_details_without_cookie_status_or_set_cookie(
+        monkeypatch, tmp_path):
+    import io
+    import urllib.error
+
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager(cookie_paste="PHPSESSID=private-cookie-value")
+    manager.switching = True
+    manager.root = _Root()
+    manager._session_jar = lambda: object()
+    monkeypatch.setattr(wsg.urllib.request, "build_opener", lambda *args: object())
+    error = urllib.error.HTTPError(
+        wsg.WEB_UPDATE_URL, 429, "Too Many Requests",
+        {"Retry-After": "10", "Content-Type": "application/json",
+         "Set-Cookie": "PHPSESSID=header-cookie-value"},
+        io.BytesIO(b'{"error":"slow down"}'))
+    monkeypatch.setattr(wsg, "perform_update",
+                        lambda *args, **kwargs: (_ for _ in ()).throw(error))
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        try:
+            fn()
+        except Exception:
+            if on_error:
+                on_error()
+        else:
+            if on_done:
+                on_done()
+
+    manager._run_bg = run_bg
+    manager._cycle("Seaza", ["private status text"], 0.5, 2.0, True, 0)
+
+    log = (tmp_path / "web_status.log").read_text(encoding="utf-8")
+    assert "HTTP 429" in log
+    assert "Too Many Requests" in log
+    assert "retry_after=10" in log
+    assert "slow down" in log
+    assert "private-cookie-value" not in log
+    assert "header-cookie-value" not in log
+    assert "private status text" not in log
+
+
+def test_http_429_json_retry_after_is_honored_without_header():
+    import io
+    import urllib.error
+
+    error = urllib.error.HTTPError(
+        wsg.WEB_UPDATE_URL, 429, "Too Many Requests",
+        {"Content-Type": "application/json"},
+        io.BytesIO(b'{"error":true,"retry_after":600}'))
+
+    detail = wsg._web_status_request_error("POST status", error)
+
+    assert "retry_after=600" in detail
+    assert wsg._web_status_retry_policy(detail, 0) == ("rate_limit", 600.0)
+
+
+def test_perform_update_cancelled_after_profile_get_skips_post(monkeypatch):
+    checks = []
+    posts = []
+
+    def is_cancelled():
+        checks.append(True)
+        return len(checks) > 1
+
+    monkeypatch.setattr(
+        wsg, "fetch_profile",
+        lambda *args: "<script>var csrf = '0123456789abcdef';</script>")
+    monkeypatch.setattr(wsg, "_post", lambda *args: posts.append(args))
+
+    with pytest.raises(wsg.WebStatusUpdateCancelled):
+        wsg.perform_update(
+            object(), "new status", 2.0, confirm=True, cancelled=is_cancelled)
+
+    assert posts == []
+
+
+def test_stop_during_live_post_logs_result_but_schedules_no_next_update(
+        monkeypatch, tmp_path):
+    monkeypatch.setattr(wsg, "BASE", tmp_path)
+    manager = _bare_manager(cookie_paste="PHPSESSID=abc1234567890123")
+    manager.switching = True
+    manager._start_generation = 7
+    manager.root = _Root()
+    manager._session_jar = lambda: object()
+    events = []
+    manager._record_activity = lambda event, **kwargs: events.append(event)
+    monkeypatch.setattr(wsg.urllib.request, "build_opener", lambda *args: object())
+
+    def stop_then_succeed(opener, status, timeout, confirm=False, cancelled=None,
+                          on_post_started=None):
+        if on_post_started:
+            on_post_started()
+        manager.stop()
+        return True, "status acknowledged"
+
+    monkeypatch.setattr(wsg, "perform_update", stop_then_succeed)
+
+    def run_bg(fn, force=False, on_done=None, on_error=None):
+        fn()
+        if on_done:
+            on_done()
+
+    manager._run_bg = run_bg
+    manager._cycle("Seaza", ["hello"], 10.0, 15.0, True, 0)
+
+    assert "rotation_stopped" in events
+    assert "status_update_succeeded" in events
+    assert manager.root.scheduled == []
+
+
+def test_web_status_failure_log_redacts_secret_fields_and_limits_detail(tmp_path):
+    path = tmp_path / "web_status.log"
+    secret_detail = (
+        "HTTP 403; PHPSESSID=server-cookie-value; csrf=csrf-value; "
+        "status=private status text; response={\"csrf\":\"json-csrf-value\", "
+        "\"authorization\":\"Bearer auth-secret-value\"}\n"
+        "Set-Cookie: PHPSESSID=header-cookie-value\nretry_after=5")
+
+    entry = wsg.append_web_status_log(
+        "status_update_failed", path, detail=secret_detail,
+        secrets=("server-cookie-value", "csrf-value", "private status text"))
+
+    assert "HTTP 403" in entry
+    for secret in ("server-cookie-value", "csrf-value", "json-csrf-value",
+                   "auth-secret-value", "private status text",
+                   "header-cookie-value"):
+        assert secret not in entry
+    assert "[redacted]" in entry
+    assert "retry_after=5" in entry
+    assert "\n" not in entry
+    assert len(entry) <= len("2026-10-11 00:00:00 +0000 | Live status update failed | ") \
+        + wsg.WEB_STATUS_LOG_DETAIL_MAX_CHARS
+
+
+def test_failure_details_are_not_accepted_for_non_failure_events(tmp_path):
+    with pytest.raises(ValueError, match="diagnostic or rotation events"):
+        wsg.append_web_status_log(
+            "status_update_succeeded", tmp_path / "web_status.log",
+            detail="diagnostic text")
+
+
+def test_web_status_log_persists_only_allowlisted_activity(tmp_path):
+    path = tmp_path / "web_status.log"
+
+    entry = wsg.append_web_status_log("session_verification_succeeded", path)
+
+    assert "Session verification succeeded" in entry
+    assert "PHPSESSID" not in entry
+    assert "abc123" not in entry
+    assert wsg.load_web_status_log(path) == [entry]
+    with pytest.raises(ValueError, match="unknown activity"):
+        wsg.append_web_status_log("PHPSESSID=abc123", path)
+
+
+def test_web_status_log_rotates_and_limits_gui_history(tmp_path, monkeypatch):
+    path = tmp_path / "web_status.log"
+    monkeypatch.setattr(wsg, "WEB_STATUS_LOG_MAX_BYTES", 1)
+
+    first = wsg.append_web_status_log("session_verification_succeeded", path)
+    second = wsg.append_web_status_log("dry_run_rotation_started", path)
+
+    assert first != second
+    assert path.read_text(encoding="utf-8").strip() == second
+    assert (tmp_path / "web_status.log.1").read_text(encoding="utf-8").strip() == first
+    monkeypatch.setattr(wsg, "WEB_STATUS_LOG_GUI_LINES", 1)
+    assert wsg.load_web_status_log(path) == [second]
 
 
 def test_web_text_database_persists_ten_status_lines(tmp_path):
@@ -401,10 +850,12 @@ def test_login_arms_automation(tmp_path, monkeypatch):
     manager = wsg.WebStatusManager()
     manager.root.update()
     assert getattr(manager, "session_ready", False) is False
+    manager.switch_language()
+    manager.switch_language()  # Switch back to English
 
     monkeypatch.setattr(wsg, "fetch_profile", lambda *a: _signed_in_page())
     manager.cookie_paste_var.set("PHPSESSID=abc1234567890123")
-    assert manager.btn_login.cget("text") == "Login"
+    assert "Login" in manager.btn_login.cget("text")
     manager.btn_login.invoke()
     for _ in range(50):
         manager.root.update()
@@ -462,7 +913,10 @@ def test_start_chains_login_then_rotation(tmp_path, monkeypatch):
     monkeypatch.setattr(wsg, "fetch_profile", lambda *a: _signed_in_page())
     posted = []
 
-    def fake_perform_update(opener, status, timeout, confirm=False):
+    def fake_perform_update(opener, status, timeout, confirm=False, cancelled=None,
+                            on_post_started=None):
+        if on_post_started:
+            on_post_started()
         posted.append((status, timeout, confirm))
         return True, "status updated."
 
@@ -481,7 +935,7 @@ def test_start_chains_login_then_rotation(tmp_path, monkeypatch):
         import time
         time.sleep(0.05)
     assert posted, "rotation never started after chained login"
-    assert posted[0] == ("hello world", 20.0, True)
+    assert posted[0] == ("hello world", wsg.TIMEOUT_DEFAULT, True)
     assert wsg.load_web_text_lines(tmp_path / "webtext.db")[9] == "last line"
     assert manager.session_ready is True
     manager.stop()

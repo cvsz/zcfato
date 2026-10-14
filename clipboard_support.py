@@ -40,7 +40,7 @@ def set_clipboard_text(root, text):
         return
     root.clipboard_clear()
     root.clipboard_append(text)
-    root.update()
+    root.update_idletasks()
 
 
 def get_clipboard_text(root):
@@ -153,10 +153,12 @@ class ClipboardController:
         import tkinter as tk
 
         self.root = root
-        self.translate = translate or (lambda text: text)
+        self.translate = translate or (lambda text: str(text).partition("|")[0])
         self.on_error = on_error
         self.target = None
         self.widgets = []
+        import weakref
+        self._installed_widgets = weakref.WeakSet()
         self.menu = tk.Menu(root, tearoff=False)
         for label, action in (("Cut|ตัด", "cut"), ("Copy|คัดลอก", "copy"),
                               ("Paste|วาง", "paste")):
@@ -166,21 +168,68 @@ class ClipboardController:
         self.menu.add_command(label=self.translate("Select all|เลือกทั้งหมด"),
                               command=lambda: self.select_all(self.target))
 
+    def refresh_menu(self):
+        """Refresh localized labels after the GUI language changes."""
+        labels = ("Cut|ตัด", "Copy|คัดลอก", "Paste|วาง",
+                  "Select all|เลือกทั้งหมด")
+        for index, label in enumerate(labels):
+            self.menu.entryconfigure(index if index < 3 else 4,
+                                     label=self.translate(label))
+
     def install(self, parent):
+        """Bind editors recursively, including controls added after the first build."""
         for widget in parent.winfo_children():
             widget_class = _widget_class(widget)
-            if widget_class in _WIDGET_CLASSES:
+            if widget_class in _WIDGET_CLASSES and widget not in self._installed_widgets:
+                self._installed_widgets.add(widget)
                 self.widgets.append(widget)
+                if widget_class in {"Text", "Listbox"}:
+                    try:
+                        widget.configure(
+                            background="#ffffff" if widget_class == "Text" else "#fffdfa",
+                            foreground="#283648", selectbackground="#8b672b",
+                            selectforeground="#fffdfa", insertbackground="#283648",
+                            highlightbackground="#d5c8ac", highlightcolor="#8b672b")
+                    except Exception:
+                        pass
                 for sequence, action in (
                     ("<Control-c>", "copy"), ("<Control-x>", "cut"),
                     ("<Control-v>", "paste"), ("<Control-Insert>", "copy"),
                     ("<Shift-Delete>", "cut"), ("<Shift-Insert>", "paste"),
                 ):
                     widget.bind(sequence, lambda event, op=action: self.handle(event, op), add="+")
+                # The generic key binding also recognizes Windows virtual-key
+                # codes and control characters when a Thai/non-Latin layout
+                # reports an unknown keysym for Ctrl+A/C/V/X.
+                widget.bind("<Control-KeyPress>", self.handle_control_key, add="+")
                 widget.bind("<Control-a>", self._select_all_event, add="+")
                 widget.bind("<Button-3>", self.show_menu, add="+")
                 widget.bind("<Shift-F10>", self.show_menu, add="+")
             self.install(widget)
+
+    def handle_control_key(self, event):
+        """Dispatch Ctrl+A/C/V/X consistently across keyboard layouts."""
+        keysym = str(getattr(event, "keysym", "")).lower()
+        char = str(getattr(event, "char", "") or "")
+        try:
+            keycode = int(getattr(event, "keycode", -1))
+        except (TypeError, ValueError):
+            keycode = -1
+        shortcuts = {
+            "a": ({"a", "\x01"}, 65, None),
+            "c": ({"c", "\x03"}, 67, "copy"),
+            "v": ({"v", "\x16"}, 86, "paste"),
+            "x": ({"x", "\x18"}, 88, "cut"),
+        }
+        key = next((name for name, (chars, code, _action) in shortcuts.items()
+                    if keysym == name or char in chars or keycode == code), None)
+        if key is None:
+            return None
+        self.target = event.widget
+        _chars, _code, action = shortcuts[key]
+        if action is None:
+            return self._select_all_event(event)
+        return self.handle(event, action)
 
     def perform(self, widget, action):
         if widget is None:

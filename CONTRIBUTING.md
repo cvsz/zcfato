@@ -43,4 +43,11 @@ make validate-template
 
 Do not merge from an older green commit after the PR head changes. Required checks must pass for the current exact head.
 
-Repository-administration changes require an authenticated admin identity and read-back verification with `scripts/github_admin.py --verify`; configuration intent alone is not evidence.
+Repository-administration changes require an authenticated admin identity and read-back verification. Supply the exact target repository, branch, and each required status-check name; the helper deliberately has no built-in repository or check defaults:
+
+```bash
+python3 scripts/github_admin.py --repo OWNER/REPOSITORY --branch DEFAULT_BRANCH \
+  --required-check "EXACT_CHECK_NAME" --verify
+```
+
+Configuration intent alone is not evidence.

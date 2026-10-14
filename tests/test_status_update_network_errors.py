@@ -47,7 +47,6 @@ def test_release_metadata_rejects_invalid_json_shapes(module_name, payload, monk
 def test_manual_update_worker_handles_rate_limit(module_name, monkeypatch):
     """Manual update's SECOND network request must not raise in the daemon worker."""
     import urllib.error
-    import threading
     import queue
     module = __import__(module_name)
     result = queue.Queue()
@@ -70,8 +69,6 @@ def test_manual_update_worker_handles_rate_limit(module_name, monkeypatch):
         raise urllib.error.HTTPError("https://api.github.com/", 403,
                                      "rate limit exceeded", {}, None)
     monkeypatch.setattr(module, "self_update", fail)
-    original = threading.Thread
-    spawned = []
     class SynchronousThread:
         def __init__(self, target, **kwargs):
             self.target = target
@@ -84,7 +81,8 @@ def test_manual_update_worker_handles_rate_limit(module_name, monkeypatch):
     method = next(node for node in ast.walk(tree)
                   if isinstance(node, ast.FunctionDef) and node.name == "check_update")
     namespace = {}
-    exec(compile(ast.Module(body=[method], type_ignores=[]), "<isolated-method>", "exec"), 
+    # Isolate this unit-test target by compiling its AST from repository source.
+    exec(compile(ast.Module(body=[method], type_ignores=[]), "<isolated-method>", "exec"),  # nosec B102
          {"threading": module.threading, "self_update": module.self_update,
           "logging": module.logging}, namespace)
     namespace["check_update"](FakeWindow())

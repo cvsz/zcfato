@@ -174,9 +174,19 @@ class Harness:
     """Runner with a scripted IM log per window and a recording commit()."""
     def __init__(self, cfg, monkeypatch):
         self.logs, self.sent = {}, []
+        self.cfg = cfg
         self.r = c.Runner(cfg)
         monkeypatch.setattr(c, "read_chat", lambda ctrl, tail=150: "\n".join(self.logs[ctrl]))
-        monkeypatch.setattr(c, "commit", lambda win, ctrl, text, dry, *a, **k: self.sent.append((win.handle, text, dry)) or True)
+        monkeypatch.setattr(c, "commit", self.commit)
+        monkeypatch.setattr(c, "reveal_chat_message", lambda *_args: False)
+
+    def commit(self, win, ctrl, text, dry, *args, **kwargs):
+        self.sent.append((win.handle, text, dry))
+        if not dry:
+            own = self.cfg["autoreply"]["own_nickname"]
+            history = self.r.im_wins[win.handle]["hist"]
+            self.logs[history].append(f"{own}: {text}")
+        return True
 
     def open(self, h, lines, first=False):
         w = FakeWin(h)

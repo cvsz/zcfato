@@ -123,6 +123,7 @@ def build_app(config_path=CONFIG_PATH):
             self.config_path = Path(path).resolve()
             self.config = load_config(self.config_path)
             self.root = tk.Tk()
+            self.root.configure(background="#f4f1e8")
             self.root.title("LINE Status Changer")
             self.root.geometry("560x600")
             self.root.minsize(500, 520)
@@ -207,18 +208,18 @@ def build_app(config_path=CONFIG_PATH):
                 style.theme_use("clam")
             except tk.TclError:
                 pass
-            style.configure("TFrame", background="#edf2f5")
-            style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
-            style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
-            style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
-            style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83", font=("Segoe UI", 9, "bold"))
-            style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9), background="#d9e8f0", foreground="#1a3a52")
-            style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
-            style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff", foreground="#152b3a")
-            style.configure("TNotebook", background="#edf2f5")
+            style.configure("TFrame", background="#f4f1e8")
+            style.configure("TLabel", background="#f4f1e8", foreground="#283648", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TLabelframe", background="#f4f1e8", bordercolor="#d5c8ac")
+            style.configure("TLabelframe.Label", background="#f4f1e8", foreground="#8b672b", font=("Segoe UI", 9, "bold"))
+            style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9), background="#ebe5d9", foreground="#283648")
+            style.map("TButton", background=[("active", "#d6e9e8"), ("pressed", "#d5c8ac")])
+            style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff", foreground="#283648")
+            style.configure("TNotebook", background="#f4f1e8")
             style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
-            style.configure("Title.TLabel", font=("Segoe UI", 12, "bold"), foreground="#13a34a")
-            style.configure("Hint.TLabel", font=("Segoe UI", 8), foreground="#5a6570")
+            style.configure("Title.TLabel", font=("Segoe UI", 12, "bold"), foreground="#8b672b")
+            style.configure("Hint.TLabel", font=("Segoe UI", 8), foreground="#626d7a")
             style.configure("State.TLabel", font=("Segoe UI", 9, "bold"))
 
             outer = ttk.Frame(self.root, padding=10)
@@ -854,14 +855,14 @@ def build_app(config_path=CONFIG_PATH):
                             self.line_hwnd = self.line_pid = None
                     if self.line_hwnd and self.line_pid:
                         self.line_state.configure(text="พบหน้าต่าง LINE — เปิดช่อง Status message ก่อนกด Set",
-                                                  foreground="#138a55")
+                                                  foreground="#28744c")
                     else:
-                        self.line_state.configure(text="ยังไม่พบหน้าต่าง LINE", foreground="#a52834")
+                        self.line_state.configure(text="ยังไม่พบหน้าต่าง LINE", foreground="#9f3740")
                 except Exception:
                     logging.exception("LINE window polling failed")
-                    self.line_state.configure(text="ตรวจ LINE ไม่สำเร็จ", foreground="#a52834")
+                    self.line_state.configure(text="ตรวจ LINE ไม่สำเร็จ", foreground="#9f3740")
             else:
-                self.line_state.configure(text="ตัวตั้งสถานะนี้ต้องใช้บน Windows", foreground="#a52834")
+                self.line_state.configure(text="ตัวตั้งสถานะนี้ต้องใช้บน Windows", foreground="#9f3740")
             try:
                 self.root.after(900, self.poll_line)
             except tk.TclError:
@@ -927,7 +928,7 @@ def build_app(config_path=CONFIG_PATH):
                 logging.exception("Could not start LINE task %s", task)
                 self.busy = False
                 self.set_button.configure(state="normal")
-                self.note.configure(text=f"เริ่มงานไม่ได้: {exc}", foreground="#a52834")
+                self.note.configure(text=f"เริ่มงานไม่ได้: {exc}", foreground="#9f3740")
                 return False
 
         def finish_status(self, result, scheduled=False, text=None):
@@ -949,15 +950,15 @@ def build_app(config_path=CONFIG_PATH):
                     logging.exception("Could not record LINE status history")
                 if result.verified:
                     note = "เปลี่ยนและตรวจยืนยันข้อความใน LINE แล้ว"
-                    color = "#138a55"
+                    color = "#28744c"
                 else:
                     note = "กด Save แล้ว แต่ยืนยันผลจาก LINE ไม่ได้ โปรดตรวจโปรไฟล์อีกครั้ง"
                     if result.detail:
                         note += f" ({result.detail})"
-                    color = "#9a6500"
+                    color = "#8b672b"
             else:
                 note = "ใส่ข้อความแล้ว แต่ยังไม่ได้บันทึก: " + (result.detail or "คลิก Save ใน LINE")
-                color = "#9a6500"
+                color = "#8b672b"
             self.note.configure(text=note, foreground=color)
 
         def _friendly_task_error(self, task, error):
@@ -992,7 +993,7 @@ def build_app(config_path=CONFIG_PATH):
                             self.read_status_value.configure(
                                 text=f"อ่านไม่ได้: {self._friendly_task_error(task, error)}")
                         self.note.configure(text=self._friendly_task_error(task, error),
-                                            foreground="#a52834")
+                                            foreground="#9f3740")
                     else:
                         callback(value)
             except queue.Empty:

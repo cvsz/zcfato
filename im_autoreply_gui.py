@@ -8,12 +8,14 @@ import json
 import logging
 import logging.handlers
 import os
+import ntpath
 import random
 import re
 import subprocess
 import sys
 import time
 import unicodedata
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional, Union
@@ -22,6 +24,23 @@ import io
 import queue
 import threading
 from types import SimpleNamespace
+
+
+def system_taskkill_path():
+    """Return taskkill.exe from Windows' system directory, never from PATH/cwd."""
+    if os.name != "nt":
+        return "taskkill.exe"
+    import ctypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_system_directory = kernel32.GetSystemDirectoryW
+    get_system_directory.argtypes = (ctypes.POINTER(ctypes.c_wchar), ctypes.c_uint)
+    get_system_directory.restype = ctypes.c_uint
+    buffer = ctypes.create_unicode_buffer(32768)
+    length = get_system_directory(buffer, len(buffer))
+    if not length or length >= len(buffer):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return os.path.join(buffer.value, "taskkill.exe")
 
 # ============================================================
 # Inlined engine (camfrog_auto.py) - no shared imports.
@@ -43,11 +62,8 @@ BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
 APP_PROFILE = "im_reply"
 APP_PROFILES = {"full", "room", "im_reply", "status", "music"}
 
-# Standalone executables can pin runtime state to their own directory. Status
-# workers use ZCFATO_DATA_DIR, which takes precedence over the GUI app directory.
-if os.environ.get("ZCFATO_DATA_DIR"):
-    BASE = Path(os.environ["ZCFATO_DATA_DIR"])
-elif os.environ.get("CAMFROG_APP_DATA_DIR"):
+# This profile is private to IM Auto-reply. Ignore the status app's data override.
+if os.environ.get("CAMFROG_APP_DATA_DIR"):
     BASE = Path(os.environ["CAMFROG_APP_DATA_DIR"])
 
 # Nickname regex: Unicode word chars + space . - (Camfrog allows Thai in nicknames).
@@ -131,10 +147,13 @@ S = {
     "ok": ("ok", "สำเร็จ"),
     "failed": ("failed", "ล้มเหลว"),
     "already_running": ("already running (PID {pid})", "ทำงานอยู่แล้ว (PID {pid})"),
+    "another_instance": ("another worker instance is already running", "มี worker อีก instance กำลังทำงานอยู่แล้ว"),
     "bg_started": ("started in background (PID {pid}). Log: {log}",
                    "เริ่มทำงานเบื้องหลังแล้ว (PID {pid}) ล็อก: {log}"),
     "bg_failed": ("background process exited (code {code}). See log: {log}",
                   "โปรเซสเบื้องหลังจบการทำงาน (code {code}) ดูล็อก: {log}"),
+    "bg_start_timeout": ("worker did not become ready within {seconds} seconds. See log: {log}",
+                         "worker ไม่พร้อมภายใน {seconds} วินาที ดูล็อก: {log}"),
     "bg_needs_log": ("background mode needs log.file set in config",
                      "โหมดเบื้องหลังต้องตั้ง log.file ใน config"),
     "win_only": ("this command is Windows-only", "คำสั่งนี้ใช้ได้เฉพาะ Windows"),
@@ -144,7 +163,10 @@ S = {
     "killed": ("did not stop in time; terminated", "หยุดไม่ทันเวลา จึงบังคับปิด"),
     "stop_failed": ("could not confirm process exit (PID {pid}); STOP and PID files were kept so you can retry",
                     "ยืนยันไม่ได้ว่าโปรเซสหยุดแล้ว (PID {pid}) จึงเก็บไฟล์ STOP/PID ไว้ให้ลองใหม่"),
+    "stop_failed_unknown": ("worker did not release its mutex; STOP and PID files were kept so you can retry",
+                             "worker ยังไม่ปล่อย mutex จึงเก็บไฟล์ STOP/PID ไว้ให้ลองใหม่"),
     "state_running": ("RUNNING (PID {pid})", "กำลังทำงาน (PID {pid})"),
+    "state_running_unknown": ("RUNNING (worker active; PID unavailable)", "กำลังทำงาน (พบ worker แต่ไม่ทราบ PID)"),
     "state_stopped": ("STOPPED", "หยุดอยู่"),
     "autostart_on": ("autostart enabled: {cmd}", "เปิดการรันอัตโนมัติแล้ว: {cmd}"),
     "autostart_off": ("autostart removed", "ยกเลิกการรันอัตโนมัติแล้ว"),
@@ -207,7 +229,16 @@ S = {
     "w_im_noprefix": ("autoreply_im.prefix is empty: friends cannot tell the reply is automatic",
                       "autoreply_im.prefix ว่าง: เพื่อนจะไม่รู้ว่าเป็นข้อความตอบอัตโนมัติ"),
     "im_attached": ("attached to private-chat window {title}", "จับหน้าต่างแชทส่วนตัวแล้ว {title}"),
-    "im_replied": ("IM reply to {nick}: {text}", "ตอบ IM {nick} แล้ว: {text}"),
+    "im_replied": ("IM reply echo recorded in local chat for {nick}: {text} (recipient delivery not confirmed)",
+                   "พบข้อความตอบกลับในประวัติแชตฝั่งเครื่องสำหรับ {nick}: {text} (ยังไม่ยืนยันว่าถึงผู้รับ)"),
+    "im_echo_visible": ("IM reply row was scrolled into the local chat viewport for {nick}; recipient delivery is not confirmed",
+                        "เลื่อนบรรทัดตอบกลับให้อยู่ในพื้นที่แชตฝั่งเครื่องของ {nick} แล้ว แต่ยังไม่ยืนยันว่าถึงผู้รับ"),
+    "im_echo_not_visible": ("IM reply is in local history but could not be placed in the chat viewport for {nick}; recipient delivery is not confirmed",
+                            "พบข้อความตอบในประวัติ แต่เลื่อนไปยังพื้นที่แชตของ {nick} ไม่สำเร็จ และยังไม่ยืนยันว่าถึงผู้รับ"),
+    "im_previewed": ("IM reply preview for {nick} (dry-run; not sent)", "ดูตัวอย่างคำตอบ IM ของ {nick} (dry-run; ยังไม่ได้ส่ง)"),
+    "im_filtered": ("IM from {nick} ignored: {reason}", "ข้าม IM จาก {nick}: {reason}"),
+    "im_no_rule": ("IM from {nick} ignored: no reply rule matched", "ข้าม IM จาก {nick}: ไม่มีกฎตอบที่ตรงกัน"),
+    "im_unconfirmed": ("IM reply to {nick} was not confirmed in chat history", "ไม่พบข้อความตอบกลับของ {nick} ในประวัติแชต จึงยืนยันการส่งไม่ได้"),
     "refuse_im": ("refusing to run: autoreply_im needs autoreply.own_nickname",
                   "ไม่ยอมรัน: autoreply_im ต้องตั้ง autoreply.own_nickname"),
     "why_bot": ("looks like an automatic reply (prefix)", "ดูเหมือนข้อความตอบอัตโนมัติ (prefix)"),
@@ -321,7 +352,7 @@ DEFAULTS = {
         "only_nicknames": [], "rules": [], "skip_patterns": [], "ignore_links": True,
         "prefix": "[auto] ", "answer_first_message": True,
         "per_sender_cooldown_seconds": 3600, "max_per_sender_per_day": 3,
-        "global_min_gap_seconds": 20, "max_per_hour": 10, "delay_range_seconds": [2.0, 5.0],
+        "global_min_gap_seconds": 20, "max_per_hour": 10, "delay_range_seconds": [0.5, 1.0],
         "max_reply_length": 200, "max_incoming_length": 500,
     },
     # Room music DJ: chat commands (!request/!queue/!current/!skip/!help) with a
@@ -807,6 +838,142 @@ def web_items(ctrl, tail=150):
     return out[-tail:] if tail else out
 
 
+def parse_web_dom_rows(rows, tail=150):
+    """Convert current Camfrog MSHTML rows into 'nick: message' lines.
+
+    Current Camfrog exposes message rows as `span.msg-user`, with sibling
+    `nickname-field` and `msgid` spans. Validate the nickname before returning
+    it so UI text that is not a message row cannot enter the reply pipeline.
+    """
+    lines = []
+    for row in rows:
+        row_classes = set(str(row.get("class_name", "")).lower().split())
+        if "msg-user" not in row_classes:
+            continue
+        nick = message = ""
+        for child in row.get("children", ()):
+            classes = set(str(child.get("class_name", "")).lower().split())
+            value = str(child.get("text", "")).strip()
+            if "nickname-field" in classes:
+                nick = value
+            elif "msgid" in classes:
+                message = value
+        if not NICK_RE.fullmatch(nick) or not message:
+            continue
+        message = " ".join(message.split())
+        if message:
+            lines.append(f"{nick}: {message}")
+    return lines[-tail:] if tail else lines
+
+
+def web_dom_rows(ctrl):
+    """Read Camfrog's IE/MSHTML message rows without logging private text.
+
+    UI Automation no longer exposes the sender hyperlink in current Camfrog
+    builds. `WM_HTML_GETOBJECT` gives the same embedded document and preserves
+    its explicit sender/message classes. Return None when this path is not
+    available so callers can retain the older UIA parser as a fallback.
+    """
+    try:
+        import pythoncom
+        import win32con
+        import win32gui
+        from win32com.client import Dispatch
+
+        servers = ctrl.descendants(class_name="Internet Explorer_Server")
+        if not servers:
+            return None
+        msg = win32gui.RegisterWindowMessage("WM_HTML_GETOBJECT")
+        sent, result = win32gui.SendMessageTimeout(
+            servers[0].handle, msg, 0, 0, win32con.SMTO_ABORTIFHUNG, 1000
+        )
+        if not sent or not result:
+            return None
+        document = Dispatch(pythoncom.ObjectFromLresult(result, pythoncom.IID_IDispatch, 0))
+        elements = document.all
+        rows = []
+        for index in range(int(elements.length)):
+            nickname = elements.item(index)
+            if "nickname-field" not in str(nickname.className or "").lower().split():
+                continue
+            parent = nickname.parentElement
+            row_classes = str(parent.className or "")
+            if "msg-user" not in row_classes.lower().split():
+                continue
+            children = []
+            for child_index in range(int(parent.children.length)):
+                child = parent.children.item(child_index)
+                children.append({
+                    "class_name": str(child.className or ""),
+                    "text": str(child.innerText or ""),
+                })
+            rows.append({"class_name": row_classes, "children": children})
+        return rows
+    except Exception as exc:
+        log.debug("MSHTML chat history read failed: %s", type(exc).__name__)
+        return None
+
+
+def reveal_chat_message(ctrl, nickname, message):
+    """Scroll a matching local chat echo into the embedded history viewport."""
+    try:
+        import pythoncom
+        import win32con
+        import win32gui
+        from win32com.client import Dispatch
+
+        servers = ctrl.descendants(class_name="Internet Explorer_Server")
+        if not servers:
+            return False
+        msg = win32gui.RegisterWindowMessage("WM_HTML_GETOBJECT")
+        sent, result = win32gui.SendMessageTimeout(
+            servers[0].handle, msg, 0, 0, win32con.SMTO_ABORTIFHUNG, 1000
+        )
+        if not sent or not result:
+            return False
+        document = Dispatch(pythoncom.ObjectFromLresult(result, pythoncom.IID_IDispatch, 0))
+        expected_nick = str(nickname).strip().casefold()
+        expected_message = " ".join(str(message).split()).casefold()
+        matches = []
+        elements = document.all
+        for index in range(int(elements.length)):
+            nickname_node = elements.item(index)
+            if "nickname-field" not in str(nickname_node.className or "").lower().split():
+                continue
+            row = nickname_node.parentElement
+            if "msg-user" not in str(row.className or "").lower().split():
+                continue
+            sender = str(nickname_node.innerText or "").strip().casefold()
+            row_message = ""
+            for child_index in range(int(row.children.length)):
+                child = row.children.item(child_index)
+                if "msgid" in str(child.className or "").lower().split():
+                    row_message = " ".join(str(child.innerText or "").split()).casefold()
+                    break
+            if sender == expected_nick and row_message == expected_message:
+                matches.append(row)
+        if not matches:
+            return False
+
+        # Prefer the newest occurrence when the same automatic reply was sent before.
+        row = matches[-1]
+        row.scrollIntoView(False)
+        rect = row.getBoundingClientRect()
+        root = document.documentElement
+        style = row.currentStyle
+        width, height = int(root.clientWidth), int(root.clientHeight)
+        return bool(
+            int(row.offsetWidth) > 0 and int(row.offsetHeight) > 0
+            and str(style.display or "").lower() != "none"
+            and str(style.visibility or "").lower() not in {"hidden", "collapse"}
+            and float(rect.left) >= 0 and float(rect.top) >= 0
+            and float(rect.right) <= width and float(rect.bottom) <= height
+        )
+    except Exception as exc:
+        log.debug("Could not reveal local IM echo: %s", type(exc).__name__)
+        return False
+
+
 def is_web(ctrl):
     return _ctrl_attr(ctrl, "class_name") == "AtlAxWinLic140"
 
@@ -832,6 +999,11 @@ def read_chat(ctrl, tail=150):
     """Chat history as text lines. Web log panes are parsed into 'nick: message'; other controls
     (older native builds) go through read_text()."""
     if is_web(ctrl):
+        dom_rows = web_dom_rows(ctrl)
+        if dom_rows is not None:
+            dom_lines = parse_web_dom_rows(dom_rows, tail)
+            if dom_lines:
+                return "\n".join(dom_lines)
         return "\n".join(parse_web_log(web_items(ctrl, tail)))
     return read_text(ctrl)
 
@@ -1224,30 +1396,116 @@ def new_lines(prev, cur):
     return cur
 
 
+def confirm_im_reply_echo(history, previous_lines, own_nickname, reply_text,
+                          history_tail=150, timeout=5.0):
+    """Confirm a live IM send only after its exact outgoing line appears in the chat log."""
+    expected_nick = str(own_nickname).strip().casefold()
+    expected_text = " ".join(str(reply_text).split()).casefold()
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        try:
+            current = read_chat(history, history_tail).splitlines()
+        except Exception:
+            current = []
+        for line in new_lines(previous_lines, current):
+            match = LINE_RE.match(line.strip())
+            if not match:
+                continue
+            sender = match["nick"].strip().casefold()
+            message = " ".join(match["msg"].split()).casefold()
+            if sender == expected_nick and message == expected_text:
+                if reveal_chat_message(history, own_nickname, reply_text):
+                    log.info(t("im_echo_visible", nick=own_nickname))
+                else:
+                    log.warning(t("im_echo_not_visible", nick=own_nickname))
+                return True
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.1, remaining))
+
+
 # ---------- process control (background mode) ----------
 def pid_path(cfg):
     return BASE / cfg["safety"]["pid_file"]
 
 
 def read_pid(cfg):
+    record = read_pid_record(cfg)
+    return record["pid"] if record else None
+
+
+def read_pid_record(cfg):
     try:
-        return int(pid_path(cfg).read_text().strip())
+        raw = pid_path(cfg).read_text(encoding="utf-8").strip()
+        try:
+            data = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            data = None
+        if isinstance(data, dict):
+            raw_pid = data.get("pid")
+            if isinstance(raw_pid, bool):
+                return None
+            pid = int(raw_pid)
+            created = data.get("creation_time")
+            if created is not None:
+                if isinstance(created, bool):
+                    return None
+                created = int(created)
+            if not 0 < pid <= 0xFFFFFFFF or (created is not None and created < 0):
+                return None
+            return {"pid": pid, "creation_time": created}
+        pid = int(raw)
+        return {"pid": pid, "creation_time": None} if 0 < pid <= 0xFFFFFFFF else None
     except Exception:
         return None
+
+
+def _process_query_api():
+    """Return kernel32 process-query APIs with pointer-safe Windows types."""
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.argtypes = (
+        wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.GetExitCodeProcess.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+    kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+    kernel32.GetProcessTimes.argtypes = (
+        wintypes.HANDLE, ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME), ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME))
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    kernel32.QueryFullProcessImageNameW.argtypes = (
+        wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+        ctypes.POINTER(wintypes.DWORD))
+    kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    return kernel32, wintypes
 
 
 def pid_alive(pid):
     if not pid:
         return False
     if os.name == "nt":
-        k = ctypes.windll.kernel32
-        h = k.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not h:
+        try:
+            pid = int(pid)
+            if not 0 < pid <= 0xFFFFFFFF:
+                return False
+            kernel32, wintypes = _process_query_api()
+            handle = kernel32.OpenProcess(0x1000, False, pid)
+            if not handle:
+                return False
+            try:
+                code = wintypes.DWORD()
+                ok = kernel32.GetExitCodeProcess(handle, ctypes.byref(code))
+                return bool(ok) and code.value == 259  # STILL_ACTIVE
+            finally:
+                kernel32.CloseHandle(handle)
+        except (OSError, TypeError, ValueError, OverflowError):
             return False
-        code = ctypes.c_ulong()
-        ok = k.GetExitCodeProcess(h, ctypes.byref(code))
-        k.CloseHandle(h)
-        return bool(ok) and code.value == 259  # STILL_ACTIVE
     try:
         os.kill(pid, 0)
         return True
@@ -1258,32 +1516,99 @@ def pid_alive(pid):
 def pid_image(pid):
     """Executable path of a process (Windows), or None when unknown."""
     try:
-        k = ctypes.windll.kernel32
-        h = k.OpenProcess(0x1000, False, pid)
-        if not h:
+        pid = int(pid)
+        if not 0 < pid <= 0xFFFFFFFF:
             return None
-        buf, n = ctypes.create_unicode_buffer(1024), ctypes.c_ulong(1024)
-        ok = k.QueryFullProcessImageNameW(h, 0, buf, ctypes.byref(n))
-        k.CloseHandle(h)
-        return buf.value if ok else None
-    except Exception:
+        kernel32, wintypes = _process_query_api()
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            size = wintypes.DWORD(len(buffer))
+            ok = kernel32.QueryFullProcessImageNameW(
+                handle, 0, buffer, ctypes.byref(size))
+            return buffer.value if ok else None
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, TypeError, ValueError, OverflowError, AttributeError):
         return None
 
 
-def pid_is_ours(pid, image=None):
-    """Guard against PID reuse: a stale pid file must never make `stop` kill a stranger."""
+def pid_creation_time(pid):
+    """Return a process creation FILETIME to distinguish reused PIDs."""
     if os.name != "nt":
-        return True
+        return None
+    try:
+        pid = int(pid)
+        if not 0 < pid <= 0xFFFFFFFF:
+            return None
+        kernel32, wintypes = _process_query_api()
+        handle = kernel32.OpenProcess(0x1000, False, pid)
+        if not handle:
+            return None
+        try:
+            created = wintypes.FILETIME()
+            exited = wintypes.FILETIME()
+            kernel = wintypes.FILETIME()
+            user = wintypes.FILETIME()
+            ok = kernel32.GetProcessTimes(
+                handle, ctypes.byref(created), ctypes.byref(exited),
+                ctypes.byref(kernel), ctypes.byref(user))
+            if not ok:
+                return None
+            return (int(created.dwHighDateTime) << 32) | int(created.dwLowDateTime)
+        finally:
+            kernel32.CloseHandle(handle)
+    except (OSError, TypeError, ValueError, OverflowError, AttributeError):
+        return None
+
+
+def write_pid(cfg, pid):
+    """Atomically register a worker PID with its process creation time."""
+    path = pid_path(cfg)
+    record = {"pid": int(pid), "creation_time": pid_creation_time(pid)}
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(record), encoding="utf-8")
+    temporary.replace(path)
+
+
+def pid_is_ours(pid, image=None, expected_creation_time=None):
+    """Trust a matching executable only when its PID creation time also matches."""
+    if os.name != "nt":
+        return False
+    if expected_creation_time is None:
+        return False
+    if pid_creation_time(pid) != expected_creation_time:
+        return False
     image = image if image is not None else pid_image(pid)
     if not image:
-        return True  # cannot tell: keep the old behaviour
-    name = Path(image).name.lower()
-    return "camfrog" in name or name.startswith("python") or name == Path(sys.executable).name.lower()
+        return False
+    candidate = ntpath.normcase(ntpath.normpath(str(image)))
+    executables = [sys.executable]
+    base_executable = getattr(sys, "_base_executable", None)
+    if not getattr(sys, "frozen", False) and base_executable:
+        executables.append(base_executable)
+    expected = set()
+    for executable in executables:
+        current = ntpath.normcase(ntpath.normpath(str(executable)))
+        expected.add(current)
+        current_name = ntpath.basename(current).casefold()
+        if current_name in {"python.exe", "pythonw.exe"}:
+            sibling = "pythonw.exe" if current_name == "python.exe" else "python.exe"
+            expected.add(ntpath.normcase(
+                ntpath.join(ntpath.dirname(current), sibling)))
+    return candidate in expected
 
 
 def running_pid(cfg):
-    pid = read_pid(cfg)
-    return pid if pid_alive(pid) and pid_is_ours(pid) else None
+    record = read_pid_record(cfg)
+    if not record:
+        return None
+    pid = record["pid"]
+    created = record["creation_time"]
+    return pid if (created is not None and pid_alive(pid)
+                   and pid_is_ours(pid, expected_creation_time=created)) else None
 
 
 def child_cmd(args):
@@ -1292,7 +1617,11 @@ def child_cmd(args):
     else:
         py = Path(sys.executable)
         pyw = py.with_name("pythonw.exe")
-        cmd = [str(pyw if pyw.exists() else py), str(Path(__file__).resolve())]
+        # This file is an imported GUI module and deliberately has no
+        # __main__ entry point. Relaunch the supported entry script so the
+        # hidden source worker actually dispatches its CLI command.
+        entry = Path(__file__).resolve().with_name("im_autoreply_entry.py")
+        cmd = [str(pyw if pyw.exists() else py), str(entry)]
     if getattr(args, "config", None):
         cmd += ["--config", str(Path(args.config).resolve())]
     if getattr(args, "lang", None):
@@ -1315,6 +1644,9 @@ def cmd_start(cfg, args):
     if pid:
         print(t("already_running", pid=pid))
         return 1
+    if worker_mutex_active():
+        print(t("another_instance"))
+        return 1
     if os.name != "nt":
         print(t("win_only"))
         return 2
@@ -1327,41 +1659,87 @@ def cmd_start(cfg, args):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          creationflags=flags, close_fds=True, cwd=str(BASE),
                          env=child_env())
-    time.sleep(2.5)
-    if p.poll() is not None:
-        print(t("bg_failed", code=p.returncode, log=logf))
-        return 1
-    print(t("bg_started", pid=p.pid, log=logf))
-    return 0
+    timeout, deadline = 15.0, time.monotonic() + 15.0
+    while True:
+        active = running_pid(cfg)
+        record = read_pid_record(cfg)
+        child_registered = bool(
+            record and record["pid"] == p.pid
+            and record["creation_time"] is None and worker_mutex_active())
+        if active == p.pid or child_registered:
+            print(t("bg_started", pid=p.pid, log=logf))
+            return 0
+        if active:
+            _terminate_startup_child(p)
+            print(t("already_running", pid=active))
+            return 1
+        if p.poll() is not None:
+            if worker_mutex_active():
+                print(t("another_instance"))
+                return 1
+            print(t("bg_failed", code=p.returncode, log=logf))
+            return 1
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _terminate_startup_child(p)
+            print(t("bg_start_timeout", seconds=int(timeout), log=logf))
+            return 1
+        time.sleep(min(0.1, remaining))
+
+
+def _terminate_startup_child(process):
+    """Stop only the child just spawned when it failed to become the registered worker."""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            log.error("new worker child did not exit after startup cancellation")
+    except OSError as exc:
+        log.warning("could not stop unregistered startup child: %s", type(exc).__name__)
 
 
 def cmd_stop(cfg):
     pid = running_pid(cfg)
+    record = read_pid_record(cfg)
     stop_file = BASE / cfg["safety"]["stop_file"]
-    if not pid:
+    if not worker_mutex_active():
         print(t("not_running"))
         pid_path(cfg).unlink(missing_ok=True)
+        stop_file.unlink(missing_ok=True)
         return 0
-    print(t("stopping", pid=pid))
+    if pid:
+        print(t("stopping", pid=pid))
     stop_file.write_text("stop")
-    for _ in range(200):  # up to 20 s (a reply delay may be in progress)
-        if not pid_alive(pid):
+    for _ in range(200):  # up to 20 s for cooperative shutdown
+        if not worker_mutex_active():
             break
         time.sleep(0.1)
     forced = False
-    if pid_alive(pid):
+    created = record.get("creation_time") if record else None
+    if (worker_mutex_active() and pid and created is not None
+            and pid_alive(pid)
+            and pid_is_ours(pid, expected_creation_time=created)):
         try:
-            subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"],
+            subprocess.run([system_taskkill_path(), "/PID", str(pid), "/F"],
                            capture_output=True, check=False, timeout=10)
             forced = True
         except (OSError, subprocess.TimeoutExpired):
             log.exception("taskkill failed for PID %s", pid)
-        for _ in range(30):  # confirm exit after force termination
-            if not pid_alive(pid) or not pid_is_ours(pid):
+        for _ in range(30):  # confirm worker released its mutex
+            if not worker_mutex_active():
                 break
             time.sleep(0.1)
-    if pid_alive(pid) and pid_is_ours(pid):
-        print(t("stop_failed", pid=pid))
+    if worker_mutex_active():
+        if pid:
+            print(t("stop_failed", pid=pid))
+        else:
+            print(t("stop_failed_unknown"))
         return 1  # retain STOP/PID files so another stop attempt can finish cleanup
     print(t("killed") if forced else t("stopped_ok"))
     stop_file.unlink(missing_ok=True)
@@ -1375,13 +1753,19 @@ def stats_path(cfg):
 
 def cmd_state(cfg):
     pid = running_pid(cfg)
-    running = bool(pid)
-    print(t("state_running", pid=pid) if running else t("state_stopped"))
+    running = bool(pid) or worker_mutex_active()
+    if pid:
+        print(t("state_running", pid=pid))
+    elif running:
+        print(t("state_running_unknown"))
+    else:
+        print(t("state_stopped"))
     try:
         d = json.loads(stats_path(cfg).read_text(encoding="utf-8"))
         print(t("stats_hdr"))
+        replies = int(d.get("replies") or 0) + int(d.get("im_replies") or 0)
         print(t("stats_line", started=d.get("started", "?"), st=d.get("statuses", 0),
-                rp=d.get("replies", 0), fl=d.get("failures", 0)))
+                rp=replies, fl=d.get("failures", 0)))
     except Exception:
         pass
     return 0 if running else 1
@@ -1772,25 +2156,41 @@ class Runner:
                 log.debug("IM window gone: %s", e)
                 self.im_wins.pop(h, None)
                 continue
-            fresh, st["prev"] = new_lines(st["prev"], cur), cur
+            fresh = new_lines(st["prev"], cur)
+            overlap = len(cur) - len(fresh)
             if not can_reply:
+                st["prev"] = cur
                 continue  # consume backlog so it isn't answered later
             if len(fresh) > RESET_BURST:
                 log.warning(t("burst_skip", n=len(fresh)))
+                st["prev"] = cur
                 continue
-            for line in fresh:
+
+            for index, line in enumerate(fresh):
+                def mark_consumed():
+                    st["prev"] = cur[:overlap + index + 1]
+
                 m = LINE_RE.match(line.strip())
                 if not m:
+                    mark_consumed()
                     continue
                 nick, msg = m["nick"].strip(), m["msg"][: im["max_incoming_length"]]
                 lk = nick.lower()
                 if not NICK_RE.match(nick) or lk == self.own or lk in self.ignore:
+                    mark_consumed()
                     continue
                 d = evaluate_im(self.cfg, nick, msg, self.im_rules, self.im_skips)
                 if d["skip"] == "sender":
                     log.info(t("im_skip_nick", nick=nick))
+                    mark_consumed()
                     continue
-                if d["skip"] or d["rule"] is None or d["reply"] is None:
+                if d["skip"]:
+                    log.info(t("im_filtered", nick=nick, reason=t("why_" + d["skip"])))
+                    mark_consumed()
+                    continue
+                if d["rule"] is None or d["reply"] is None:
+                    log.info(t("im_no_rule", nick=nick))
+                    mark_consumed()
                     continue
                 now = time.monotonic()
                 self.im_sent = [x for x in self.im_sent if now - x < 3600]
@@ -1800,11 +2200,27 @@ class Runner:
                         or len(day) >= im["max_per_sender_per_day"]
                         or now - self.im_sender_last.get(lk, -1e9) < im["per_sender_cooldown_seconds"]
                         or now - d["rule"]["last"] < d["rule"]["cooldown"]):
+                    mark_consumed()
                     continue
                 time.sleep(random.uniform(*im["delay_range_seconds"]))
+                try:
+                    before_send = read_chat(st["hist"], ar["history_tail"]).splitlines()
+                except Exception as e:
+                    raise RuntimeError("could not snapshot IM history before sending") from e
                 if not commit(st["win"], st["inp"], d["reply"], self.im_dry,
                               s["require_foreground"], None, s["restore_previous_window"]):
                     raise RuntimeError(t("reply_fail"))
+                if self.im_dry:
+                    mark_consumed()
+                    log.info(t("im_previewed", nick=nick))
+                    continue
+                if not confirm_im_reply_echo(
+                        st["hist"], before_send, self.own, d["reply"], ar["history_tail"]):
+                    # The send may have reached Camfrog even if its log pane did not
+                    # refresh. Consume it to avoid an unsafe duplicate on the next tick.
+                    mark_consumed()
+                    raise RuntimeError(t("im_unconfirmed", nick=nick))
+                mark_consumed()
                 ts = time.monotonic()
                 self.im_sender_last[lk] = d["rule"]["last"] = ts
                 self.im_sent.append(ts)
@@ -2157,19 +2573,94 @@ class Runner:
             self.write_stats(time.monotonic(), force=True)
 
 
+def worker_mutex_name():
+    profile = re.sub(r"[^A-Za-z0-9_.-]", "_", str(APP_PROFILE))
+    data_dir = os.path.normcase(os.path.abspath(os.fspath(BASE))).casefold()
+    digest = hashlib.sha256(data_dir.encode("utf-8", errors="surrogatepass")).hexdigest()[:24]
+    return f"Local\\CamfrogWorker_{profile}_{digest}"
+
+
+def worker_mutex_active():
+    """Check the worker's named mutex without creating or acquiring it."""
+    if os.name != "nt":
+        return False
+    try:
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_mutex = kernel32.OpenMutexW
+        open_mutex.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.LPCWSTR)
+        open_mutex.restype = wintypes.HANDLE
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        handle = open_mutex(0x00100000, False, worker_mutex_name())  # SYNCHRONIZE
+        if not handle:
+            return False
+        kernel32.CloseHandle(handle)
+        return True
+    except (OSError, AttributeError, TypeError):
+        return False
+
+
+def worker_is_running(cfg):
+    return bool(running_pid(cfg)) or worker_mutex_active()
+
+
+def acquire_run_mutex():
+    """Create a per-profile, per-data-directory Windows mutex for worker runs."""
+    if os.name != "nt":
+        return None
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_mutex = kernel32.CreateMutexW
+    create_mutex.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
+    create_mutex.restype = ctypes.c_void_p
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    ctypes.set_last_error(0)
+    handle = create_mutex(None, 0, worker_mutex_name())
+    if not handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    if ctypes.get_last_error() == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(handle)
+        log.warning("worker start refused: per-app mutex already exists")
+        return False
+    log.info("worker mutex acquired (pid=%s)", os.getpid())
+    return handle
+
+
+def release_run_mutex(handle):
+    if handle is None or handle is False or os.name != "nt":
+        return
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    kernel32.CloseHandle.restype = ctypes.c_int
+    if not kernel32.CloseHandle(handle):
+        log.debug("Could not close worker mutex handle: %s", ctypes.get_last_error())
+
+
 def run_guarded(cfg, cfg_path=None):
     """Single-instance guard + PID file around Runner.run()."""
-    existing = running_pid(cfg)
-    if existing and existing != os.getpid():
-        print(t("already_running", pid=existing))
+    mutex = acquire_run_mutex()
+    if mutex is False:
+        existing = running_pid(cfg)
+        print(t("already_running", pid=existing) if existing else t("another_instance"))
         return 3
     pf = pid_path(cfg)
-    pf.write_text(str(os.getpid()))
+    wrote_pid = False
     try:
+        existing = running_pid(cfg)
+        if existing and existing != os.getpid():
+            print(t("already_running", pid=existing))
+            return 3
+        write_pid(cfg, os.getpid())
+        wrote_pid = True
         return Runner(cfg, cfg_path).run()
     finally:
-        if read_pid(cfg) == os.getpid():
-            pf.unlink(missing_ok=True)
+        try:
+            if wrote_pid and read_pid(cfg) == os.getpid():
+                pf.unlink(missing_ok=True)
+        finally:
+            release_run_mutex(mutex)
 
 
 # ---------- commands ----------
@@ -2873,7 +3364,7 @@ def set_clipboard_text(root, text):
         return
     root.clipboard_clear()
     root.clipboard_append(text)
-    root.update()
+    root.update_idletasks()
 
 
 def get_clipboard_text(root):
@@ -2986,10 +3477,12 @@ class ClipboardController:
         import tkinter as tk
 
         self.root = root
-        self.translate = translate or (lambda text: text)
+        self.translate = translate or (lambda text: str(text).partition("|")[0])
         self.on_error = on_error
         self.target = None
         self.widgets = []
+        import weakref
+        self._installed_widgets = weakref.WeakSet()
         self.menu = tk.Menu(root, tearoff=False)
         for label, action in (("Cut|ตัด", "cut"), ("Copy|คัดลอก", "copy"),
                               ("Paste|วาง", "paste")):
@@ -2999,21 +3492,68 @@ class ClipboardController:
         self.menu.add_command(label=self.translate("Select all|เลือกทั้งหมด"),
                               command=lambda: self.select_all(self.target))
 
+    def refresh_menu(self):
+        """Refresh localized labels after the GUI language changes."""
+        labels = ("Cut|ตัด", "Copy|คัดลอก", "Paste|วาง",
+                  "Select all|เลือกทั้งหมด")
+        for index, label in enumerate(labels):
+            self.menu.entryconfigure(index if index < 3 else 4,
+                                     label=self.translate(label))
+
     def install(self, parent):
+        """Bind editors recursively, including controls added after the first build."""
         for widget in parent.winfo_children():
             widget_class = _widget_class(widget)
-            if widget_class in _WIDGET_CLASSES:
+            if widget_class in _WIDGET_CLASSES and widget not in self._installed_widgets:
+                self._installed_widgets.add(widget)
                 self.widgets.append(widget)
+                if widget_class in {"Text", "Listbox"}:
+                    try:
+                        widget.configure(
+                            background="#ffffff" if widget_class == "Text" else "#fffdfa",
+                            foreground="#283648", selectbackground="#8b672b",
+                            selectforeground="#fffdfa", insertbackground="#283648",
+                            highlightbackground="#d5c8ac", highlightcolor="#8b672b")
+                    except Exception:
+                        pass
                 for sequence, action in (
                     ("<Control-c>", "copy"), ("<Control-x>", "cut"),
                     ("<Control-v>", "paste"), ("<Control-Insert>", "copy"),
                     ("<Shift-Delete>", "cut"), ("<Shift-Insert>", "paste"),
                 ):
                     widget.bind(sequence, lambda event, op=action: self.handle(event, op), add="+")
+                # The generic key binding also recognizes Windows virtual-key
+                # codes and control characters when a Thai/non-Latin layout
+                # reports an unknown keysym for Ctrl+A/C/V/X.
+                widget.bind("<Control-KeyPress>", self.handle_control_key, add="+")
                 widget.bind("<Control-a>", self._select_all_event, add="+")
                 widget.bind("<Button-3>", self.show_menu, add="+")
                 widget.bind("<Shift-F10>", self.show_menu, add="+")
             self.install(widget)
+
+    def handle_control_key(self, event):
+        """Dispatch Ctrl+A/C/V/X consistently across keyboard layouts."""
+        keysym = str(getattr(event, "keysym", "")).lower()
+        char = str(getattr(event, "char", "") or "")
+        try:
+            keycode = int(getattr(event, "keycode", -1))
+        except (TypeError, ValueError):
+            keycode = -1
+        shortcuts = {
+            "a": ({"a", "\x01"}, 65, None),
+            "c": ({"c", "\x03"}, 67, "copy"),
+            "v": ({"v", "\x16"}, 86, "paste"),
+            "x": ({"x", "\x18"}, 88, "cut"),
+        }
+        key = next((name for name, (chars, code, _action) in shortcuts.items()
+                    if keysym == name or char in chars or keycode == code), None)
+        if key is None:
+            return None
+        self.target = event.widget
+        _chars, _code, action = shortcuts[key]
+        if action is None:
+            return self._select_all_event(event)
+        return self.handle(event, action)
 
     def perform(self, widget, action):
         if widget is None:
@@ -3239,6 +3779,28 @@ def tail_text(path, nbytes=40000, lines=400):
     return "\n".join(data.decode("utf-8", "replace").splitlines()[-lines:])
 
 
+_ACTIVITY_SECRET_RE = re.compile(
+    r"(?i)\b(password|passwd|authorization|cookie|token|secret|phpsessid)"
+    r"\b([\"']?\s*[:=]\s*[\"']?)(?:(?:bearer|basic)\s+)?"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}'\"]+)"
+)
+
+
+def activity_log_path(cfg):
+    """Return the configured app-local log path, or None when file logging is off."""
+    name = cfg.get("log", {}).get("file")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return BASE / name
+
+
+def activity_detail(value, limit=800):
+    """Keep useful command output in the activity log without credential values."""
+    detail = " ".join(str(value or "").split())
+    detail = _ACTIVITY_SECRET_RE.sub(r"\1\2[REDACTED]", detail)
+    return detail[:limit]
+
+
 def read_stats(cfg):
     try:
         return json.loads(stats_path(cfg).read_text(encoding="utf-8"))
@@ -3305,7 +3867,7 @@ def build_app():
                 row=5, column=2, columnspan=2, sticky="w")
             ttk.Label(f, text=bi("Variables: {sender} {me} {time} {date}. Replies starting with / are blocked.|"
                                  "ตัวแปร: {sender} {me} {time} {date} คำตอบที่ขึ้นต้นด้วย / จะถูกบล็อก"),
-                      foreground="#666").grid(row=6, column=0, columnspan=4, sticky="w", pady=4)
+                      foreground="#626d7a").grid(row=6, column=0, columnspan=4, sticky="w", pady=4)
             bar = ttk.Frame(f)
             bar.grid(row=7, column=0, columnspan=4, sticky="e")
             ttk.Button(bar, text="OK", command=self.ok).pack(side="left", padx=4)
@@ -3340,27 +3902,28 @@ def build_app():
     class App:
         def __init__(self, cfg_path):
             self.root = tk.Tk()
+            self.root.configure(background="#f4f1e8")
             style = ttk.Style(self.root)
             try:
                 style.theme_use("clam")
             except tk.TclError:
                 pass
-            style.configure("TFrame", background="#edf2f5")
-            style.configure("TLabel", background="#edf2f5", foreground="#233548", font=("Segoe UI", 9))
-            style.configure("TCheckbutton", background="#edf2f5", foreground="#233548")
-            style.configure("TRadiobutton", background="#edf2f5", foreground="#233548")
-            style.configure("TLabelframe", background="#edf2f5", bordercolor="#c4d1dc")
-            style.configure("TLabelframe.Label", background="#edf2f5", foreground="#087b83",
+            style.configure("TFrame", background="#f4f1e8")
+            style.configure("TLabel", background="#f4f1e8", foreground="#283648", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TRadiobutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TLabelframe", background="#f4f1e8", bordercolor="#d5c8ac")
+            style.configure("TLabelframe.Label", background="#f4f1e8", foreground="#8b672b",
                             font=("Segoe UI", 9, "bold"))
             style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
-                            background="#d9e8f0", foreground="#1a3a52")
-            style.map("TButton", background=[("active", "#bdd9e9"), ("pressed", "#a4c9df")])
+                            background="#ebe5d9", foreground="#283648")
+            style.map("TButton", background=[("active", "#d6e9e8"), ("pressed", "#d5c8ac")])
             style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
-                            foreground="#152b3a")
-            style.configure("TNotebook", background="#edf2f5")
+                            foreground="#283648")
+            style.configure("TNotebook", background="#f4f1e8")
             style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
-            style.map("TNotebook.Tab", background=[("selected", "#ffffff")],
-                      foreground=[("selected", "#096c7b")])
+            style.map("TNotebook.Tab", background=[("selected", "#fffdfa")],
+                      foreground=[("selected", "#8b672b")])
             self.root.geometry("800x560")
             self.root.minsize(660, 460)
             self.model = ConfigModel(cfg_path)
@@ -3378,6 +3941,8 @@ def build_app():
                 self.root.destroy()
                 raise SystemExit(2)
             set_lang(resolve_lang(self.draft["language"]))
+            setup_logging(self.draft)
+            log.info(bi("Application opened|เปิดแอปพลิเคชันแล้ว"))
             self.build()
             self._closing = False
             self.root.protocol("WM_DELETE_WINDOW", self.close_app)
@@ -3391,6 +3956,7 @@ def build_app():
             """Cleanly tear down all scheduled callbacks so the process exits."""
             if self._closing:
                 return
+            log.info(bi("Application closing|กำลังปิดแอปพลิเคชัน"))
             self._closing = True
             self.cancel_autosave()
             try:
@@ -3434,14 +4000,15 @@ def build_app():
                 self.auto_apply_var = tk.BooleanVar(master=self.root, value=True)
             ttk.Checkbutton(bar, text=bi("Auto-apply valid changes|ใช้ค่าที่ถูกต้องอัตโนมัติ"),
                             variable=self.auto_apply_var, command=self.auto_apply_toggled).pack(side="right")
-            self.msg = ttk.Label(bar, text="", foreground="#444")
+            self.msg = ttk.Label(bar, text="", foreground="#626d7a")
             self.msg.pack(side="left", padx=12)
             self.nb = ttk.Notebook(self.root)
             self.nb.pack(fill="both", expand=True, padx=8)
             tab_specs = (("Dashboard|แดชบอร์ด", "Dashboard", self.tab_dashboard),
                          ("Setup|ตั้งค่าเริ่มต้น", "Setup", self.tab_setup),
                          ("Auto-reply|ตอบอัตโนมัติ", "Auto-reply", self.tab_reply),
-                         ("Advanced|ขั้นสูง", "Advanced", self.tab_advanced))
+                         ("Advanced|ขั้นสูง", "Advanced", self.tab_advanced),
+                         ("Activity Log|บันทึกกิจกรรม", "Activity Log", self.tab_activity_log))
             for name, key, fn in tab_specs:
                 f = ttk.Frame(self.nb, padding=8)
                 fn(f)
@@ -3450,6 +4017,7 @@ def build_app():
             self.install_clipboard_support(self.root)
             self.attach_autosave_hooks()
             self.refresh_state()
+            self.refresh_activity_log()
 
         def setup_clipboard_menu(self):
             old = getattr(self, "clipboard_controller", None)
@@ -3512,7 +4080,7 @@ def build_app():
                 w = ttk.Entry(parent, textvariable=var, width=width)
             w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
             if hint:
-                ttk.Label(parent, text=bi(hint), foreground="#666").grid(row=row, column=2, sticky="w")
+                ttk.Label(parent, text=bi(hint), foreground="#626d7a").grid(row=row, column=2, sticky="w")
             self.binds.append((path, kind, var, label))
             return var
 
@@ -3540,7 +4108,19 @@ def build_app():
             self.stats_lbl = ttk.Label(f, text="")
             self.stats_lbl.pack(anchor="w", pady=6)
             ttk.Label(f, text=bi("Closing this window does not stop the bot. Dry-run only logs what it would send.|"
-                                 "ปิดหน้าต่างนี้ไม่หยุดบอท โหมดทดลองแค่บันทึกว่าจะส่งอะไร"), foreground="#666").pack(anchor="w")
+                                 "ปิดหน้าต่างนี้ไม่หยุดบอท โหมดทดลองแค่บันทึกว่าจะส่งอะไร"), foreground="#626d7a").pack(anchor="w")
+
+        def tab_activity_log(self, f):
+            heading = ttk.Frame(f)
+            heading.pack(fill="x", pady=(0, 6))
+            ttk.Label(heading, text=bi(
+                "Application and worker events|เหตุการณ์ของแอปและ worker"),
+                font=("Segoe UI", 10, "bold")).pack(side="left")
+            ttk.Button(heading, text=bi("Refresh|รีเฟรช"),
+                       command=self.refresh_activity_log).pack(side="right")
+            self.log_info = ttk.Label(
+                f, text="", foreground="#626d7a", wraplength=900, justify="left")
+            self.log_info.pack(anchor="w", pady=(0, 6))
             lf = ttk.Frame(f)
             lf.pack(fill="both", expand=True, pady=6)
             self.log = tk.Text(lf, state="disabled", wrap="none", height=18, font=("Consolas", 9))
@@ -3575,7 +4155,7 @@ def build_app():
             ttk.Button(row, text=bi("Discover controls -> controls.txt|ดึง control -> controls.txt"),
                        command=lambda: self.helper("discover")).pack(side="left", padx=6)
             ttk.Label(row, text=bi("Windows only. Copy values from controls.txt into the boxes below.|"
-                                   "เฉพาะ Windows คัดลอกค่าจาก controls.txt มาใส่ช่องด้านล่าง"), foreground="#666").pack(side="left")
+                                   "เฉพาะ Windows คัดลอกค่าจาก controls.txt มาใส่ช่องด้านล่าง"), foreground="#626d7a").pack(side="left")
             self.selector_group(f, "Chat history selector|selector ประวัติแชท", ("autoreply", "history"))
             self.selector_group(f, "Chat input selector|selector ช่องพิมพ์แชท", ("autoreply", "input"))
             self.helper_out = tk.Text(f, height=8, state="disabled")
@@ -3585,7 +4165,7 @@ def build_app():
             ttk.Label(f, text=bi(
                 "IM shares your own nickname and chat selectors from Setup; only listed nicks can be answered.|"
                 "IM ใช้นิคของคุณและ selector จากหน้า Setup ร่วมกัน และตอบได้เฉพาะนิคในรายการ"),
-                foreground="#555", wraplength=900).pack(anchor="w", pady=(0, 4))
+                foreground="#626d7a", wraplength=900).pack(anchor="w", pady=(0, 4))
             columns = ttk.Frame(f)
             columns.pack(fill="x")
             left = ttk.LabelFrame(columns, text=bi("Private IM|แชทส่วนตัว"), padding=4)
@@ -3611,7 +4191,7 @@ def build_app():
             ttk.Label(f, text=bi(
                 "When IM is enabled, allow at least one nickname. Keep window kinds at im unless im-probe confirms mtim.|"
                 "เมื่อเปิด IM ต้องใส่นิคอย่างน้อยหนึ่งชื่อ ใช้ชนิดหน้าต่าง im จนกว่า im-probe จะยืนยัน mtim"),
-                foreground="#666", wraplength=900).pack(anchor="w", pady=(2, 0))
+                foreground="#626d7a", wraplength=900).pack(anchor="w", pady=(2, 0))
             rule_box = ttk.LabelFrame(f, text=bi("IM rules (first match wins)|กฎ IM (กฎแรกที่ตรงจะทำงาน)"), padding=4)
             rule_box.pack(fill="both", expand=True, pady=(6, 2))
             tf = ttk.Frame(rule_box)
@@ -3642,7 +4222,7 @@ def build_app():
             entry.pack(side="left", padx=4)
             entry.bind("<Return>", lambda _e: self.test_im_rule())
             ttk.Button(tester, text=bi("Test IM|ทดสอบ IM"), command=self.test_im_rule).pack(side="left")
-            self.tiout = ttk.Label(tester, text="", foreground="#0a5")
+            self.tiout = ttk.Label(tester, text="", foreground="#28744c")
             self.tiout.pack(side="left", padx=8)
 
         def tab_advanced(self, f):
@@ -3762,7 +4342,7 @@ def build_app():
             self.run_bg(probe, "auto-update")
 
         def say(self, text, bad=False):
-            self.msg.configure(text=text, foreground="#b00" if bad else "#060")
+            self.msg.configure(text=text, foreground="#a3303a" if bad else "#28744c")
 
         def attach_autosave_hooks(self):
             vars_ = [var for _path, _kind, var, _label in self.binds]
@@ -3810,7 +4390,7 @@ def build_app():
             if errs:
                 self.say(bi("auto-apply waiting for valid config|รอคอนฟิกที่ถูกต้อง") + ": " + errs[0], True)
                 return
-            running = bool(running_pid(self.model.cfg))
+            running = worker_is_running(self.model.cfg)
             if autosave_needs_confirmation(cfg, running):
                 self.say(bi("LIVE bot running: press Save to confirm changes|บอทโหมดจริงกำลังทำงาน: กด Save เพื่อยืนยัน"), True)
                 return
@@ -3819,12 +4399,15 @@ def build_app():
             try:
                 errs, warns = self.model.save(cfg)
             except OSError as e:
+                log.error("Auto-apply failed while saving config: %s", activity_detail(e))
                 self.say(bi("auto-apply failed|ใช้ค่าอัตโนมัติไม่สำเร็จ") + f": {e}", True)
                 return
             if errs:
                 self.say(bi("auto-apply waiting for valid config|รอคอนฟิกที่ถูกต้อง") + ": " + errs[0], True)
                 return
             self.draft = copy.deepcopy(cfg)
+            setup_logging(cfg)
+            log.info(bi("Configuration auto-applied|ใช้ค่าและบันทึกคอนฟิกอัตโนมัติแล้ว"))
             self.say(bi("auto-applied|ใช้ค่าและบันทึกแล้ว") + (f"  ({len(warns)} warning)" if warns else ""))
             self.refresh_state()
 
@@ -3832,7 +4415,7 @@ def build_app():
             self.cancel_autosave()
             cfg, errs = self.collect()
             if not errs:
-                running = bool(running_pid(self.model.cfg))
+                running = worker_is_running(self.model.cfg)
                 if autosave_needs_confirmation(cfg, running) and cfg != self.model.cfg:
                     ok = messagebox.askyesno(
                         bi("Apply LIVE changes?|ใช้การเปลี่ยนแปลงในโหมดจริง?"),
@@ -3841,12 +4424,23 @@ def build_app():
                     if not ok:
                         self.say(bi("not saved|ไม่ได้บันทึก"), True)
                         return False
-                errs, warns = self.model.save(cfg)
+                try:
+                    errs, warns = self.model.save(cfg)
+                except OSError as e:
+                    log.error("Configuration save failed: %s", activity_detail(e))
+                    messagebox.showerror(
+                        bi("Not saved|ไม่ได้บันทึก"),
+                        bi("Could not save the configuration: {error}|บันทึกคอนฟิกไม่ได้: {error}")
+                        .format(error=e))
+                    self.say(bi("not saved|ไม่ได้บันทึก"), True)
+                    return False
             if errs:
                 messagebox.showerror(bi("Not saved|ไม่ได้บันทึก"), "\n".join(errs))
                 self.say(bi("not saved|ไม่ได้บันทึก"), True)
                 return False
             self.draft = copy.deepcopy(cfg)
+            setup_logging(cfg)
+            log.info(bi("Configuration saved|บันทึกการตั้งค่าแล้ว"))
             self.say(bi("saved|บันทึกแล้ว") + (f"  ({len(warns)} warning)" if warns else ""))
             self.refresh_state()
             return True
@@ -3855,16 +4449,23 @@ def build_app():
             self.cancel_autosave()
             try:
                 self.draft = copy.deepcopy(self.model.load())
+                set_lang(resolve_lang(self.draft["language"]))
+                setup_logging(self.draft)
             except Exception as e:
+                log.error("Configuration reload failed: %s", activity_detail(e))
                 messagebox.showerror(APP_NAME, t("cannot_load", e=e))
                 return
-            set_lang(resolve_lang(self.draft["language"]))
+            log.info(bi("Configuration reloaded from disk|โหลดคอนฟิกจากไฟล์แล้ว"))
             self.build()
 
         def check_cfg(self):
             cfg, errs = self.collect()
             e2, warns = ConfigModel.check(cfg) if not errs else ([], [])
             lines = errs + e2 + [t("warn", m=w) for w in warns]
+            if lines:
+                log.warning("Configuration check: %s", activity_detail("; ".join(lines)))
+            else:
+                log.info(bi("Configuration check passed|ตรวจคอนฟิกผ่าน"))
             messagebox.showinfo("check", "\n".join(lines) if lines else t("cfg_ok"))
 
         def switch_lang(self):
@@ -3873,6 +4474,11 @@ def build_app():
                 self.draft = cfg
             self.draft["language"] = "en" if LANG == "th" else "th"
             set_lang(self.draft["language"])
+            log_cfg = copy.deepcopy(self.model.cfg)
+            log_cfg["language"] = self.draft["language"]
+            setup_logging(log_cfg)
+            log.info(bi("GUI language changed to {language}|เปลี่ยนภาษา GUI เป็น {language}")
+                     .format(language=LANG))
             self.build()
 
         def live_toggled(self):
@@ -3883,6 +4489,8 @@ def build_app():
                 "จะส่งข้อความไปยัง Camfrog จริง ตรวจกฎห้องและเงื่อนไข Camfrog ก่อน\nดำเนินการต่อ?"))
             if not ok:
                 self.live_var.set(False)
+            log.info(bi("Live mode is {mode}|โหมดส่งจริง {mode}")
+                     .format(mode="enabled" if self.live_var.get() else "disabled"))
             self.refresh_state()
 
         def start(self, close=False):
@@ -3894,16 +4502,21 @@ def build_app():
                     bi("LIVE|โหมดจริง"), bi("Start in LIVE mode (real messages)?|เริ่มโหมดจริง (ส่งข้อความจริง)?")):
                 return
             args = SimpleNamespace(config=str(self.model.path), lang=None)
+            log.info(bi("Start requested (dry_run={mode})|ร้องขอเริ่ม worker (dry_run={mode})")
+                     .format(mode=cfg["dry_run"]))
             self.run_bg(lambda: cmd_start(cfg, args), "start")
 
         def stop(self):
+            log.info(bi("Stop requested|ร้องขอหยุด worker"))
             self.run_bg(lambda: cmd_stop(self.model.cfg), "stop")
 
         def emergency(self):
             try:
                 (BASE / self.model.cfg["safety"]["stop_file"]).write_text("stop")
+                log.warning(bi("Emergency stop requested|ร้องขอหยุดฉุกเฉิน"))
                 self.say(bi("STOP file written|เขียนไฟล์ STOP แล้ว"))
             except OSError as e:
+                log.error("Emergency stop request failed: %s", activity_detail(e))
                 messagebox.showerror("STOP", str(e))
 
         def helper(self, cmd):
@@ -3911,7 +4524,7 @@ def build_app():
             if errs or ConfigModel.check(cfg)[0]:
                 messagebox.showerror(APP_NAME, "\n".join(errs or ConfigModel.check(cfg)[0]))
                 return
-            setup_logging(cfg)
+            setup_logging(self.model.cfg)
             fn = {"windows": lambda: cmd_windows(cfg), "discover": lambda: cmd_discover(cfg),
                   "autostart-on": lambda: cmd_autostart(SimpleNamespace(config=str(self.model.path), lang=None), True),
                   "autostart-off": lambda: cmd_autostart(SimpleNamespace(config=None, lang=None), False)}[cmd]
@@ -3923,7 +4536,7 @@ def build_app():
             if errs or ConfigModel.check(cfg)[0]:
                 messagebox.showerror(APP_NAME, "\n".join(errs or ConfigModel.check(cfg)[0]))
                 return
-            setup_logging(cfg)
+            setup_logging(self.model.cfg)
             self.run_bg(lambda: cmd_detect(cfg, self.model.path, False, True), "detect")
 
         def apply_proposal(self, out):
@@ -3942,6 +4555,7 @@ def build_app():
             if self.busy:
                 return
             self.busy = True
+            log.info(bi("GUI action started: {kind}|เริ่มคำสั่ง GUI: {kind}").format(kind=kind))
 
             def work():
                 buf = io.StringIO()
@@ -3949,9 +4563,11 @@ def build_app():
                     with contextlib.redirect_stdout(buf):
                         rc = fn()
                 except ImportError:
-                    rc, _ = 2, buf.write(t("win_only"))
+                    rc = 2
+                    buf.write(t("win_only"))
                 except Exception as e:  # shown in the GUI, never a traceback window
-                    rc, _ = 1, buf.write(f"{type(e).__name__}: {e}")
+                    rc = 1
+                    buf.write(f"{type(e).__name__}: {e}")
                 self.q.put((kind, rc, buf.getvalue().strip()))
             self.say("...")
             threading.Thread(target=work, daemon=True).start()
@@ -3964,6 +4580,17 @@ def build_app():
                     kind, rc, out = self.q.get_nowait()
                     self.busy = False
                     self.say(out.splitlines()[-1] if out else t("ok"), rc not in (0, None))
+                    detail = activity_detail(out)
+                    event = bi(
+                        "GUI action {kind} {result} (exit={code})|"
+                        "คำสั่ง GUI {kind} {result} (exit={code})")
+                    if detail:
+                        event += " | " + bi("detail={detail}|รายละเอียด={detail}")
+                    event = event.format(
+                        kind=kind,
+                        result="succeeded" if rc in (0, None) else "failed",
+                        code=rc, detail=detail)
+                    (log.info if rc in (0, None) else log.error)(event)
                     if kind == "start" and rc == 0 and getattr(self, "_close_after", False):
                         self.close_app()  # bot keeps running hidden; reopen the GUI any time
                         return
@@ -3999,30 +4626,49 @@ def build_app():
             widget.insert("1.0", text)
             widget.configure(state="disabled")
 
+        def refresh_activity_log(self):
+            cfg = self.model.cfg
+            path = activity_log_path(cfg)
+            txt = tail_text(path) if path else ""
+            self.last_log = txt
+            if hasattr(self, "log_info"):
+                source = str(path) if path else bi(
+                    "file logging is disabled|ปิดการบันทึกลงไฟล์")
+                note = bi(
+                    "Log file: {path}. Message content follows Advanced → Log chat text.|"
+                    "ไฟล์ log: {path} เนื้อหาข้อความขึ้นอยู่กับ Advanced → Log chat text")
+                self.log_info.configure(text=note.format(path=source))
+            display = txt or bi(
+                "No activity entries yet, or file logging is disabled.|"
+                "ยังไม่มีรายการกิจกรรม หรือปิดการบันทึกลงไฟล์")
+            self.set_text(self.log, display)
+            self.log.see("end")
+
         # ---- live state
         def tick(self):
             if self._closing:
                 return
             self.refresh_state()
-            cfg = self.model.cfg
-            txt = tail_text(BASE / cfg["log"]["file"]) if cfg["log"]["file"] else ""
+            path = activity_log_path(self.model.cfg)
+            txt = tail_text(path) if path else ""
             if txt != self.last_log:
-                self.last_log = txt
-                self.set_text(self.log, txt)
-                self.log.see("end")
+                self.refresh_activity_log()
             if not self._closing:
                 self.root.after(1500, self.tick)
 
         def refresh_state(self):
             cfg = self.model.cfg
             pid = running_pid(cfg)
-            self.state_lbl.configure(text=(t("state_running", pid=pid) if pid else t("state_stopped")),
-                                     foreground="#060" if pid else "#a00")
+            running = bool(pid) or worker_mutex_active()
+            state = (t("state_running", pid=pid) if pid else
+                     t("state_running_unknown") if running else t("state_stopped"))
+            self.state_lbl.configure(text=state,
+                                     foreground="#28744c" if running else "#a3303a")
             live = (not cfg["dry_run"]) if not hasattr(self, "live_var") else self.live_var.get()
             self.mode_lbl.configure(text=bi("LIVE|โหมดจริง") if live else bi("DRY-RUN|โหมดทดลอง"),
-                                    foreground="#c00" if live else "#06a")
-            self.btn_start.state(["disabled"] if pid else ["!disabled"])
-            self.btn_stop.state(["!disabled"] if pid else ["disabled"])
+                                    foreground="#9f3740" if live else "#8b672b")
+            self.btn_start.state(["disabled"] if running else ["!disabled"])
+            self.btn_stop.state(["!disabled"] if running else ["disabled"])
             s = read_stats(cfg)
             self.stats_lbl.configure(text=t("stats_line", started=s.get("started", "?"), st=s.get("statuses", 0),
                                                rp=s.get("replies", 0), fl=s.get("failures", 0)) if s else "")
@@ -4087,13 +4733,13 @@ def build_app():
         def test_im_rule(self):
             cfg, errs = self.collect()
             if errs:
-                self.tiout.configure(text=errs[0], foreground="#b00")
+                self.tiout.configure(text=errs[0], foreground="#a3303a")
                 return
             try:
                 result = explain(cfg, self.tin.get().strip(), self.tim.get(), im=True)
-                self.tiout.configure(text=result.replace("\n", "  |  "), foreground="#0a5")
+                self.tiout.configure(text=result.replace("\n", "  |  "), foreground="#28744c")
             except re.error as e:
-                self.tiout.configure(text=str(e), foreground="#b00")
+                self.tiout.configure(text=str(e), foreground="#a3303a")
 
         def mainloop(self):
             self.root.mainloop()
@@ -4156,6 +4802,31 @@ def version_newer(latest, current=APP_VERSION):
     return _version_key(latest) > _version_key(current)
 
 
+def _validate_github_release_url(url):
+    """Accept only HTTPS URLs on GitHub's release and asset hosts."""
+    allowed_hosts = {
+        "github.com", "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+    }
+    try:
+        parsed = urllib.parse.urlsplit(str(url))
+        port = parsed.port
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid GitHub release URL") from exc
+    if (parsed.scheme.casefold() != "https"
+            or (parsed.hostname or "").casefold() not in allowed_hosts
+            or parsed.username or parsed.password
+            or port not in (None, 443)):
+        raise ValueError("update URL must use HTTPS on a GitHub release host")
+    return str(url)
+
+
+def _validate_github_response_url(response, requested_url):
+    geturl = getattr(response, "geturl", None)
+    final_url = geturl() if callable(geturl) else requested_url
+    _validate_github_release_url(final_url)
+
+
 def github_latest_release(timeout=15.0):
     """(tag, notes, {asset_name: url}) for the newest release, or None."""
     request = urllib.request.Request(
@@ -4183,19 +4854,26 @@ def check_for_update(asset_name, timeout=15.0):
 
 
 def check_release_assets(asset_name, timeout=15.0):
-    """(tag, url, sums_url, notes) for a newer release carrying `asset_name`."""
+    """Return verified GitHub release URLs only when the asset has checksums."""
     release = github_latest_release(timeout)
     if release is None:
         return None
     tag, notes, assets = release
     url = assets.get(asset_name)
-    if url and version_newer(tag):
-        sums_url = assets.get(UPDATE_ASSET_SUMS, "")
-        if not sums_url:  # e.g. release-SHA256SUMS.txt alongside SHA256SUMS.txt
-            sums_url = next((u for n, u in sorted(assets.items())
-                             if n.endswith("SHA256SUMS.txt")), "")
-        return tag, url, sums_url, notes
-    return None
+    if not url or not version_newer(tag):
+        return None
+    sums_url = assets.get(UPDATE_ASSET_SUMS, "")
+    if not sums_url:  # e.g. release-SHA256SUMS.txt alongside SHA256SUMS.txt
+        sums_url = next((value for name, value in sorted(assets.items())
+                         if name.endswith("SHA256SUMS.txt")), "")
+    if not sums_url:
+        return None
+    try:
+        _validate_github_release_url(url)
+        _validate_github_release_url(sums_url)
+    except ValueError:
+        return None
+    return tag, url, sums_url, notes
 
 
 def self_update(asset_name, confirm=None, timeout=15.0):
@@ -4224,26 +4902,30 @@ def _sha256_file(path, chunk=1 << 20):
 
 
 def download_update(url, target, timeout=60.0):
-    """Stream a release asset to `target`. Returns the bytes written."""
+    """Stream a GitHub release asset to `target`. Returns the bytes written."""
+    _validate_github_release_url(url)
     request = urllib.request.Request(
-        url, headers={"User-Agent": "camfrog_auto/{0}".format(APP_VERSION)})
+        url, headers={"User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
     written = 0
-    with urllib.request.urlopen(request, timeout=timeout) as response, \
-            open(target, "wb") as handle:
-        while True:
-            block = response.read(1 << 16)
-            if not block:
-                break
-            handle.write(block)
-            written += len(block)
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        _validate_github_response_url(response, url)
+        with open(target, "wb") as handle:
+            while True:
+                block = response.read(1 << 16)
+                if not block:
+                    break
+                handle.write(block)
+                written += len(block)
     return written
 
 
 def verify_against_sums(sums_url, asset_name, local_path, timeout=30.0):
-    """True when local_path matches the release's SHA256SUMS entry."""
+    """True when local_path matches the GitHub release's SHA256SUMS entry."""
+    _validate_github_release_url(sums_url)
     request = urllib.request.Request(
         sums_url, headers={"User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
     with urllib.request.urlopen(request, timeout=timeout) as response:
+        _validate_github_response_url(response, sums_url)
         text = response.read().decode("utf-8", "replace")
     want = ""
     for line in text.splitlines():
@@ -4251,8 +4933,7 @@ def verify_against_sums(sums_url, asset_name, local_path, timeout=30.0):
         if len(parts) != 2:
             continue
         name = parts[1].lstrip("*")
-        # release sums may be flat ("room-control.exe") or dist-relative
-        # ("room-control/room-control.exe"); match either, first hit wins.
+        # Release sums may be flat or dist-relative; match either, first hit wins.
         if name == asset_name or name.endswith("/" + asset_name):
             want = parts[0].lower()
             break
@@ -4268,6 +4949,17 @@ def stage_and_swap_update(url, asset_name, sums_url=None):
     """
     if not getattr(sys, "frozen", False):
         return False, "self-update only applies to the packaged executable."
+    if not sums_url:
+        return False, "release checksum is unavailable; update refused."
+    if not isinstance(asset_name, str) or not re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9._-]{0,123}\.exe",
+            asset_name, flags=re.IGNORECASE):
+        return False, "invalid update asset name."
+    try:
+        _validate_github_release_url(url)
+        _validate_github_release_url(sums_url)
+    except ValueError as exc:
+        return False, str(exc)
     exe = Path(sys.executable).resolve()
     staged = exe.parent / (asset_name + ".new")
     try:
@@ -4291,6 +4983,6 @@ def stage_and_swap_update(url, asset_name, sums_url=None):
     if os.name == "nt":  # CREATE_NO_WINDOW: no console flash during the swap
         spawn["creationflags"] = 0x08000000
     subprocess.Popen(command, close_fds=True, **spawn)
-    return True, "update downloaded; the app will restart itself with {0}.".format(asset_name)
+    return True, "update is staged; it will replace {0} after the app exits.".format(asset_name)
 
 

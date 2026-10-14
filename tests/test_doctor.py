@@ -6,21 +6,21 @@ import doctor  # noqa: E402
 
 
 def info(**kw):
-    base = {"version": (3, 13, 1), "bits": 64, "machine": "AMD64", "impl": "CPython",
+    base = {"version": (3, 12, 10), "bits": 64, "machine": "AMD64", "impl": "CPython",
             "free_threaded": False, "windows": True}
     base.update(kw)
     return base
 
 
-def test_good_interpreters_have_no_problems():
-    for v in ((3, 9, 0), (3, 11, 9), (3, 13, 1), (3, 14, 0), (3, 15, 0)):
-        assert doctor.diagnose(info(version=v)) == [], v
+def test_only_python_312_is_supported():
+    assert doctor.diagnose(info(version=(3, 12, 10))) == []
+    for v in ((3, 11, 9), (3, 13, 1), (3, 15, 0)):
+        assert doctor.diagnose(info(version=v)), v
 
 
-def test_32bit_old_versions_flagged_but_32bit_314_ok():
+def test_only_64bit_python_312_is_supported():
     assert doctor.diagnose(info(bits=32, version=(3, 12, 4)))
-    assert doctor.diagnose(info(bits=32, version=(3, 13, 0)))
-    assert doctor.diagnose(info(bits=32, version=(3, 14, 0))) == []   # pywin32 ships cp314 win32
+    assert doctor.diagnose(info(bits=64, version=(3, 13, 0)))
 
 
 def test_free_threaded_pypy_old_and_future_flagged():
