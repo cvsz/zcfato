@@ -851,6 +851,7 @@ def test_login_arms_automation(tmp_path, monkeypatch):
     manager.root.update()
     assert getattr(manager, "session_ready", False) is False
     manager.switch_language()
+    manager.switch_language()  # Switch back to English
 
     monkeypatch.setattr(wsg, "fetch_profile", lambda *a: _signed_in_page())
     manager.cookie_paste_var.set("PHPSESSID=abc1234567890123")

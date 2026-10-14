@@ -2827,6 +2827,10 @@ class WebStatusManager:
         self._start_generation = 0
         self._clipboard_bound_widgets = set()
         self._language_widgets = []
+        self._note_key = None
+        self._note_source = ""
+        self._paste_state_source = ""
+        self._paste_state_color = WEB_STATUS_THEME["muted"]
         load_dotenv(BASE / ".env")  # pick up the encrypted account, if saved
         self.root = self.tk.Tk()
         self.root.title("ZChat Web Status")
@@ -5652,7 +5656,7 @@ class WebStatusManager:
     def _set_note(self, message):
         self.note.set(message)
 
-    def _run_bg(self, fn, force=False, on_done=None):
+    def _run_bg(self, fn, force=False, on_done=None, on_error=None):
         if self.busy and not force:
             return
         self.busy = True
