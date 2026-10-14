@@ -15,9 +15,14 @@ echo.
 
 rem --- Capture the source used for this build; release.py checks this marker ---
 set "BUILD_SOURCE_COMMIT=unknown"
-set "BUILD_SOURCE_CLEAN=true"
+set "BUILD_SOURCE_CLEAN=false"
+set "BUILD_STATUS_FILE=%TEMP%\camfrog-build-source-%RANDOM%-%RANDOM%.tmp"
 for /f "delims=" %%i in ('git rev-parse HEAD 2^>nul') do set "BUILD_SOURCE_COMMIT=%%i"
-for /f "delims=" %%i in ('git status --porcelain --untracked-files=normal 2^>nul') do set "BUILD_SOURCE_CLEAN=false"
+git status --porcelain --untracked-files=normal > "%BUILD_STATUS_FILE%" 2>nul
+if errorlevel 1 goto :build_source_status_done
+for %%A in ("%BUILD_STATUS_FILE%") do if %%~zA EQU 0 set "BUILD_SOURCE_CLEAN=true"
+:build_source_status_done
+if exist "%BUILD_STATUS_FILE%" del "%BUILD_STATUS_FILE%" >nul 2>nul
 
 rem --- Build Camfrog feature apps ---
 echo [1/3] Building Camfrog feature apps...
