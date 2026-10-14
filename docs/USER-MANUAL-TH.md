@@ -137,3 +137,7 @@ English version: `USER-MANUAL-EN.md`.
 - บรรทัดที่ไม่ใช่รูป `ชื่อ: ข้อความ` ถูกข้าม คำตอบที่ขึ้นต้นด้วย `/` ถูกบล็อก ไม่มีการเตะอัตโนมัติ
 - ห้าม commit รหัสผ่าน cookie token หรือข้อมูลส่วนตัว ไฟล์ cookie อยู่นอก repo เสมอ
 - ตรวจเงื่อนไข Camfrog และกฎห้องก่อนเปิดระบบอัตโนมัติ แจ้งช่องโหว่แบบส่วนตัวตาม `SECURITY.md`
+
+## 14. ZChat Control Server
+
+Control server เป็นเครื่องมือผู้ดูแลแยกต่างหากสำหรับใช้งานในเครื่อง ไม่ใช่ Camfrog client ฐานข้อมูล PostgreSQL ทำงานใน Docker volume บนเครื่องนี้ และ dashboard/API ผูกกับ loopback Windows agent ส่งเฉพาะ snapshot ที่ตัดข้อมูลอ่อนไหวแล้ว และส่งต่อคำสั่งผ่าน official client ตามที่รองรับ ตัว server ไม่รับรหัสผ่าน Camfrog, browser cookie, CSRF, CAPTCHA response หรือข้อมูลชำระเงิน การดึง profile แบบ authenticated และ Cloud Bot transport ยังไม่เปิดใช้ อ่านวิธีตั้งค่าและข้อจำกัดปัจจุบันใน [`control-server/README.md`](../control-server/README.md) รุ่น MVP นี้ยังไม่พร้อมใช้งาน production

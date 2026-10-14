@@ -52,6 +52,10 @@ If the error says `requirements.txt (line 1)` and mentions only pywinauto, you a
 
 The source-only `python camfrog_presence.py probe NICKNAME` command makes one bounded probe call and stores public Camfrog status-image evidence in a local SQLite database. It always classifies presence as `UNKNOWN`; see [`docs/CAMFROG-PRESENCE.md`](docs/CAMFROG-PRESENCE.md) before interpreting samples.
 
+## ZChat Control Server
+
+The separate local-first control plane uses FastAPI and a persistent PostgreSQL Docker volume bound to this machine. It provides an operator dashboard, account and agent registry, leased commands, audit events, and sanitized profile/presence snapshots. Live authenticated Camfrog fetching, Cloud Bot transport, Store checkout, and production deployment remain unverified or disabled. See [`control-server/README.md`](control-server/README.md) for setup, API scope, and limits.
+
 ## Background mode
 
 Room Control and IM Auto-reply use the GUI **Save & Start** and **Stop** controls. Status apps use their own **Start** and **Stop** controls and bundled background worker.

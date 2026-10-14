@@ -1,5 +1,7 @@
 # AUDIT.md — camfrog-auto v2.18 review
 
+**Historical audit snapshot.** This review records findings for the v2.18 source state only. Later features and the ZChat Control Server have separate current documentation; do not use this file as current release evidence.
+
 Scope: `camfrog_auto.py`, `tools/`, build/CI scripts, config, tests. **Not verifiable here:** anything touching a live Camfrog build or Windows UIA/Win32 (no Windows, no Camfrog). Those paths are covered by fakes only; run `discover` + dry-run on a real machine before going live.
 
 ## Fixed (each has a regression test in `tests/test_audit_fixes.py`)

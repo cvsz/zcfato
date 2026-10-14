@@ -52,6 +52,10 @@ Room Control และ IM Auto-reply ใช้ `config.json` แยกกัน 
 
 คำสั่ง source-only `python camfrog_presence.py probe NICKNAME` เรียก probe หนึ่งครั้งแบบมีขอบเขตและเก็บหลักฐานรูปสถานะสาธารณะของ Camfrog ลง SQLite ในเครื่อง โดยจัดสถานะเป็น `UNKNOWN` เสมอ อ่าน [`docs/CAMFROG-PRESENCE.md`](docs/CAMFROG-PRESENCE.md) ก่อนแปลผลตัวอย่าง
 
+## ZChat Control Server
+
+Control plane แยกต่างหากสำหรับใช้งานในเครื่อง ใช้ FastAPI และ PostgreSQL ใน Docker พร้อม volume ถาวรบนเครื่องนี้ มี dashboard สำหรับผู้ดูแล ระบบบัญชีและ agent คิวคำสั่งแบบ lease, audit และ snapshot โปรไฟล์/presence ที่ตัดข้อมูลอ่อนไหวแล้ว การดึงข้อมูล Camfrog ด้วย session จริง, Cloud Bot transport, การชำระ Store และ production deployment ยังไม่ยืนยันหรือยังปิดไว้ อ่านวิธีติดตั้ง ขอบเขต API และข้อจำกัดที่ [`control-server/README.md`](control-server/README.md)
+
 ## รันเบื้องหลัง
 
 Room Control และ IM Auto-reply มีปุ่ม **Save & Start** กับ **Stop** ส่วนแอปสถานะมีปุ่มของตัวเองและ worker ที่มากับ exe

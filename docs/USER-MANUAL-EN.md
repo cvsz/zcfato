@@ -135,3 +135,7 @@ This feature configures Camfrog's server-installed plugins; it does not create o
 - Lines not in `name: message` form are ignored; replies starting with `/` are blocked; there is no auto-kick.
 - Never commit passwords, cookies, tokens, or personal data. Cookie exports stay outside the repo.
 - Check Camfrog's terms and your room's rules before enabling automation. Report vulnerabilities privately per `SECURITY.md`, never in public issues.
+
+## 14. ZChat Control Server
+
+The control server is a separate local-first operator tool, not a Camfrog client. Its PostgreSQL database runs in a local Docker volume and the dashboard/API bind to loopback. Windows agents report only sanitized snapshots and execute supported official-client handoffs; the server does not receive Camfrog passwords, browser cookies, CSRF values, CAPTCHA responses, or payment credentials. Live authenticated profile fetching and Cloud Bot transport are not enabled. Follow [`control-server/README.md`](../control-server/README.md) for local setup and the current integration limits. This MVP is not production-ready.

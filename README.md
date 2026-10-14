@@ -8,3 +8,7 @@ Full user manual: [`docs/USER-MANUAL-EN.md`](docs/USER-MANUAL-EN.md) (Thai: [`do
 - ไทย: [`README-TH.md`](README-TH.md)
 
 Windows only. Uses UI Automation — run `detect` first (details in either language file above).
+
+## ZChat Control Server
+
+The separate ZChat Control Server local MVP, including its local PostgreSQL setup, agent workflow, dashboard, and verified integration limits, is documented in [`control-server/README.md`](control-server/README.md). It binds to loopback for local development and is not a production deployment.

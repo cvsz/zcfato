@@ -8,6 +8,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
+- Added the local-first ZChat Control Server subproject with PostgreSQL-backed accounts, agents, leased commands, audit events, sanitized snapshots, and an operator dashboard. Live Camfrog login/fetch, Cloud Bot transport, checkout, and production deployment remain disabled or unverified.
 - Combined Status Changer executable with Random, Marquee, and Activity Log tabs; its configuration and runtime data stay under `status-data/`.
 - Bot Manager plugin names, field labels, and known choices now follow the TH/EN setting while submitted option values remain unchanged.
 - Bot Manager's local Music DJ page starts/stops the packaged worker and controls its queue through bounded, expiring local JSON requests; Music DJ remains the queue owner.
