@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import logging
 import re
+from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 _HEADER_SECRET_PATTERN = re.compile(r"(?i)(authorization|cookie|set-cookie)(\s*[=:]\s*)[^\r\n]+")
 _VALUE_SECRET_PATTERN = re.compile(
@@ -20,8 +22,137 @@ def redact_sensitive_text(value: str) -> str:
     return _VALUE_SECRET_PATTERN.sub(r"\1\2[REDACTED]", value)
 
 
+def format_duration_ms(ms: float) -> str:
+    """Format duration in milliseconds rounded to two decimal places."""
+    return f"{round(ms, 2)}ms"
+
+
+def redact_db_url(url: str) -> str:
+    """Mask credentials (username, password) in database URLs."""
+    if not url or "@" not in url:
+        return url
+    parsed = urlsplit(url)
+    if not parsed.netloc or "@" not in parsed.netloc:
+        return url
+    userinfo, hostinfo = parsed.netloc.rsplit("@", 1)
+    masked_userinfo = "***:***" if ":" in userinfo else "***"
+    netloc = f"{masked_userinfo}@{hostinfo}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment))
+
+
+class StructuredLogger:
+    """Emits JSON log lines with schema fields: {"ts", "level", "event", "request_id", ...}."""
+
+    def __init__(
+        self,
+        logger_or_name: logging.Logger | str | None = None,
+        *,
+        logger: logging.Logger | None = None,
+    ) -> None:
+        if logger is not None:
+            self._logger = logger
+        elif isinstance(logger_or_name, logging.Logger):
+            self._logger = logger_or_name
+        elif isinstance(logger_or_name, str):
+            self._logger = logging.getLogger(logger_or_name)
+        elif logger_or_name is None:
+            self._logger = logging.getLogger("camfrog_control_server")
+        else:
+            self._logger = logger_or_name
+
+    @property
+    def logger(self) -> logging.Logger:
+        return self._logger
+
+    def log(
+        self,
+        level: int | str,
+        event: str,
+        *,
+        request_id: str | None = None,
+        **extra: Any,
+    ) -> str:
+        if isinstance(level, str):
+            level_name = level.upper()
+            level_no = getattr(logging, level_name, logging.INFO)
+        else:
+            level_no = level
+            name = logging.getLevelName(level_no)
+            level_name = name if isinstance(name, str) else str(name)
+
+        if request_id is None and "request_id" in extra:
+            req_val = extra.pop("request_id")
+            request_id = str(req_val) if req_val is not None else None
+
+        if "extra" in extra and isinstance(extra["extra"], dict):
+            extra_dict = extra.pop("extra")
+            for k, v in extra_dict.items():
+                extra.setdefault(k, v)
+
+        record: dict[str, Any] = {
+            "ts": datetime.now(UTC).isoformat(),
+            "level": level_name,
+            "event": event,
+            "request_id": request_id,
+            **extra,
+        }
+        line = json.dumps(record, default=str, separators=(",", ":"))
+        self._logger.log(level_no, line)
+        return line
+
+    def info(self, event: str, *, request_id: str | None = None, **extra: Any) -> str:
+        return self.log(logging.INFO, event, request_id=request_id, **extra)
+
+    def debug(self, event: str, *, request_id: str | None = None, **extra: Any) -> str:
+        return self.log(logging.DEBUG, event, request_id=request_id, **extra)
+
+    def warning(self, event: str, *, request_id: str | None = None, **extra: Any) -> str:
+        return self.log(logging.WARNING, event, request_id=request_id, **extra)
+
+    def error(self, event: str, *, request_id: str | None = None, **extra: Any) -> str:
+        return self.log(logging.ERROR, event, request_id=request_id, **extra)
+
+    def critical(self, event: str, *, request_id: str | None = None, **extra: Any) -> str:
+        return self.log(logging.CRITICAL, event, request_id=request_id, **extra)
+
+    def exception(self, event: str, *, request_id: str | None = None, **extra: Any) -> str:
+        if "exc_info" not in extra:
+            extra["exc_info"] = True
+        return self.log(logging.ERROR, event, request_id=request_id, **extra)
+
+    emit = log
+
+
+def log_startup_event(
+    logger: logging.Logger | StructuredLogger,
+    *,
+    version: str,
+    db_url_redacted: str,
+) -> None:
+    """Log server start with version and redacted DB URL."""
+    safe_db_url = redact_db_url(db_url_redacted)
+    if isinstance(logger, StructuredLogger):
+        logger.info(
+            "startup",
+            version=version,
+            database_url=safe_db_url,
+            db_url_redacted=safe_db_url,
+        )
+    elif hasattr(logger, "info"):
+        record: dict[str, Any] = {
+            "ts": datetime.now(UTC).isoformat(),
+            "level": "INFO",
+            "event": "startup",
+            "request_id": None,
+            "version": version,
+            "database_url": safe_db_url,
+            "db_url_redacted": safe_db_url,
+        }
+        logger.info(json.dumps(record, default=str, separators=(",", ":")))
+
+
 def log_http_request(
-    logger: logging.Logger,
+    logger: logging.Logger | StructuredLogger,
     *,
     request_id: str,
     method: str,
@@ -38,4 +169,14 @@ def log_http_request(
         "status_code": status_code,
         "duration_ms": round(duration_ms, 2),
     }
-    logger.info(redact_sensitive_text(json.dumps(record, separators=(",", ":"))))
+    if isinstance(logger, StructuredLogger):
+        logger.info(
+            "http_request",
+            request_id=request_id,
+            method=method,
+            path=path,
+            status_code=status_code,
+            duration_ms=round(duration_ms, 2),
+        )
+    else:
+        logger.info(redact_sensitive_text(json.dumps(record, separators=(",", ":"))))
