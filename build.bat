@@ -276,6 +276,7 @@ echo === BUILD WEB STATUS UPDATER (GUI + CONSOLE PROTOTYPE) ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\web-status --workpath build\web-status ^
     --name web-status %ICONARG% ^
+    --add-data "assets\zttato.png;assets" ^
     web_status_entry.py
 if errorlevel 1 goto :fail
 
@@ -286,6 +287,7 @@ echo === BUILD MUSIC DJ ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\music-dj --workpath build\music-dj ^
     --name music-dj %ICONARG% ^
+    --add-data "assets\zeazdev-room.png;assets" ^
     --collect-all pywinauto --collect-submodules comtypes ^
     music_dj_entry.py
 if errorlevel 1 goto :fail

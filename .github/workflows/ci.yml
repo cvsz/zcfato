@@ -11,12 +11,45 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with: { python-version: "3.12" }
       - run: sudo apt-get update && sudo apt-get install -y xvfb python3-tk
-      - run: make validate-template
-      - run: pip install pytest
-      - run: python -m py_compile camfrog_auto.py camfrog_gui.py camfrog_status_gui.py camfrog_private_chat_gui.py camfrog_music_gui.py room_control_gui.py im_autoreply_gui.py status_random_gui.py status_marquee_gui.py status_changer_gui.py chat_im_private_gui.py camfrog_tray.py clipboard_support.py room_control_entry.py chat_im_private_entry.py status_random_entry.py status_marquee_entry.py status_changer_entry.py im_autoreply_entry.py music_dj_entry.py web_status_entry.py tools/web_status.py line/*.py
+      - run: python -m pip install --upgrade pip
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pip_audit -r requirements-dev.txt
+      - run: python -m py_compile camfrog_auto.py camfrog_gui.py camfrog_status_gui.py camfrog_private_chat_gui.py camfrog_music_gui.py camfrog_presence.py status_changer_gui.py room_control_gui.py im_autoreply_gui.py status_random_gui.py status_marquee_gui.py chat_im_private_gui.py camfrog_tray.py clipboard_support.py room_control_entry.py chat_im_private_entry.py status_random_entry.py status_marquee_entry.py status_changer_entry.py im_autoreply_entry.py music_dj_entry.py web_status_entry.py tools/web_status.py line/*.py
       - run: python camfrog_auto.py check --config config.example.json
       - run: python camfrog_auto.py --lang th check --config config.example.json
-      - run: xvfb-run -a pytest -q
+      - run: xvfb-run -a pytest -q tests
+  control-server:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    defaults:
+      run:
+        working-directory: control-server
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e '.[test,lint]'
+      - run: python -m pip install 'pip-audit>=2.7,<3'
+      - run: python -m pip_audit --local --skip-editable
+      - run: ruff format --check src tests
+      - run: ruff check src tests
+      - run: pytest -q
+      - run: alembic upgrade head
+        env:
+          DATABASE_URL: postgresql+psycopg://postgres@localhost:5432/postgres
   build-windows:
     needs: test
     runs-on: windows-latest

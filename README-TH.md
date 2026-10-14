@@ -14,16 +14,21 @@
 | `chat-im-private\chat-im-private.exe` | แสดงและโฟกัสหน้าต่างแชทส่วนตัวที่เปิดอยู่ใน Camfrog ไม่มีการอ่านหรือส่งข้อความ |
 | `status-changer\status-changer.exe` | หน้าต่างเดียว มีแท็บ **Random**, **Marquee** และ **Activity Log** โดยแยก config, pool สิบช่อง และการตั้งค่า worker ของแต่ละโหมด |
 | `status-random\status-random.exe` | สลับสถานะแบบสุ่ม มี pool สิบช่องของตัวเองใน `random-data\` |
-| `status-marquee\status-marquee.exe` | สลับสถานะแบบเลื่อน มี pool สิบช่องของตัวเอง และตัวควบคุมวนช่องใน `marquee-data\` |
-| `im-autoreply\im-autoreply.exe` | ตอบ IM ส่วนตัว พร้อมแท็บ Activity Log แสดงคำสั่งจาก GUI และผลการทำงานของ worker ไม่ตอบในห้องและไม่เปลี่ยนสถานะ |
-| `music-dj\music-dj.exe` | ดีเจเพลงในห้อง: รับคำสั่ง `!request` / `!queue` / `!current` / `!skip` / `!help` จากแชท เก็บคิวลงไฟล์ และเล่นไฟล์เสียงที่ Windows MCI รองรับบนเครื่องส่งเข้า Camfrog ได้ เลือกโฟลเดอร์เพลงด้วย Browse ปิดการเปลี่ยนสถานะและการตอบ IM ส่วนตัว |
+| `status-marquee\status-marquee.exe` | สลับสถานะแบบเลื่อน มี pool สิบช่องของตัวเอง ตัวควบคุม Loop ใน `marquee-data\` |
+| `status-changer\status-changer.exe` | รวมโหมดสุ่มและ Marquee พร้อม Activity Log เก็บข้อมูลแยกใน `status-data\` |
+| `im-autoreply\im-autoreply.exe` | ตอบ IM ส่วนตัวอย่างเดียว ไม่ตอบในห้อง ไม่เปลี่ยนสถานะ |
+| `music-dj\music-dj.exe` | ZeaZDev room ดีเจเพลงในห้อง: รับคำสั่ง `!request` / `!randommusic` / `!queue` / `!current` / `!skip` / `!help` จากแชท เก็บคิวและลิงก์ค้นหาเพลงที่สุ่มได้ลง `youtube_random_music.json` และเล่นเสียงในเครื่องหรือวิดีโอ YouTube ที่ player มาตรฐานมองเห็นได้ `!current` แสดงผู้ขอ เวลาเล่น และเพลงถัดไป ในแท็บ Music มี Windows TTS อ่านข้อความหรือสรุปคิว โดยต่อเอาต์พุตเสียงเข้าไมโครโฟน Camfrog ปิดการเปลี่ยนสถานะและการตอบ IM ส่วนตัว |
 | `web-status\web-status.exe` | รุ่นทดลองแบบ GUI + console: เปลี่ยนสถานะผ่าน profiles.camfrog.com (ค่าเริ่มต้นโหมดทดลอง; GUI ตรวจสอบ session `PHPSESSID` จากเบราว์เซอร์ก่อนเริ่มเปลี่ยนสถานะจริง) ไม่ใส่ argument เปิด GUI ใส่ argument ใช้ CLI ใน GUI มีช่องข้อความบรรทัดเดียว 10 ช่อง บันทึกใน `webtext.db`; ปุ่ม **Start** วนเฉพาะบรรทัดที่ไม่ว่างทุก N วินาที |
 
-แต่ละ exe เก็บ config และข้อมูล runtime ในโฟลเดอร์ของแอปตัวเอง Room Control และ IM Auto-reply ใช้ `config.json` คนละไฟล์ ส่วน Chat IM Private ใช้ `private-chat-config.json` Status Changer เก็บ `random-config.json` และ `marquee-config.json` รวมถึง pool และ worker settings แยกกันใน `status-data\` เมื่อเปิดครั้งแรก ระบบนำ selector และค่ากลางจาก `camfrog-status-config.json` เดิมมาใช้ ส่วนค่าของแต่ละโหมดและ pool มาจากแอปเก่าของโหมดนั้นถ้ามี โดยคัดลอก pool เดิมเข้าฐานข้อมูลของ Status Changer ครั้งเดียว หลังจากนั้นการแก้ไขจะแยกจากกัน ไฟล์ config เก่าจะเก็บไว้สำหรับกู้คืนและจะไม่ถูกเขียนอีก การติดตั้งใหม่จะสร้างเฉพาะ config สองไฟล์ของโหมด exe สถานะแบบแยกเดิมก็เก็บ config ในโฟลเดอร์ของแอปตัวเอง ปุ่ม **Start** บันทึก config ของโหมดที่เลือกและเริ่ม worker ของโหมดนั้น
+หน้า **Bot Manager** ของ Web Status ควบคุมคิวใน `music-dj.exe` แยกตัวผ่านไฟล์ในเครื่อง และอ่าน/ควบคุม vMix บนเครื่องเดียวกันได้ Music DJ รับ URL หรือ ID YouTube เข้าคิว เปิด player มาตรฐานที่มองเห็นได้ และเลื่อนคิวตาม event เล่น/จบเพลง ดูขอบเขตและรายการตรวจรับ Windows ที่ [`docs/zBOT-Youtube-MUSIC-DJ.md`](docs/zBOT-Youtube-MUSIC-DJ.md)
+
+Room Control และ IM Auto-reply ใช้ `config.json` แยกกัน ส่วน Chat IM Private ใช้ `private-chat-config.json` และ Random/Marquee ใช้ `camfrog-status-config.json` ในโฟลเดอร์ข้อมูลคนละชุด แต่ละแอปแยก pool, log, ประวัติ และ worker ปุ่ม **Start** จะบันทึกค่าและเริ่ม worker ของแอปนั้น
 
 ## สร้าง exe
 
-ดับเบิลคลิก `build.bat` (ต้องใช้ CPython 3.12 แบบ 64-bit) เพื่อสร้าง exe แปดตัวแยกโฟลเดอร์ใน `dist\` โดยเก็บ config/ข้อมูลเดิมของแต่ละแอปไว้เมื่อ build ใหม่ ไม่คัดลอก config กลาง และสร้าง zip ที่มีเฉพาะ exe กับ checksums นอกจากนี้ยังเขียน `dist\SHA256SUMS.txt` ใช้ `full-build.bat` เพื่อ build แอป Camfrog ทั้ง 8 ตัวพร้อม LINE Status Changer ที่แยกต่างหาก CI รัน full build และเผยแพร่ exe ของ LINE เป็น artifact แยก โดยไม่ส่ง config LINE ในเครื่องขึ้นไป
+ดับเบิลคลิก `build.bat` (ต้องมี Python 64-bit) ระบบเลือก Python 3.12 และสร้างแปดแอปแยกโฟลเดอร์ใน `dist\` โดยเก็บ config/ข้อมูลเดิมของแต่ละแอปไว้เมื่อ build ใหม่ ไม่คัดลอก config กลาง และสร้าง zip ที่มีเฉพาะ exe กับ checksums นอกจากนี้ยังเขียน `dist\SHA256SUMS.txt`
+
+ใช้ `full-build.bat` หรือ `full-build.ps1` เพื่อ build แอปทั้งหมดรวมแอป LINE โดยจะ publish release ก็ต่อเมื่อระบุ `--release`; PowerShell รับ `--release vX.Y.Z` เมื่อเวอร์ชันตรงกับ `APP_VERSION` เท่านั้น
 
 - **ไอคอน:** เปลี่ยนไฟล์ `app.ico` (ไฟล์ `.ico` หลายขนาดจริง 16–256 px) แล้ว build ใหม่ ถ้า Explorer ยังโชว์ไอคอนเก่าคือ cache ของ Windows ให้ย้ายหรือเปลี่ยนชื่อ exe หรือรีสตาร์ท Explorer
 - **Checksums และ zip:** `SHA256SUMS.txt` ระบุ path ของ exe แต่ละตัว และสร้าง zip ด้วย Python ตรวจแฮชด้วย `certutil -hashfile dist\room-control\room-control.exe SHA256`
@@ -41,10 +46,16 @@
 1. เปิด Camfrog แล้วเข้าห้อง สำหรับ Camfrog 8.x เปิด `room-control.exe` แล้วใช้ **Setup → Auto-detect** ผลวิเคราะห์: `docs/CAMFROG-8.5-FINDINGS.md`
 2. แก้ `config.json` ของแอปนั้น ตั้งนิค ตั้งกฎตอบ คง `dry_run` ไว้ขณะทดสอบ
 3. ใช้ `im-autoreply.exe` สำหรับตอบ IM ส่วนตัว config และ log แยกจาก Room Control
-4. ใช้ `status-changer.exe` ตั้งข้อความ Random และ Marquee ในแท็บแยกกัน หรือเปิด exe สถานะรุ่นเดิมก็ได้ ปุ่ม **Save Data** บันทึกข้อความและค่าของแท็บที่เลือกโดยไม่ติดต่อ Camfrog ค่าเริ่มต้นเป็นโหมดทดลอง ให้เปิด **Send statuses live to Camfrog** ก่อนกด **Start** เพื่อส่งสถานะจริง ส่วน exe รุ่นเดิมยังมีปุ่ม **Apply Now**
+4. ใช้ `status-random.exe` หรือ `status-marquee.exe` สำหรับแอปแยก หรือ `status-changer.exe` สำหรับหน้ารวมพร้อม Activity Log แต่ละแอปเก็บข้อมูลของตัวเอง ค่าเริ่มต้นเป็นโหมดทดลอง ให้เปิด **Send statuses live to Camfrog** ก่อนกด **Apply Now** หรือ **Start** เพื่อส่งสถานะจริง
 5. เปิดแชทส่วนตัวใน Camfrog แล้วใช้ `chat-im-private.exe` refresh และโฟกัสหน้าต่าง ปุ่ม **Discover controls** ดึงรายการ control ลง `controls.txt` เพื่อตั้ง selector เหมือนแอปอื่น
 
-คำสั่ง `python camfrog_auto.py ...` ยังใช้เป็น CLI สำหรับพัฒนา โดยใช้ `config.json` ในเครื่องซึ่ง Git จะไม่ติดตาม สร้างได้ด้วย `python camfrog_auto.py init --config config.json` หรือคัดลอกจาก `config.example.json` ส่วน CI และ build ตรวจด้วยตัวอย่างที่ปลอดภัย CLI นี้ไม่ใช่แอปที่ build คำสั่งใน `extras\*.bat` เป็นทางลัด ยกเว้น `extras\gui.bat` ที่เปิด `dist\room-control\room-control.exe` ที่ build แล้ว
+คำสั่ง `python camfrog_auto.py ...` ยังใช้เป็น CLI สำหรับพัฒนา โดยใช้ `config.json` ในเครื่องซึ่ง Git จะไม่ติดตาม สร้างได้ด้วย `python camfrog_auto.py init --config config.json` หรือคัดลอกจาก `config.example.json` ส่วน CI และ build ตรวจด้วยตัวอย่างที่ปลอดภัย CLI นี้ไม่ใช่หนึ่งในแปดแอปที่ build คำสั่งใน `extras\*.bat` เป็นทางลัด ยกเว้น `extras\gui.bat` ที่เปิด `dist\room-control\room-control.exe` ที่ build แล้ว
+
+คำสั่ง source-only `python camfrog_presence.py probe NICKNAME` เรียก probe หนึ่งครั้งแบบมีขอบเขตและเก็บหลักฐานรูปสถานะสาธารณะของ Camfrog ลง SQLite ในเครื่อง โดยจัดสถานะเป็น `UNKNOWN` เสมอ อ่าน [`docs/CAMFROG-PRESENCE.md`](docs/CAMFROG-PRESENCE.md) ก่อนแปลผลตัวอย่าง
+
+## ZChat Control Server
+
+Control plane แยกต่างหากสำหรับใช้งานในเครื่อง ใช้ FastAPI และ PostgreSQL ใน Docker พร้อม volume ถาวรบนเครื่องนี้ มี dashboard สำหรับผู้ดูแล ระบบบัญชีและ agent คิวคำสั่งแบบ lease, audit และ snapshot โปรไฟล์/presence ที่ตัดข้อมูลอ่อนไหวแล้ว การดึงข้อมูล Camfrog ด้วย session จริง, Cloud Bot transport, การชำระ Store และ production deployment ยังไม่ยืนยันหรือยังปิดไว้ อ่านวิธีติดตั้ง ขอบเขต API และข้อจำกัดที่ [`control-server/README.md`](control-server/README.md)
 
 ## รันเบื้องหลัง
 

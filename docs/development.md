@@ -1,22 +1,49 @@
 # Development
 
-## Local setup
+This repository contains the Windows feature apps and the separate ZChat Control Server. Keep local credentials and runtime data outside Git.
 
-1. Clone the repository.
-2. Copy `.env.example` to an ignored `.env` and populate local-only values.
-3. Install the selected runtime and dependencies.
-4. Replace placeholder Makefile targets with real project commands.
-5. Run:
+## Desktop apps
 
-   ```bash
-   make validate-template
-   ```
+- Build on Windows with Python 3.12 x64: run `build.bat` for the eight feature apps, or `full-build.bat` / `full-build.ps1` for the feature apps and LINE app.
+- The Windows packaging job runs from the exact pull-request head. A successful local test suite alone does not prove Camfrog UI or live-room behavior.
+- On Linux, `make build` exits with a clear Windows-only message; do not treat it as a successful package build.
 
-6. Run project-specific formatting, linting, type checks, tests, build, and security checks before opening a pull request.
+## ZChat Control Server local setup
 
-Windows-only tests (tkinter GUI, DPAPI, Chrome store) skip on Linux. To run them
-over SSH, configure the Windows target explicitly (`CAMFROG_WINDOWS_HOST`,
-`CAMFROG_WINDOWS_USER`, and `CAMFROG_WINDOWS_DIR`; SSH authentication required):
+The local Compose stack runs PostgreSQL in a persistent Docker volume and binds the API to `127.0.0.1:8000`. It does not use an external database.
+
+PowerShell:
+
+```powershell
+Set-Location control-server
+py -3.12 -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -e ".[test,lint]"
+python -m camfrog_control_server.local_setup
+docker compose --env-file "$env:USERPROFILE\.config\zchat-control\.env" up --build
+```
+
+Bash:
+
+```bash
+cd control-server
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -e '.[test,lint]'
+python -m camfrog_control_server.local_setup
+docker compose --env-file "$HOME/.config/zchat-control/.env" up --build
+```
+
+Run `local_setup` only when creating a new local stack. It creates local credentials and refuses to overwrite an existing file. For an existing stack, reuse its existing secret file and PostgreSQL volume; do not create replacement credentials for that database. `/healthz` reports process health, `/readyz` checks PostgreSQL, and `/dashboard` serves the local UI. Detailed API and security boundaries are in [`../control-server/README.md`](../control-server/README.md).
+
+## Validation
+
+Install root and server development dependencies with `make setup`, then run `make ci`. This runs repository/link validation, server format/lint, both Python test suites, and dependency audits. Package validation is separate and must run on Windows.
+
+Windows-only tests (tkinter GUI, DPAPI, Chrome store) skip on Linux; run them
+on the configured Windows host instead (SSH authentication required):
 
    ```bash
    python3 tools/run_remote_tests.py tests/test_web_status_gui.py -v

@@ -2,8 +2,8 @@
 
 Usage:
   python tools/release.py              # tag from camfrog_auto.APP_VERSION, upload assets
-  python tools/release.py --release v2.xx.x  # tag v2.xx.x, upload assets
-  python tools/release.py --dry-run      # print the plan, change nothing
+  python tools/release.py --release APP_VERSION  # require version to match configured APP_VERSION
+  python tools/release.py --dry-run    # print the plan, change nothing
 
 Run full-build.bat on the exact clean `main` commit after its PR checks pass.
 The tag is pinned to that commit. The release is created with the authenticated
@@ -207,16 +207,20 @@ def gh_ready():
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--dry-run", action="store_true")
-    parser.add_argument("--tag", default=None, help="override vX.Y.Z (must match APP_VERSION)")
-    parser.add_argument("--release", nargs="?", const=None, help="release version v2.xx.x")
+    parser.add_argument("--tag", default=None, help="override release tag (must match APP_VERSION)")
+    parser.add_argument("--release", nargs="?", const="", default=None,
+                        help="require release version to match APP_VERSION")
     args = parser.parse_args(argv)
 
+    version = app_version()
+    expected_tag = "v{0}".format(version)
     if args.release is not None:
-        version = release_version([args.release])
-    else:
-        version = app_version()
-    
-    tag = args.tag or "v{0}".format(version)
+        requested_tag = args.release or expected_tag
+        if not re.fullmatch(r"v\d+\.\d+\.\d+", requested_tag):
+            raise SystemExit("invalid release version; expected v followed by three numeric components")
+        if requested_tag != expected_tag:
+            raise SystemExit("release version must match APP_VERSION before publishing")
+    tag = args.tag or expected_tag
     if tag != "v{0}".format(version):
         raise SystemExit("release tag must match APP_VERSION to prevent mismatched releases")
     check_assets()
@@ -228,7 +232,7 @@ def main(argv=None):
         pairs = (list(FEATURE_EXES.items())
                  + list(OTHER_ASSETS.items())
                  + [("line_config.json", public_config)])
-        sums_path = DIST / "release-SHA256SUMS.txt"
+        sums_path = Path(temp_dir) / "SHA256SUMS.txt"
         sums_path.write_text(flat_sums(pairs), encoding="utf-8", newline="\n")
         pairs.append(("SHA256SUMS.txt", sums_path))
         assets = [str(path) for _name, path in pairs]

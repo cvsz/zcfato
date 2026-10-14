@@ -1,0 +1,737 @@
+"""Control-plane HTTP interface for accounts, agents, commands, and audit history."""
+
+from __future__ import annotations
+
+import hmac
+import secrets
+from datetime import UTC, timedelta
+from typing import Annotated
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from .models import (
+    Account,
+    AccountRuntimeSnapshot,
+    Agent,
+    AuditEvent,
+    CloudBot,
+    ControlCommand,
+    ProfileSnapshot,
+    PurchaseIntent,
+    utcnow,
+)
+from .schemas import (
+    AccountAgentAssign,
+    AccountCreate,
+    AccountRead,
+    AgentCommand,
+    AgentCreate,
+    AgentCreated,
+    AgentRead,
+    AgentRuntimeState,
+    AuditRead,
+    ClientProcessState,
+    CommandCreate,
+    CommandPollResponse,
+    CommandRead,
+    CommandResultRequest,
+    CommandState,
+    HeartbeatRequest,
+    HeartbeatResponse,
+    Overview,
+)
+from .security import (
+    hash_token,
+    issue_dashboard_token,
+    new_agent_token,
+    verify_dashboard_token,
+)
+
+router = APIRouter()
+bearer = HTTPBearer(auto_error=False)
+
+
+def get_db(request: Request):
+    factory = request.app.state.session_factory
+    with factory() as session:
+        yield session
+
+
+def require_admin(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+) -> None:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Admin bearer token required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    settings = request.app.state.settings
+    if verify_dashboard_token(credentials.credentials, settings.jwt_signing_secret) is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired dashboard token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+@router.post("/auth/session")
+def create_dashboard_session(
+    request: Request,
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+) -> dict[str, int | str]:
+    """Exchange the bootstrap admin token for a short-lived dashboard JWT."""
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Bootstrap admin bearer token required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    settings = request.app.state.settings
+    if len(credentials.credentials) > 256 or not hmac.compare_digest(
+        credentials.credentials, settings.admin_api_token
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid bootstrap admin token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return {
+        "access_token": issue_dashboard_token(
+            settings.jwt_signing_secret,
+            ttl_seconds=settings.dashboard_jwt_ttl_seconds,
+        ),
+        "token_type": "bearer",
+        "expires_in": settings.dashboard_jwt_ttl_seconds,
+    }
+
+
+def require_agent(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Agent:
+    if credentials is None or credentials.scheme.lower() != "bearer":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Agent bearer token required.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    raw_token = credentials.credentials
+    if len(raw_token) > 256:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid agent token.")
+    agent = db.scalar(
+        select(Agent)
+        .where(
+            Agent.token_hash == hash_token(raw_token),
+            Agent.revoked_at.is_(None),
+        )
+        .with_for_update()
+    )
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid agent token.")
+    return agent
+
+
+def add_audit(
+    db: Session,
+    *,
+    actor_type: str,
+    actor_id: str | None,
+    action: str,
+    resource_type: str,
+    resource_id: str | None,
+    details: dict | None = None,
+) -> None:
+    db.add(
+        AuditEvent(
+            actor_type=actor_type,
+            actor_id=actor_id,
+            action=action,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            details=details or {},
+        )
+    )
+
+
+@router.get("/overview", response_model=Overview)
+def overview(
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Overview:
+    return Overview(
+        agents_active=db.scalar(
+            select(func.count()).select_from(Agent).where(Agent.revoked_at.is_(None))
+        )
+        or 0,
+        accounts_enabled=db.scalar(
+            select(func.count()).select_from(Account).where(Account.enabled.is_(True))
+        )
+        or 0,
+        commands_pending=db.scalar(
+            select(func.count())
+            .select_from(ControlCommand)
+            .where(ControlCommand.state == CommandState.pending.value)
+        )
+        or 0,
+        commands_claimed=db.scalar(
+            select(func.count())
+            .select_from(ControlCommand)
+            .where(ControlCommand.state == CommandState.claimed.value)
+        )
+        or 0,
+        profiles_reported=db.scalar(select(func.count()).select_from(ProfileSnapshot)) or 0,
+        cloud_bots_registered=db.scalar(select(func.count()).select_from(CloudBot)) or 0,
+        purchase_intents_pending=db.scalar(
+            select(func.count())
+            .select_from(PurchaseIntent)
+            .where(PurchaseIntent.state == "pending_confirmation")
+        )
+        or 0,
+    )
+
+
+@router.post("/agents", response_model=AgentCreated, status_code=status.HTTP_201_CREATED)
+def create_agent(
+    body: AgentCreate,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AgentCreated:
+    token = new_agent_token()
+    agent = Agent(name=body.name, token_hash=hash_token(token))
+    db.add(agent)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Agent name already exists."
+        ) from exc
+
+    add_audit(
+        db,
+        actor_type="admin",
+        actor_id="admin",
+        action="agent.created",
+        resource_type="agent",
+        resource_id=str(agent.id),
+        details={"name": agent.name},
+    )
+    db.commit()
+    return AgentCreated(
+        id=agent.id, name=agent.name, agent_token=token, created_at=agent.created_at
+    )
+
+
+@router.get("/agents", response_model=list[AgentRead])
+def list_agents(
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[Agent]:
+    return list(db.scalars(select(Agent).order_by(Agent.created_at.desc())).all())
+
+
+@router.post("/agents/{agent_id}/revoke", response_model=AgentRead)
+def revoke_agent(
+    agent_id: UUID,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Agent:
+    agent = db.scalar(select(Agent).where(Agent.id == agent_id).with_for_update())
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found.")
+    if agent.revoked_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Agent is already revoked."
+        )
+
+    now = utcnow()
+    agent.revoked_at = now
+    agent.runtime_state = AgentRuntimeState.disconnected.value
+    pending = db.scalars(
+        select(ControlCommand).where(
+            ControlCommand.agent_id == agent.id,
+            ControlCommand.state == CommandState.pending.value,
+        )
+    ).all()
+    for command in pending:
+        command.state = CommandState.canceled.value
+        command.finished_at = now
+
+    add_audit(
+        db,
+        actor_type="admin",
+        actor_id="admin",
+        action="agent.revoked",
+        resource_type="agent",
+        resource_id=str(agent.id),
+        details={"pending_commands_canceled": len(pending)},
+    )
+    db.commit()
+    db.refresh(agent)
+    return agent
+
+
+@router.post("/accounts", response_model=AccountRead, status_code=status.HTTP_201_CREATED)
+def create_account(
+    body: AccountCreate,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Account:
+    if body.agent_id is not None:
+        agent = db.scalar(
+            select(Agent)
+            .where(Agent.id == body.agent_id, Agent.revoked_at.is_(None))
+            .with_for_update()
+        )
+        if agent is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Active agent not found."
+            )
+        if db.scalar(select(Account.id).where(Account.agent_id == body.agent_id)) is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Agent is already assigned to another account.",
+            )
+
+    account = Account(nickname=body.nickname, agent_id=body.agent_id, enabled=body.enabled)
+    db.add(account)
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Agent is already assigned to another account.",
+        ) from exc
+    add_audit(
+        db,
+        actor_type="admin",
+        actor_id="admin",
+        action="account.created",
+        resource_type="account",
+        resource_id=str(account.id),
+        details={"agent_id": str(account.agent_id) if account.agent_id else None},
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Agent is already assigned to another account.",
+        ) from exc
+    db.refresh(account)
+    return account
+
+
+@router.patch("/accounts/{account_id}/agent", response_model=AccountRead)
+def assign_account_agent(
+    account_id: UUID,
+    body: AccountAgentAssign,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> Account:
+    new_agent = None
+    if body.agent_id is not None:
+        new_agent = db.scalar(
+            select(Agent)
+            .where(Agent.id == body.agent_id, Agent.revoked_at.is_(None))
+            .with_for_update()
+        )
+        if new_agent is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Active agent not found."
+            )
+
+    account = db.scalar(select(Account).where(Account.id == account_id).with_for_update())
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+
+    if new_agent is not None:
+        assigned_account = db.scalar(
+            select(Account).where(Account.agent_id == new_agent.id, Account.id != account.id)
+        )
+        if assigned_account is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Agent is already assigned to another account.",
+            )
+
+    claimed = db.scalar(
+        select(ControlCommand.id)
+        .where(
+            ControlCommand.account_id == account.id,
+            ControlCommand.state == CommandState.claimed.value,
+        )
+        .limit(1)
+    )
+    if claimed is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account has a claimed command; wait for it to finish before reassignment.",
+        )
+
+    previous_agent_id = account.agent_id
+    if previous_agent_id == body.agent_id:
+        return account
+
+    pending = db.scalars(
+        select(ControlCommand).where(
+            ControlCommand.account_id == account.id,
+            ControlCommand.state == CommandState.pending.value,
+        )
+    ).all()
+    now = utcnow()
+    for command in pending:
+        command.state = CommandState.canceled.value
+        command.finished_at = now
+    account.agent_id = body.agent_id
+    add_audit(
+        db,
+        actor_type="admin",
+        actor_id="admin",
+        action="account.agent_assigned",
+        resource_type="account",
+        resource_id=str(account.id),
+        details={
+            "previous_agent_id": str(previous_agent_id) if previous_agent_id else None,
+            "agent_id": str(body.agent_id) if body.agent_id else None,
+            "pending_commands_canceled": len(pending),
+        },
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Agent is already assigned to another account.",
+        ) from exc
+    db.refresh(account)
+    return account
+
+
+@router.get("/accounts", response_model=list[AccountRead])
+def list_accounts(
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> list[Account]:
+    return list(db.scalars(select(Account).order_by(Account.created_at.desc())).all())
+
+
+@router.post("/commands", response_model=CommandRead, status_code=status.HTTP_201_CREATED)
+def create_command(
+    body: CommandCreate,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ControlCommand:
+    account = db.get(Account, body.account_id)
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+    if not account.enabled or account.agent_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Account is not assigned to an agent."
+        )
+    agent = db.scalar(
+        select(Agent)
+        .where(Agent.id == account.agent_id, Agent.revoked_at.is_(None))
+        .with_for_update()
+    )
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Assigned agent is unavailable."
+        )
+    account = db.scalar(select(Account).where(Account.id == body.account_id).with_for_update())
+    if account is None or not account.enabled or account.agent_id != agent.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account assignment changed; retry with current state.",
+        )
+
+    command = ControlCommand(
+        agent_id=agent.id,
+        account_id=account.id,
+        operation=body.operation.value,
+        payload=body.payload,
+    )
+    db.add(command)
+    db.flush()
+    add_audit(
+        db,
+        actor_type="admin",
+        actor_id="admin",
+        action="command.queued",
+        resource_type="command",
+        resource_id=str(command.id),
+        details={"operation": command.operation, "account_id": str(account.id)},
+    )
+    db.commit()
+    db.refresh(command)
+    return command
+
+
+@router.get("/commands", response_model=list[CommandRead])
+def list_commands(
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = 100,
+) -> list[ControlCommand]:
+    if not 1 <= limit <= 200:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
+        )
+    return list(
+        db.scalars(
+            select(ControlCommand).order_by(ControlCommand.created_at.desc()).limit(limit)
+        ).all()
+    )
+
+
+@router.post("/commands/{command_id}/cancel", response_model=CommandRead)
+def cancel_command(
+    command_id: UUID,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ControlCommand:
+    command = db.scalar(
+        select(ControlCommand).where(ControlCommand.id == command_id).with_for_update()
+    )
+    if command is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Command not found.")
+    if command.state != CommandState.pending.value:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot cancel a claimed command; it may be running.",
+        )
+    command.state = CommandState.canceled.value
+    command.finished_at = utcnow()
+    add_audit(
+        db,
+        actor_type="admin",
+        actor_id="admin",
+        action="command.canceled",
+        resource_type="command",
+        resource_id=str(command.id),
+        details={"operation": command.operation},
+    )
+    db.commit()
+    db.refresh(command)
+    return command
+
+
+@router.get("/audit", response_model=list[AuditRead])
+def list_audit(
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = 100,
+) -> list[AuditEvent]:
+    if not 1 <= limit <= 200:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
+        )
+    return list(
+        db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)).all()
+    )
+
+
+@router.post("/agent/heartbeat", response_model=HeartbeatResponse)
+def agent_heartbeat(
+    body: HeartbeatRequest,
+    agent: Annotated[Agent, Depends(require_agent)],
+    db: Annotated[Session, Depends(get_db)],
+) -> HeartbeatResponse:
+    previous_state = agent.runtime_state
+    now = utcnow()
+    agent.runtime_state = body.state.value
+    agent.last_seen_at = now
+    if previous_state != body.state.value:
+        add_audit(
+            db,
+            actor_type="agent",
+            actor_id=str(agent.id),
+            action="agent.runtime_state_changed",
+            resource_type="agent",
+            resource_id=str(agent.id),
+            details={"from": previous_state, "to": body.state.value},
+        )
+    account = db.scalar(
+        select(Account).where(Account.agent_id == agent.id, Account.enabled.is_(True))
+    )
+    runtime_snapshot = db.get(AccountRuntimeSnapshot, account.id) if account is not None else None
+    if account is not None and body.client_process_state is not None:
+        old_process_state = runtime_snapshot.process_state if runtime_snapshot else "unknown"
+        if runtime_snapshot is None:
+            runtime_snapshot = AccountRuntimeSnapshot(account_id=account.id)
+            db.add(runtime_snapshot)
+        runtime_snapshot.process_state = body.client_process_state.value
+        runtime_snapshot.observed_at = now
+        if old_process_state != body.client_process_state.value:
+            add_audit(
+                db,
+                actor_type="agent",
+                actor_id=str(agent.id),
+                action="account.process_state_changed",
+                resource_type="account",
+                resource_id=str(account.id),
+                details={"from": old_process_state, "to": body.client_process_state.value},
+            )
+    db.commit()
+    return HeartbeatResponse(
+        agent_id=agent.id,
+        state=body.state,
+        account_id=account.id if account else None,
+        client_process_state=(
+            ClientProcessState(runtime_snapshot.process_state) if runtime_snapshot else None
+        ),
+        last_seen_at=now,
+    )
+
+
+@router.get("/agent/commands/next", response_model=CommandPollResponse)
+def claim_next_command(
+    request: Request,
+    agent: Annotated[Agent, Depends(require_agent)],
+    db: Annotated[Session, Depends(get_db)],
+) -> CommandPollResponse:
+    now = utcnow()
+    maximum_attempts = request.app.state.settings.command_max_attempts
+
+    expired = db.scalars(
+        select(ControlCommand)
+        .where(
+            ControlCommand.state == CommandState.claimed.value,
+            ControlCommand.claim_expires_at <= now,
+            ControlCommand.claim_attempts >= maximum_attempts,
+        )
+        .with_for_update(skip_locked=True)
+    ).all()
+    for command in expired:
+        command.state = CommandState.failed.value
+        command.result_code = "lease_expired"
+        command.claim_token_hash = None
+        command.claim_expires_at = None
+        command.finished_at = now
+        add_audit(
+            db,
+            actor_type="system",
+            actor_id=None,
+            action="command.lease_expired",
+            resource_type="command",
+            resource_id=str(command.id),
+            details={"operation": command.operation},
+        )
+
+    eligible = or_(
+        ControlCommand.state == CommandState.pending.value,
+        and_(
+            ControlCommand.state == CommandState.claimed.value,
+            ControlCommand.claim_expires_at <= now,
+        ),
+    )
+    command = db.scalar(
+        select(ControlCommand)
+        .join(Account, Account.id == ControlCommand.account_id)
+        .join(Agent, Agent.id == ControlCommand.agent_id)
+        .where(
+            ControlCommand.agent_id == agent.id,
+            Account.agent_id == agent.id,
+            Account.enabled.is_(True),
+            Agent.revoked_at.is_(None),
+            eligible,
+            ControlCommand.claim_attempts < maximum_attempts,
+        )
+        .order_by(ControlCommand.created_at.asc())
+        .with_for_update(skip_locked=True, of=(ControlCommand, Account))
+        .limit(1)
+    )
+    if command is None:
+        if expired:
+            db.commit()
+        return CommandPollResponse(command=None)
+
+    claim_token = secrets.token_urlsafe(32)
+    command.state = CommandState.claimed.value
+    command.claim_attempts += 1
+    command.claim_token_hash = hash_token(claim_token)
+    command.claim_expires_at = now + timedelta(
+        seconds=request.app.state.settings.command_lease_seconds
+    )
+    command.claimed_at = now
+    add_audit(
+        db,
+        actor_type="agent",
+        actor_id=str(agent.id),
+        action="command.claimed",
+        resource_type="command",
+        resource_id=str(command.id),
+        details={"operation": command.operation, "attempt": command.claim_attempts},
+    )
+    db.commit()
+    return CommandPollResponse(
+        command=AgentCommand(
+            id=command.id,
+            account_id=command.account_id,
+            operation=command.operation,
+            payload=command.payload,
+            claim_token=claim_token,
+            claim_expires_at=command.claim_expires_at,
+        )
+    )
+
+
+@router.post("/agent/commands/{command_id}/result", status_code=status.HTTP_204_NO_CONTENT)
+def report_command_result(
+    command_id: UUID,
+    body: CommandResultRequest,
+    agent: Annotated[Agent, Depends(require_agent)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    command = db.scalar(
+        select(ControlCommand).where(ControlCommand.id == command_id).with_for_update()
+    )
+    if command is None or command.agent_id != agent.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Command not found.")
+    if command.state != CommandState.claimed.value or command.claim_token_hash is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Command is not claimable."
+        )
+    expires_at = command.claim_expires_at
+    if expires_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Command lease is missing."
+        )
+    if expires_at.tzinfo is None:
+        # SQLite drops timezone metadata for DATETIME values; treat stored UTC as UTC.
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at <= utcnow():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Command lease has expired."
+        )
+    if not hmac.compare_digest(command.claim_token_hash, hash_token(body.claim_token)):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Claim token is stale or invalid."
+        )
+
+    now = utcnow()
+    command.state = body.state.value
+    command.result_code = body.code.value
+    command.claim_token_hash = None
+    command.claim_expires_at = None
+    command.finished_at = now
+    add_audit(
+        db,
+        actor_type="agent",
+        actor_id=str(agent.id),
+        action=f"command.{body.state.value}",
+        resource_type="command",
+        resource_id=str(command.id),
+        details={"operation": command.operation, "result_code": body.code.value},
+    )
+    db.commit()

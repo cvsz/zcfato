@@ -2261,6 +2261,7 @@ class Runner:
         fails = 0
         try:
             while not self.stop_file.exists():
+                clean_worker_log_at_noon()
                 try:
                     now = time.monotonic()
                     self.maybe_reload(now)
@@ -3198,16 +3199,18 @@ STATUS_MODE = "both"
 
 # Keep the combined status app visually aligned with the Web Status GUI.
 STATUS_CHANGER_THEME = {
-    "background": "#f4f1e8",
-    "surface": "#fffdfa",
-    "surface_high": "#ebe5d9",
+    "background": "#edf2f5",
+    "surface": "#ffffff",
+    "surface_high": "#d9e8f0",
     "entry": "#ffffff",
-    "border": "#d5c8ac",
-    "gold": "#8b672b",
-    "gold_hover": "#76541f",
-    "teal": "#d6e9e8",
-    "text": "#283648",
-    "muted": "#626d7a",
+    "border": "#c4d1dc",
+    "accent": "#087b83",
+    "accent_hover": "#096c7b",
+    "button_text": "#1a3a52",
+    "button_active": "#bdd9e9",
+    "button_pressed": "#a4c9df",
+    "text": "#233548",
+    "muted": "#596b79",
     "danger": "#9f3740",
     "success": "#28744c",
     "error": "#a3303a",
@@ -3547,6 +3550,103 @@ def write_config(path, config):
 
 
 _ACTIVITY_LOG_LOCK = threading.Lock()
+
+STATUS_LOG_FILES = (
+    ("status_activity.log", None),
+    ("random-status-worker.log", "random"),
+    ("marquee-status-worker.log", "marquee"),
+    ("camfrog_status_changer.log", None),
+)
+
+
+def _local_now(now=None):
+    value = now if now is not None else dt.datetime.now().astimezone()
+    return value.astimezone() if value.tzinfo is None else value
+
+
+def _log_clean_marker(path):
+    path = Path(path)
+    return path.with_name(f".{path.name}.clean-date")
+
+
+def _log_cleanup_due(path, now):
+    if now.time().replace(tzinfo=None) < dt.time(12, 0):
+        return False
+    try:
+        last_clean = _log_clean_marker(path).read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        last_clean = ""
+    return last_clean != now.date().isoformat()
+
+
+def _clear_log_file(path, now, backup_count=0):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8"):
+        pass
+    for index in range(1, max(0, int(backup_count)) + 1):
+        Path(f"{path}.{index}").unlink(missing_ok=True)
+    atomic_write(_log_clean_marker(path), now.date().isoformat() + "\n")
+
+
+def clean_status_logs_at_noon(data_dir=None, now=None, active_modes=()):
+    """Clear the combined Status Changer logs once per local day at or after noon."""
+    data_dir = Path(data_dir) if data_dir is not None else DATA_DIR
+    local_now = _local_now(now)
+    active_modes = {mode for mode in active_modes if mode in ("random", "marquee")}
+    cleaned = []
+    with _ACTIVITY_LOG_LOCK:
+        for filename, mode in STATUS_LOG_FILES:
+            if mode in active_modes:
+                continue
+            path = data_dir / filename
+            if not _log_cleanup_due(path, local_now):
+                continue
+            try:
+                _clear_log_file(path, local_now, backup_count=3)
+            except OSError:
+                continue
+            cleaned.append(filename)
+    return tuple(cleaned)
+
+
+def clean_worker_log_at_noon(now=None, handlers=None):
+    """Reset this worker's open rotating log safely once local noon has passed."""
+    local_now = _local_now(now)
+    if local_now.time().replace(tzinfo=None) < dt.time(12, 0):
+        return ()
+    handlers = logging.getLogger().handlers if handlers is None else handlers
+    worker_logs = {"random-status-worker.log", "marquee-status-worker.log",
+                   "camfrog_status_changer.log"}
+    cleaned = []
+    for handler in tuple(handlers):
+        if not isinstance(handler, logging.handlers.RotatingFileHandler):
+            continue
+        path = Path(handler.baseFilename)
+        if path.name not in worker_logs:
+            continue
+        handler.acquire()
+        try:
+            if not _log_cleanup_due(path, local_now):
+                continue
+            try:
+                if handler.stream is not None:
+                    handler.flush()
+                    handler.stream.close()
+                    handler.stream = None
+                _clear_log_file(path, local_now, backup_count=handler.backupCount)
+                cleaned.append(path.name)
+            except OSError:
+                pass
+            finally:
+                if handler.stream is None:
+                    try:
+                        handler.stream = handler._open()
+                    except OSError:
+                        pass
+        finally:
+            handler.release()
+    return tuple(cleaned)
 
 
 def write_activity_log(mode, message):
@@ -3992,10 +4092,15 @@ class ClipboardController:
                 if widget_class in {"Text", "Listbox"}:
                     try:
                         widget.configure(
-                            background="#ffffff" if widget_class == "Text" else "#fffdfa",
-                            foreground="#283648", selectbackground="#8b672b",
-                            selectforeground="#fffdfa", insertbackground="#283648",
-                            highlightbackground="#d5c8ac", highlightcolor="#8b672b")
+                            background=(STATUS_CHANGER_THEME["entry"]
+                                        if widget_class == "Text"
+                                        else STATUS_CHANGER_THEME["surface"]),
+                            foreground=STATUS_CHANGER_THEME["text"],
+                            selectbackground=STATUS_CHANGER_THEME["accent"],
+                            selectforeground=STATUS_CHANGER_THEME["surface"],
+                            insertbackground=STATUS_CHANGER_THEME["text"],
+                            highlightbackground=STATUS_CHANGER_THEME["border"],
+                            highlightcolor=STATUS_CHANGER_THEME["accent"])
                     except Exception:
                         pass
                 for sequence, action in (
@@ -4101,7 +4206,7 @@ def build_app():
                 "marquee": DATA_DIR / "marquee-status-runtime.json",
             }
             self.root = tk.Tk()
-            self.root.configure(background="#f4f1e8")
+            self.root.configure(background=STATUS_CHANGER_THEME["background"])
             self.app_name = "Status Changer"
             self.root.title(f"Camfrog {self.app_name}")
             self.root.geometry("520x700")
@@ -4123,6 +4228,7 @@ def build_app():
             self.mode = "random"
             self.loading_mode = False
             self.activity_refresh_job = None
+            self.log_cleanup_job = None
             self.activity_snapshot = None
             self.entry_widgets = {"random": [], "marquee": []}
             try:
@@ -4164,6 +4270,7 @@ def build_app():
                              [self.step, self.stride, self.live_send]):
                 variable.trace_add("write", self.schedule_save)
             self._build()
+            self.clean_logs_at_noon()
             self._log_activity("Application opened", "app")
             self.clipboard_controller = ClipboardController(
                 self.root, translate=self._translate_clipboard, on_error=self._clipboard_error)
@@ -4265,7 +4372,6 @@ def build_app():
                     child.destroy()
             self.entry_widgets = {"random": [], "marquee": []}
             style = ttk.Style(root)
-            root.configure(background="#f4f1e8")
             try:
                 style.theme_use("clam")
             except tk.TclError:
@@ -4284,23 +4390,23 @@ def build_app():
             style.configure("TLabelframe", background=colors["background"],
                             bordercolor=colors["border"], relief="solid", padding=8)
             style.configure("TLabelframe.Label", background=colors["background"],
-                            foreground=colors["gold"], font=("Segoe UI", 9, "bold"))
+                            foreground=colors["accent"], font=("Segoe UI", 9, "bold"))
             style.configure("TButton", padding=(10, 6), background=colors["surface_high"],
-                            foreground=colors["text"], bordercolor=colors["border"],
+                            foreground=colors["button_text"], bordercolor=colors["border"],
                             font=("Segoe UI", 9, "bold"), relief="flat")
             style.map("TButton", background=[("disabled", colors["surface"]),
-                                              ("pressed", colors["border"]),
-                                              ("active", colors["teal"])],
+                                              ("pressed", colors["button_pressed"]),
+                                              ("active", colors["button_active"])],
                       foreground=[("disabled", colors["muted"])])
             style.configure("Action.TButton", padding=(8, 7),
                             font=("Segoe UI", 9, "bold"))
             style.configure("Primary.TButton", padding=(12, 7),
-                            background=colors["gold"], foreground=colors["surface"],
-                            bordercolor=colors["gold"], font=("Segoe UI", 9, "bold"),
+                            background=colors["accent"], foreground=colors["surface"],
+                            bordercolor=colors["accent"], font=("Segoe UI", 9, "bold"),
                             relief="flat")
             style.map("Primary.TButton", background=[("disabled", colors["surface_high"]),
-                                                       ("pressed", colors["gold"]),
-                                                       ("active", colors["gold_hover"])],
+                                                       ("pressed", colors["accent"]),
+                                                       ("active", colors["accent_hover"])],
                       foreground=[("disabled", colors["muted"])])
             style.configure("Success.TButton", padding=(9, 7),
                             background=colors["success"], foreground=colors["surface"],
@@ -4308,7 +4414,7 @@ def build_app():
                             relief="flat")
             style.map("Success.TButton", background=[("disabled", colors["surface_high"]),
                                                        ("pressed", colors["success"]),
-                                                       ("active", "#28744c")],
+                                                       ("active", colors["success"])],
                       foreground=[("disabled", colors["muted"])])
             style.configure("Danger.TButton", padding=(9, 7),
                             background=colors["danger"], foreground=colors["surface"],
@@ -4316,22 +4422,22 @@ def build_app():
                             relief="flat")
             style.map("Danger.TButton", background=[("disabled", colors["surface_high"]),
                                                       ("pressed", colors["danger"]),
-                                                      ("active", "#9f3740")],
+                                                      ("active", colors["danger"])],
                       foreground=[("disabled", colors["muted"])])
             style.configure("TEntry", padding=(7, 6), fieldbackground=colors["entry"],
                             foreground=colors["text"], bordercolor=colors["border"],
-                            lightcolor=colors["gold"], darkcolor=colors["border"])
+                            lightcolor=colors["accent"], darkcolor=colors["border"])
             style.configure("TSpinbox", padding=(5, 5), fieldbackground=colors["entry"],
                             foreground=colors["text"], bordercolor=colors["border"],
-                            arrowcolor=colors["gold"])
+                            arrowcolor=colors["accent"])
             style.configure("TNotebook", background=colors["background"], borderwidth=0)
             style.configure("TNotebook.Tab", padding=(14, 8),
                             background=colors["surface_high"], foreground=colors["muted"],
                             font=("Segoe UI", 9, "bold"))
             style.map("TNotebook.Tab", background=[("selected", colors["surface"])],
-                      foreground=[("selected", colors["gold"])])
+                      foreground=[("selected", colors["accent"])])
             style.configure("Brand.TLabel", background=colors["background"],
-                            font=("Segoe UI", 10, "bold"), foreground=colors["gold"])
+                            font=("Segoe UI", 10, "bold"), foreground=colors["accent"])
             style.configure("State.TLabel", background=colors["background"],
                             foreground=colors["text"], font=("Segoe UI", 9, "bold"))
             style.configure("State.OK.TLabel", background=colors["background"],
@@ -4347,7 +4453,7 @@ def build_app():
             style.configure("Card.TLabel", background=colors["surface"],
                             foreground=colors["text"], font=("Segoe UI", 9))
             style.configure("Index.TLabel", background=colors["surface"],
-                            foreground=colors["gold"], font=("Segoe UI", 8, "bold"))
+                            foreground=colors["accent"], font=("Segoe UI", 8, "bold"))
             style.configure("Entry.TEntry", padding=(7, 4))
             outer = ttk.Frame(root, padding=(12, 10, 12, 10))
             outer.pack(fill="both", expand=True)
@@ -4407,8 +4513,8 @@ def build_app():
                 toolbar = ttk.Frame(page)
                 toolbar.pack(fill="x", pady=(0, 5))
                 ttk.Label(toolbar, text=self._tr(
-                    "GUI actions and worker logs; worker logs may include status text. Start/Stop use the last selected status tab.",
-                    "บันทึก GUI และ worker (log worker อาจมีข้อความสถานะ) ปุ่ม Start/Stop ใช้โหมดสถานะที่เลือกไว้ล่าสุด"),
+                    "GUI actions and worker logs appear here. Sent status text is included when log_message_text is enabled. Logs clear daily at 12:00 local time; if the app is closed, cleanup runs at next launch.",
+                    "บันทึก GUI และ worker จะแสดงที่นี่ โดยข้อความสถานะที่ส่งจะอยู่ใน log เมื่อเปิด log_message_text ระบบล้าง log ทุกวันเวลา 12:00 ตามเวลาท้องถิ่น หากปิดแอปไว้จะล้างเมื่อเปิดครั้งถัดไป"),
                     style="Hint.TLabel").pack(side="left", fill="x", expand=True)
                 ttk.Button(toolbar, text=self._tr("Open log folder", "เปิดโฟลเดอร์ log"),
                            command=self.open_log_folder).pack(side="right")
@@ -4418,7 +4524,7 @@ def build_app():
                     frame, wrap="none", state="disabled", height=24,
                     background=STATUS_CHANGER_THEME["entry"],
                     foreground=STATUS_CHANGER_THEME["log_text"],
-                    insertbackground=STATUS_CHANGER_THEME["gold"],
+                    insertbackground=STATUS_CHANGER_THEME["accent"],
                     selectbackground=STATUS_CHANGER_THEME["border"],
                     relief="flat", padx=9, pady=8,
                     font=("Consolas", 9), undo=False)
@@ -4583,6 +4689,30 @@ def build_app():
                 self.activity_refresh_job = self.root.after(1000, self.refresh_activity_log)
             except tk.TclError:
                 self.activity_refresh_job = None
+
+        def clean_logs_at_noon(self):
+            if not self.root.winfo_exists():
+                return
+            active_modes = set()
+            mode = active_worker_mode()
+            if mode:
+                try:
+                    config = load_cfg(self.config_paths[mode])
+                    if running_pid(runtime_config(config, mode)):
+                        active_modes.add(mode)
+                except (OSError, ValueError, KeyError):
+                    pass
+            if clean_status_logs_at_noon(DATA_DIR, active_modes=active_modes):
+                self.activity_snapshot = None
+            now = dt.datetime.now().astimezone()
+            next_noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
+            if next_noon <= now:
+                next_noon += dt.timedelta(days=1)
+            delay_ms = max(1000, int((next_noon - now).total_seconds() * 1000))
+            try:
+                self.log_cleanup_job = self.root.after(delay_ms, self.clean_logs_at_noon)
+            except tk.TclError:
+                self.log_cleanup_job = None
 
         def open_log_folder(self):
             try:
@@ -5044,7 +5174,8 @@ def build_app():
                     pass
                 self.save_job = None
             self.save_settings(enabled=False, mode=self.mode)
-            for job in (self.state_job, self.task_poll_job, self.activity_refresh_job):
+            for job in (self.state_job, self.task_poll_job, self.activity_refresh_job,
+                        self.log_cleanup_job):
                 if job is not None:
                     try:
                         self.root.after_cancel(job)
@@ -5388,5 +5519,3 @@ def stage_and_swap_update(url, asset_name, sums_url=None):
         spawn["creationflags"] = 0x08000000
     subprocess.Popen(command, close_fds=True, **spawn)
     return True, "update is staged; it will replace {0} after the app exits.".format(asset_name)
-
-

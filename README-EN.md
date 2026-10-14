@@ -14,16 +14,21 @@ Each executable is built into its own folder and creates its own config and runt
 | `chat-im-private\chat-im-private.exe` | Lists and focuses private-chat windows that are already open in Camfrog. It does not read or send messages. |
 | `status-changer\status-changer.exe` | One window with **Random**, **Marquee**, and **Activity Log** tabs. Random and Marquee keep separate config files, ten-slot pools, and worker settings. |
 | `status-random\status-random.exe` | Random status rotation with its own ten-slot pool under `random-data\`. |
-| `status-marquee\status-marquee.exe` | Marquee status rotation with its own ten-slot pool and Loop slots control under `marquee-data\`. |
-| `im-autoreply\im-autoreply.exe` | Private IM auto-reply only, with an Activity Log tab for GUI actions and worker outcomes. Room auto-reply and status changes are disabled. |
-| `music-dj\music-dj.exe` | Room music DJ: answers `!request` / `!queue` / `!current` / `!skip` / `!help` in chat, keeps a persistent queue, and can play Windows MCI-supported audio files locally into Camfrog. Choose the music folder with Browse. Status changes and private IM reply are disabled. |
+| `status-marquee\status-marquee.exe` | Marquee status rotation with its own ten-slot pool and Loop control under `marquee-data\`. |
+| `status-changer\status-changer.exe` | Combined Random and Marquee modes with an Activity Log, stored under its own `status-data\` folder. |
+| `im-autoreply\im-autoreply.exe` | Private IM auto-reply only. Room auto-reply and status changes are disabled. |
+| `music-dj\music-dj.exe` | ZeaZDev room music DJ: answers `!request` / `!randommusic` / `!queue` / `!current` / `!skip` / `!help`, keeps a persistent queue, saves generated music searches in `youtube_random_music.json`, and supports local audio or a visible YouTube player. `!current` reports requester, playback time, and next song. The Music tab can speak custom text or the current queue summary through Windows TTS. Status changes and private IM reply are disabled. |
 | `web-status\web-status.exe` | GUI + console prototype: update status via profiles.camfrog.com (dry-run by default; the GUI verifies a browser `PHPSESSID` session before live rotation). No args opens the GUI; any args use the CLI. The GUI has ten one-line status fields saved in `webtext.db`; **Start** rotates through the non-empty lines every N seconds. |
 
-Each executable keeps its config and runtime data in its own app data folder. Room Control and IM Auto-reply use separate `config.json` files; Chat IM Private uses `private-chat-config.json`. The combined Status Changer stores `random-config.json` and `marquee-config.json`, separate pools, and separate worker settings in `status-data\`. A first run imports shared Camfrog controls from the legacy `camfrog-status-config.json`, while mode-specific settings and pools come from the matching legacy app when present. Legacy pools are copied once into the combined app's own databases; later edits remain independent. The old shared config is kept for recovery and is no longer written. A new install creates only the two mode configs. The legacy status executables also keep their own app-local configs. Status **Start** saves the selected mode's config and starts that mode's bundled worker.
+The Web Status **Bot Manager** also controls the separate `music-dj.exe` queue through local files and can read/control vMix on the same PC. Music DJ can queue YouTube videos by URL or ID in a visible standard player and advances from player events. See [`docs/zBOT-Youtube-MUSIC-DJ.md`](docs/zBOT-Youtube-MUSIC-DJ.md) for boundaries and Windows acceptance checks.
+
+Room Control and IM Auto-reply use separate `config.json` files; Chat IM Private uses `private-chat-config.json`; Random and Marquee each use `camfrog-status-config.json` in their own data folder. Random and Marquee also keep their pools, logs, history, and worker files separate. Status **Start** saves settings and starts that app's bundled worker.
 
 ## Build
 
-Double-click `build.bat` (requires CPython 3.12 64-bit). It builds eight executables into separate subfolders under `dist\`. It preserves each app's local config and runtime data when refreshing the binaries, copies no shared `config.json`, and creates a zip containing only the executables and checksums. It also writes `dist\SHA256SUMS.txt`. Run `full-build.bat` to build the eight Camfrog apps plus the separate LINE Status Changer. CI runs the full build and publishes the LINE executable as a separate artifact; it does not upload local LINE settings.
+Double-click `build.bat` (needs 64-bit Python in PATH). It selects Python 3.12 first and builds the eight apps above into separate subfolders under `dist\`. It preserves each app's local config and runtime data when refreshing the binaries, copies no shared `config.json`, and creates a zip containing only the executables and checksums. It also writes `dist\SHA256SUMS.txt`.
+
+Run `full-build.bat` or `full-build.ps1` to build the feature apps and LINE app. Releases are opt-in; the PowerShell script accepts `--release vX.Y.Z` only when it matches `APP_VERSION`.
 
 - **Icon:** replace `app.ico` (a real multi-size `.ico`, ideally 16–256 px) and rebuild. If Explorer still shows the old icon it is the Windows icon cache: rename/move the exe or restart Explorer.
 - **Checksums & zip:** `SHA256SUMS.txt` lists each executable's path inside `dist\`; `tools\package.py` creates it and the zip using Python. Verify an app with `certutil -hashfile dist\room-control\room-control.exe SHA256`.
@@ -41,10 +46,16 @@ If the error says `requirements.txt (line 1)` and mentions only pywinauto, you a
 1. Open Camfrog and join a room. For Camfrog 8.x, launch `room-control.exe` and use **Setup → Auto-detect**. Findings: `docs/CAMFROG-8.5-FINDINGS.md`.
 2. Edit that app's `config.json`, set your nickname, and configure room replies. Keep `dry_run` on while checking behavior.
 3. Use `im-autoreply.exe` for private IM auto-reply; its config and logs are separate from Room Control.
-4. Use `status-changer.exe` to manage Random and Marquee from separate tabs, or use either legacy status executable. **Save Data** stores the selected tab's messages and settings without contacting Camfrog. Dry-run is enabled by default; enable **Send statuses live to Camfrog** before using **Start** to send statuses. The legacy status executables still offer **Apply Now**.
+4. Use `status-random.exe` or `status-marquee.exe` for separate status apps, or `status-changer.exe` for their combined interface and Activity Log. Each has its own data folder. Dry-run is enabled by default; enable **Send statuses live to Camfrog** before using **Apply Now** or **Start** to send statuses.
 5. Open a private chat in Camfrog, then use `chat-im-private.exe` to refresh and focus its window. Its **Discover controls** button dumps the control tree to `controls.txt` for selector setup, like the other apps.
 
-`python camfrog_auto.py ...` remains available as a source-only developer CLI. It uses the local `config.json`, which is ignored by Git; create it with `python camfrog_auto.py init --config config.json` or copy `config.example.json`. CI and builds validate the safe example. The CLI is not one of the packaged apps. The `extras\*.bat` helpers are source-checkout shortcuts, except `extras\gui.bat` which launches the built `dist\room-control\room-control.exe`.
+`python camfrog_auto.py ...` remains available as a source-only developer CLI. It uses the local `config.json`, which is ignored by Git; create it with `python camfrog_auto.py init --config config.json` or copy `config.example.json`. CI and builds validate the safe example. The CLI is not one of the eight packaged apps. The `extras\*.bat` helpers are source-checkout shortcuts, except `extras\gui.bat` which launches the built `dist\room-control\room-control.exe`.
+
+The source-only `python camfrog_presence.py probe NICKNAME` command makes one bounded probe call and stores public Camfrog status-image evidence in a local SQLite database. It always classifies presence as `UNKNOWN`; see [`docs/CAMFROG-PRESENCE.md`](docs/CAMFROG-PRESENCE.md) before interpreting samples.
+
+## ZChat Control Server
+
+The separate local-first control plane uses FastAPI and a persistent PostgreSQL Docker volume bound to this machine. It provides an operator dashboard, account and agent registry, leased commands, audit events, and sanitized profile/presence snapshots. Live authenticated Camfrog fetching, Cloud Bot transport, Store checkout, and production deployment remain unverified or disabled. See [`control-server/README.md`](control-server/README.md) for setup, API scope, and limits.
 
 ## Background mode
 

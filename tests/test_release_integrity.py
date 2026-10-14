@@ -1,6 +1,7 @@
 """Release-integrity regression tests."""
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from tools import release
@@ -45,6 +46,15 @@ def test_verify_feature_hashes_rejects_missing_manifest(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "DIST", tmp_path)
     with pytest.raises(SystemExit, match="missing dist/SHA256SUMS"):
         release.verify_feature_hashes()
+
+
+def test_music_dj_packages_zeazdev_room_mascot_with_the_executable():
+    root = Path(__file__).resolve().parents[1]
+    build = (root / "build.bat").read_text(encoding="utf-8")
+    artwork = root / "assets" / "zeazdev-room.png"
+    assert 'assets\\zeazdev-room.png;assets' in build
+    assert artwork.is_file()
+    assert artwork.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
 
 
 def test_release_rejects_existing_tag_without_upload(monkeypatch, tmp_path):
@@ -98,6 +108,12 @@ def test_release_pins_tag_to_verified_commit(monkeypatch, tmp_path):
     create = next(command for command in calls if command[:3] == ["gh", "release", "create"])
     target_index = create.index("--target")
     assert create[target_index + 1] == target
+    checksum_assets = [
+        Path(asset.split("#", 1)[0]).name
+        for asset in create[4:target_index]
+        if Path(asset.split("#", 1)[0]).name.endswith("SHA256SUMS.txt")
+    ]
+    assert checksum_assets == ["SHA256SUMS.txt"]
 
 
 def test_verify_build_source_requires_clean_matching_commit(tmp_path, monkeypatch):

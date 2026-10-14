@@ -2,7 +2,7 @@
 
 ## Scope
 
-This template provides release guidance and release-note configuration. It does **not** provide a generic artifact-publishing workflow because publishing credentials, registries, signing, environments, and approval policy are project-specific.
+This repository includes project-specific Windows packaging and manual release tooling in `full-build.bat`, `full-build.ps1`, and `tools/release.py`; publishing credentials and approval policy remain operator-managed. The ZChat Control Server Compose stack is for local development, binds to loopback, and has no public deployment workflow.
 
 ## Versioning
 
@@ -30,6 +30,8 @@ Release authorization and production readiness are distinct.
 A maintainer may authorize a release with accepted risk, but accepted risk does not convert `PARTIALLY VERIFIED`, `UNVERIFIED`, or `BLOCKED` readiness gates into `VERIFIED`.
 
 Use the canonical evidence definitions in `../ZEAZ-INTRODUCTION.md`.
+
+For ZChat Control Server, use [`../control-server/docs/architecture.md`](../control-server/docs/architecture.md) as the implementation boundary. The current server is an MVP; do not publish or expose it publicly until its listed Windows runtime, authenticated provider, observability, backup/restore, and soak gates have direct evidence.
 
 ## Rollback
 

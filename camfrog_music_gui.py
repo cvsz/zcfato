@@ -1,9 +1,12 @@
 """Camfrog Music DJ bot - self-contained (engine + clipboard + GUI inlined, profile: music)."""
 import argparse
+import base64
 import copy
 import ctypes
 import datetime as dt
 import hashlib
+import hmac
+import http.server
 import json
 import logging
 import logging.handlers
@@ -11,12 +14,15 @@ import os
 import ntpath
 import random
 import re
+import secrets
+import shutil
 import subprocess
 import sys
 import time
 import unicodedata
 import urllib.parse
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any, Optional, Union
 import contextlib
@@ -58,6 +64,12 @@ for _n in ("stdout", "stderr"):
 # Frozen (PyInstaller) -> files live next to the exe, not the temp unpack dir.
 BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
     else Path(__file__).resolve().parent
+
+
+def app_resource_path(relative_path):
+    """Resolve immutable assets from source or PyInstaller's extraction folder."""
+    root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return root / relative_path
 
 APP_PROFILE = "music"
 APP_PROFILES = {"full", "room", "im_reply", "status", "music"}
@@ -343,11 +355,10 @@ DEFAULTS = {
         "global_min_gap_seconds": 20, "max_per_hour": 10, "delay_range_seconds": [2.0, 5.0],
         "max_reply_length": 200, "max_incoming_length": 500,
     },
-    # Room music DJ: chat commands (!request/!queue/!current/!skip/!help) with a
+    # Room music DJ: chat commands (!request/!randommusic/!queue/!current/!skip/!help) with a
     # persistent queue. Needs autoreply.enabled for chat plumbing. Audio backends:
-    # "chat" announces only; "local" plays Windows-supported audio files on this machine
-    # (route them into Camfrog with a virtual cable / stereo mix for the room
-    # to hear).
+    # "chat" announces only; "local" plays Windows-supported audio files; "youtube"
+    # uses the official visible YouTube IFrame player in an app-owned browser window.
     "dj": {
         "enabled": False, "prefix": "!", "queue_file": "dj_queue.json",
         "max_per_user": 3, "music_dir": "music", "audio_backend": "chat",
@@ -621,6 +632,10 @@ def _validate_im(cfg, errs, warns):
 def _validate_dj(cfg, errs, warns):
     """Room music DJ: needs chat plumbing, a sane prefix, caps and a backend."""
     dj = cfg.get("dj") or DEFAULTS["dj"]
+    try:
+        dj_queue_path_for_config(cfg)
+    except (OSError, ValueError):
+        errs.append("dj.queue_file must stay inside the Music DJ data folder")
     if not dj["enabled"]:
         return
     if not cfg["autoreply"]["enabled"]:
@@ -631,13 +646,11 @@ def _validate_dj(cfg, errs, warns):
     v = dj.get("max_per_user", 3)
     if isinstance(v, bool) or not isinstance(v, int) or not 1 <= v <= 50:
         errs.append("dj.max_per_user must be 1-50")
-    if dj.get("audio_backend", "chat") not in ("chat", "local"):
-        errs.append('dj.audio_backend must be "chat" or "local"')
+    if dj.get("audio_backend", "chat") not in ("chat", "local", "youtube"):
+        errs.append('dj.audio_backend must be "chat", "local" or "youtube"')
     for key in ("announce_now", "announce_queued"):
         if not isinstance(dj.get(key), str) or not dj[key]:
             errs.append(f"dj.{key} must be a non-empty string")
-    if not dj.get("queue_file"):
-        errs.append("dj.queue_file must be set")
 
 
 def in_window(start: str, end: str, now: Optional[dt.time] = None) -> bool:
@@ -1597,6 +1610,10 @@ DJ_AUDIO_EXTENSIONS = frozenset({
     ".mid", ".midi", ".mp2", ".mp3", ".mpa", ".ogg", ".opus", ".rmi",
     ".snd", ".wav", ".wma",
 })
+DJ_CONTROL_PROTOCOL = 1
+DJ_CONTROL_REQUEST_TTL_SECONDS = 30
+DJ_CONTROL_ACTIONS = frozenset({"status", "skip", "clear", "speak"})
+DJ_CONTROL_DIRNAME = "dj-control"
 _DJ_MCI_PLAY_ALIAS = "camfrog_music_dj"
 _DJ_MCI_DURATION_ALIAS = "camfrog_music_duration"
 
@@ -1605,8 +1622,54 @@ class DJError(ValueError):
     """A refused DJ request with a user-facing reason."""
 
 
+def format_dj_time(seconds):
+    seconds = max(0, int(float(seconds)))
+    minutes, seconds = divmod(seconds, 60)
+    if minutes >= 60:
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours}:{minutes:02}:{seconds:02}"
+    return f"{minutes:02}:{seconds:02}"
+
+
+def dj_status_summary(current, next_item=None, elapsed=None, duration=None):
+    if elapsed is None:
+        time_text = bi("unknown|ไม่ทราบ")
+    elif duration and duration > 0:
+        time_text = "{0}/{1}".format(format_dj_time(elapsed), format_dj_time(duration))
+    else:
+        time_text = bi("{0} elapsed|เล่นแล้ว {0}").format(format_dj_time(elapsed))
+    following = ("{0} ({1})".format(next_item["title"], next_item["user"])
+                 if next_item else bi("none|ไม่มี"))
+    return bi("[dj] current: {title}; requested by {user}; time {time}; next: {next}|"
+              "[dj] กำลังเล่น: {title}; ผู้ขอ: {user}; เวลา: {time}; เพลงถัดไป: {next}").format(
+                  title=current["title"], user=current["user"], time=time_text,
+                  next=following)
+
+
+def dj_status_speech(current, next_item=None, elapsed=None, duration=None):
+    def clipped(item, limit):
+        value = str(item or "").strip()
+        return value if len(value) <= limit else value[:limit - 1] + "…"
+
+    if elapsed is None:
+        time_text = bi("play time unknown|เวลาเล่นไม่ทราบ")
+    elif duration and duration > 0:
+        time_text = "{0} of {1}".format(format_dj_time(elapsed), format_dj_time(duration))
+    else:
+        time_text = bi("played {0}|เล่นแล้ว {0}").format(format_dj_time(elapsed))
+    following = (bi("{title}, requested by {user}|เพลง {title} ผู้ขอ {user}").format(
+        title=clipped(next_item.get("title"), 50),
+        user=clipped(next_item.get("user"), 24))
+        if next_item else bi("none|ไม่มี"))
+    return bi("Now playing {title}, requested by {user}. {time_text}. Next song: {next}.|"
+              "กำลังเล่นเพลง {title} ผู้ขอคือ {user} {time_text} เพลงถัดไป {next}").format(
+                  title=clipped(current.get("title"), 65),
+                  user=clipped(current.get("user"), 24),
+                  time_text=time_text, next=following)
+
+
 class DJQueue:
-    """Persistent song-request queue: {current: {title, user} | None, queue: [...] }."""
+    """Persistent song queue; YouTube items also retain a canonical video_id."""
 
     def __init__(self, path):
         self.path = Path(path)
@@ -1621,32 +1684,60 @@ class DJQueue:
             return
         cur = raw.get("current")
         if isinstance(cur, dict) and str(cur.get("title", "")).strip():
-            self.current = {"title": str(cur["title"]).strip(), "user": str(cur.get("user", ""))}
+            self.current = self._normalize_item(cur)
         items = raw.get("queue")
         if isinstance(items, list):
             for it in items:
                 if isinstance(it, dict) and str(it.get("title", "")).strip():
-                    self.queue.append({"title": str(it["title"]).strip(),
-                                       "user": str(it.get("user", ""))})
+                    item = self._normalize_item(it)
+                    if item is not None:
+                        self.queue.append(item)
+
+    @staticmethod
+    def _normalize_item(raw):
+        item = {"title": str(raw.get("title", "")).strip(),
+                "user": str(raw.get("user", ""))}
+        video_id = raw.get("video_id")
+        if video_id:
+            try:
+                item["video_id"] = youtube_video_id(video_id)
+            except ValueError:
+                return None
+        return item
 
     def save(self):
         try:
             atomic_write(self.path, json.dumps(
                 {"current": self.current, "queue": self.queue},
                 ensure_ascii=False, indent=2) + "\n")
+            return True
         except Exception as e:  # queue must never break the bot
             log.debug("dj save failed: %s", e)
+            return False
 
-    def add(self, title, user, max_per_user=3):
+    def add(self, title, user, max_per_user=3, video_id=None):
         title, user = str(title).strip(), str(user).strip()
         if not title:
             raise DJError("give a song name: !request <song>")
+        if video_id:
+            try:
+                video_id = youtube_video_id(video_id)
+            except ValueError:
+                raise DJError("use a valid YouTube video ID") from None
         mine = [q for q in self.queue if q["user"].lower() == user.lower()]
         if len(mine) >= max(1, max_per_user):
             raise DJError(f"{user} already has {len(mine)} songs queued")
-        if any(q["title"].lower() == title.lower() for q in self.queue):
+        def is_duplicate(item):
+            if video_id and item.get("video_id"):
+                return item["video_id"] == video_id
+            return item["title"].lower() == title.lower()
+
+        if any(is_duplicate(item) for item in self.queue):
             raise DJError(f'"{title}" is already queued')
-        self.queue.append({"title": title, "user": user})
+        item = {"title": title, "user": user}
+        if video_id:
+            item["video_id"] = video_id
+        self.queue.append(item)
         return len(self.queue)
 
     def skip(self, nick, owner):
@@ -1662,6 +1753,821 @@ class DJQueue:
     def advance(self):
         self.current = self.queue.pop(0) if self.queue else None
         return self.current
+
+
+def dj_control_directory(base=None):
+    """Return the local, file-backed IPC directory shared with Web Status."""
+    return Path(base or BASE) / DJ_CONTROL_DIRNAME
+
+
+def dj_queue_path_for_config(cfg, base=None):
+    """Resolve the configured queue file without allowing data-folder escape."""
+    data_dir = Path(base or BASE).resolve()
+    dj = cfg.get("dj") or DEFAULTS["dj"]
+    filename = str(dj.get("queue_file") or "").strip()
+    if not filename:
+        raise ValueError("dj.queue_file must be set")
+    path = (data_dir / filename).resolve()
+    try:
+        path.relative_to(data_dir)
+    except ValueError:
+        raise ValueError("dj.queue_file must stay inside the Music DJ data folder") from None
+    return path
+
+
+def dj_control_request_path(request_id, base=None):
+    if not re.fullmatch(r"[0-9a-f]{32}", str(request_id or "")):
+        raise ValueError("Invalid DJ control request id.")
+    return dj_control_directory(base) / (request_id + ".request.json")
+
+
+def process_dj_control_request(cfg, now=None, base=None, runner=None):
+    """Process local UI commands on the DJ owner loop; callers must be single-threaded."""
+    directory = dj_control_directory(base)
+    timestamp = time.time() if now is None else float(now)
+    try:
+        requests = sorted(directory.glob("*.request.json"))[:32]
+    except OSError:
+        return 0
+    for old_response in directory.glob("*.response.json"):
+        try:
+            if timestamp - old_response.stat().st_mtime > 120:
+                old_response.unlink(missing_ok=True)
+        except OSError:
+            continue
+    processed = 0
+    now = timestamp
+    dj = cfg.get("dj") or DEFAULTS["dj"]
+    try:
+        queue_path = dj_queue_path_for_config(cfg, base)
+    except (OSError, ValueError):
+        log.error("DJ control refused an unsafe queue path")
+        return 0
+
+    for request_path in requests:
+        request_id = request_path.name.removesuffix(".request.json")
+        response_path = directory / (request_id + ".response.json")
+        if not re.fullmatch(r"[0-9a-f]{32}", request_id):
+            request_path.unlink(missing_ok=True)
+            continue
+        if response_path.exists():
+            request_path.unlink(missing_ok=True)
+            continue
+        try:
+            raw = request_path.read_text(encoding="utf-8")
+            request_path.unlink(missing_ok=True)
+            if len(raw) > 4096:
+                raise ValueError("Request is too large.")
+            request = json.loads(raw)
+            if (not isinstance(request, dict) or
+                    request.get("protocol") != DJ_CONTROL_PROTOCOL or
+                    request.get("request_id") != request_id or
+                    request.get("action") not in DJ_CONTROL_ACTIONS):
+                raise ValueError("Invalid DJ control request.")
+            created = float(request.get("created_at", 0))
+            if not now - DJ_CONTROL_REQUEST_TTL_SECONDS <= created <= now + 5:
+                raise ValueError("DJ control request expired.")
+
+            queue = DJQueue(queue_path)
+            queue.load()
+            action = request["action"]
+            if action == "skip":
+                if not dj.get("enabled"):
+                    raise DJError("Music DJ is disabled in config.json.")
+                owner = str(cfg["autoreply"].get("own_nickname", "")).strip()
+                queue.skip(owner, owner)
+                started = (runner.dj_start_playback(queue, dj) if runner is not None
+                           else process_dj_control_start_next(queue, cfg, base))
+                if not started:
+                    raise RuntimeError("The next DJ track could not be started.")
+                if not queue.save():
+                    raise OSError("Could not persist the DJ queue.")
+            elif action == "clear":
+                if runner is not None:
+                    runner.dj_stop_playback()
+                else:
+                    dj_stop()
+                queue.current, queue.queue = None, []
+                if not queue.save():
+                    raise OSError("Could not persist the DJ queue.")
+            elif action == "speak":
+                if runner is None:
+                    raise RuntimeError("The Music DJ worker cannot start voice output.")
+                speech_text = validate_room_speech_text(request.get("text", ""))
+                start_room_speech(speech_text)
+            payload = {
+                "protocol": DJ_CONTROL_PROTOCOL,
+                "request_id": request_id,
+                "ok": True,
+                "action": action,
+                "current": queue.current,
+                "queue": queue.queue[:50],
+                "updated_at": now,
+                "playback": {
+                    "elapsed_seconds": (max(0.0, time.monotonic() - runner.dj_started)
+                                        if runner and getattr(runner, "dj_started", 0) else None),
+                    "duration_seconds": (float(getattr(runner, "dj_length", 0))
+                                         if runner and getattr(runner, "dj_length", 0) > 0 else None),
+                },
+            }
+        except Exception as exc:
+            payload = {
+                "protocol": DJ_CONTROL_PROTOCOL,
+                "request_id": request_id,
+                "ok": False,
+                "error": str(exc)[:240],
+                "updated_at": now,
+            }
+        try:
+            atomic_write(response_path, json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+        except OSError:
+            log.exception("Could not write DJ control response")
+        processed += 1
+    return processed
+
+
+def process_dj_control_start_next(queue, cfg, base=None):
+    """Restart local MCI playback after a manager-initiated skip."""
+    if queue.current is None:
+        dj_stop()
+        return True
+    if cfg.get("dry_run"):
+        dj_stop()
+        return True
+    dj = cfg.get("dj") or DEFAULTS["dj"]
+    if dj.get("audio_backend", "chat") == "youtube":
+        return False  # YouTube requires the live Runner and its visible browser host.
+    if dj.get("audio_backend", "chat") != "local":
+        return True
+    dj_stop()
+    song = dj_find_song(Path(base or BASE) / dj.get("music_dir", "music"),
+                        queue.current["title"])
+    return bool(song and dj_play(song))
+
+
+def publish_dj_control_state(cfg, now=None, base=None, runner=None):
+    """Publish a bounded queue snapshot for the local Bot Manager UI."""
+    now = time.time() if now is None else float(now)
+    dj = cfg.get("dj") or DEFAULTS["dj"]
+    data_dir = Path(base or BASE)
+    try:
+        queue_path = dj_queue_path_for_config(cfg, base)
+    except (OSError, ValueError):
+        log.error("DJ control refused an unsafe queue path")
+        return None
+    queue = DJQueue(queue_path)
+    queue.load()
+    payload = {
+        "protocol": DJ_CONTROL_PROTOCOL,
+        "running": True,
+        "enabled": bool(dj.get("enabled")),
+        "current": queue.current,
+        "queue": queue.queue[:50],
+        "updated_at": now,
+        "playback": {
+            "elapsed_seconds": (max(0.0, time.monotonic() - runner.dj_started)
+                                if runner and getattr(runner, "dj_started", 0) else None),
+            "duration_seconds": (float(getattr(runner, "dj_length", 0))
+                                 if runner and getattr(runner, "dj_length", 0) > 0 else None),
+        },
+    }
+    try:
+        atomic_write(dj_control_directory(base) / "state.json",
+                     json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n")
+    except OSError:
+        log.exception("Could not publish DJ control state")
+    return payload
+
+
+def dj_playback_times(base=None, now=None, max_age=10.0):
+    """Read fresh elapsed/duration data from the local Music DJ state snapshot."""
+    try:
+        state = json.loads((dj_control_directory(base) / "state.json").read_text(
+            encoding="utf-8"))
+        if not isinstance(state, dict):
+            return None, None
+        updated_at = float(state.get("updated_at"))
+        age = (time.time() if now is None else float(now)) - updated_at
+        playback = state.get("playback")
+        if age < 0 or age > max_age or not isinstance(playback, dict):
+            return None, None
+        elapsed = playback.get("elapsed_seconds")
+        duration = playback.get("duration_seconds")
+        elapsed = float(elapsed) + age if elapsed is not None else None
+        duration = float(duration) if duration is not None else None
+        if elapsed is not None and (elapsed < 0 or elapsed > 24 * 60 * 60):
+            elapsed = None
+        if duration is not None and (duration <= 0 or duration > 24 * 60 * 60):
+            duration = None
+        return elapsed, duration
+    except (OSError, ValueError, TypeError, AttributeError, json.JSONDecodeError):
+        return None, None
+
+
+def youtube_search_url(query):
+    """Build a fixed-origin, escaped YouTube search URL from operator text."""
+    query = str(query or "").strip()
+    if not query:
+        raise ValueError("Enter a YouTube search phrase.")
+    if len(query) > 200 or CTRL_CHARS.search(query):
+        raise ValueError("The YouTube search phrase must be 1 to 200 printable characters.")
+    return "https://www.youtube.com/results?" + urllib.parse.urlencode(
+        {"search_query": query})
+
+
+YOUTUBE_RANDOM_MUSIC_QUERIES = (
+    "Thai pop official music video",
+    "Thai luk thung music",
+    "lofi chill instrumental music",
+    "jazz piano instrumental",
+    "acoustic pop songs",
+    "classic rock songs",
+    "city pop music",
+    "EDM dance music",
+    "movie soundtrack instrumental",
+    "indie pop music",
+)
+
+
+def random_youtube_music_url():
+    """Return a safe YouTube search link for a randomly selected music style."""
+    return youtube_search_url(random.choice(YOUTUBE_RANDOM_MUSIC_QUERIES))
+
+
+def random_youtube_music_link():
+    """Return both the selected search phrase and its fixed-origin YouTube URL."""
+    query = random.choice(YOUTUBE_RANDOM_MUSIC_QUERIES)
+    return query, youtube_search_url(query)
+
+
+YOUTUBE_RANDOM_MUSIC_FILE = "youtube_random_music.json"
+YOUTUBE_RANDOM_MUSIC_HISTORY_LIMIT = 200
+
+
+def save_random_youtube_music_link(query, url, base=None, now=None):
+    """Append a generated YouTube music search to bounded local JSON history."""
+    if query not in YOUTUBE_RANDOM_MUSIC_QUERIES or url != youtube_search_url(query):
+        raise ValueError("Only generated YouTube music searches may be saved.")
+    data_dir = Path(base or BASE).resolve()
+    path = data_dir / YOUTUBE_RANDOM_MUSIC_FILE
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        data = {"version": 1, "links": []}
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        raise ValueError("The saved YouTube music link history cannot be read.") from None
+    if (not isinstance(data, dict) or data.get("version") != 1
+            or not isinstance(data.get("links"), list)
+            or any(not isinstance(item, dict)
+                   or not all(isinstance(item.get(key), str)
+                              for key in ("query", "url", "created_at"))
+                   for item in data["links"])):
+        raise ValueError("The saved YouTube music link history has an invalid format.")
+    timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now))
+    links = data["links"][-(YOUTUBE_RANDOM_MUSIC_HISTORY_LIMIT - 1):]
+    links.append({"query": query, "url": url, "created_at": timestamp})
+    payload = {"version": 1, "links": links}
+    atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    return path
+
+
+ROOM_SPEECH_MAX_CHARS = 240
+
+
+def validate_room_speech_text(value):
+    """Validate short text entered by the local operator for offline TTS."""
+    text = str(value or "").strip()
+    if not text:
+        raise ValueError("Enter the text to speak.")
+    if len(text) > ROOM_SPEECH_MAX_CHARS or CTRL_CHARS.search(text):
+        raise ValueError("Speech text must be at most 240 printable characters.")
+    return text
+
+
+def windows_speech_powershell_command(value):
+    """Return an encoded, fixed PowerShell script; speech text is carried as Base64."""
+    text = validate_room_speech_text(value)
+    speech_data = base64.b64encode(text.encode("utf-8")).decode("ascii")
+    script = (
+        "$ErrorActionPreference = 'Stop'\n"
+        "try {\n"
+        "  Add-Type -AssemblyName System.Speech\n"
+        "  $payload = [Convert]::FromBase64String('" + speech_data + "')\n"
+        "  $utterance = [Text.Encoding]::UTF8.GetString($payload)\n"
+        "  $speaker = New-Object System.Speech.Synthesis.SpeechSynthesizer\n"
+        "  try { $speaker.Speak($utterance) } finally { $speaker.Dispose() }\n"
+        "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }\n"
+    )
+    return base64.b64encode(script.encode("utf-16le")).decode("ascii")
+
+
+def speak_room_text(value):
+    """Speak operator-provided text through Windows' default playback device."""
+    command = windows_speech_powershell_command(value)
+    if os.name != "nt":
+        raise OSError("Room voice output requires Windows PowerShell and System.Speech.")
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        raise OSError("Windows PowerShell was not found.")
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-NonInteractive", "-WindowStyle", "Hidden",
+         "-EncodedCommand", command],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        timeout=45, check=False,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if result.returncode != 0:
+        raise RuntimeError("Windows speech synthesis failed; check the installed speech voice.")
+
+
+_ROOM_SPEECH_LOCK = threading.Lock()
+
+
+def start_room_speech(value, on_complete=None):
+    """Start one bounded speech job without blocking the bot owner loop or GUI."""
+    text = validate_room_speech_text(value)
+    if not _ROOM_SPEECH_LOCK.acquire(blocking=False):
+        raise RuntimeError("A voice announcement is already playing.")
+
+    def worker():
+        error = None
+        try:
+            speak_room_text(text)
+        except Exception as exc:
+            log.exception("Room voice output failed")
+            error = str(exc) or "Windows voice output failed."
+        finally:
+            _ROOM_SPEECH_LOCK.release()
+        if on_complete is not None:
+            try:
+                on_complete(error)
+            except Exception:
+                log.debug("Room voice completion callback failed", exc_info=True)
+
+    thread = threading.Thread(target=worker, name="room-voice-output", daemon=True)
+    try:
+        thread.start()
+    except Exception:
+        _ROOM_SPEECH_LOCK.release()
+        raise
+    return thread
+
+
+def youtube_video_id(value):
+    """Accept an 11-character ID or supported HTTPS YouTube video URL only."""
+    value = str(value or "").strip()
+    if re.fullmatch(r"[A-Za-z0-9_-]{11}", value):
+        return value
+    try:
+        parsed = urllib.parse.urlsplit(value)
+    except ValueError:
+        raise ValueError("Use a YouTube video URL or its 11-character video ID.") from None
+    if parsed.scheme != "https" or parsed.username or parsed.password or parsed.port:
+        raise ValueError("Use a YouTube video URL or its 11-character video ID.")
+    host = (parsed.hostname or "").casefold()
+    video_id = ""
+    if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com"}:
+        if parsed.path == "/watch":
+            values = urllib.parse.parse_qs(parsed.query).get("v", [])
+            video_id = values[0] if len(values) == 1 else ""
+        else:
+            match = re.fullmatch(r"/(?:shorts|embed)/([A-Za-z0-9_-]{11})/?", parsed.path)
+            video_id = match.group(1) if match else ""
+    elif host == "youtu.be":
+        match = re.fullmatch(r"/([A-Za-z0-9_-]{11})/?", parsed.path)
+        video_id = match.group(1) if match else ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+        raise ValueError("Use a YouTube video URL or its 11-character video ID.")
+    return video_id
+
+
+def dj_youtube_video_id(item):
+    """Get the canonical playback ID from a queued item with old-format support."""
+    return youtube_video_id(item.get("video_id") or item.get("title", ""))
+
+
+def youtube_display_title(value, fallback=""):
+    """Bound player metadata before persisting or sending it into chat."""
+    title = " ".join(
+        "".join(char if char.isprintable() else " " for char in str(value or "")).split()
+    ).strip()
+    return title[:160] or str(fallback or "YouTube video")[:160]
+
+
+def find_chromium_browser():
+    """Find an installed Edge or Chrome executable without invoking a shell."""
+    candidates = [shutil.which("msedge"), shutil.which("msedge.exe"),
+                  shutil.which("chrome"), shutil.which("chrome.exe")]
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    program_files = [Path(os.environ.get(name, "")) for name in
+                     ("ProgramFiles", "ProgramFiles(x86)")]
+    candidates.extend((
+        local / "Microsoft/Edge/Application/msedge.exe",
+        local / "Google/Chrome/Application/chrome.exe",
+    ))
+    for root in program_files:
+        if str(root) != ".":
+            candidates.extend((root / "Microsoft/Edge/Application/msedge.exe",
+                               root / "Google/Chrome/Application/chrome.exe"))
+    return next((Path(path) for path in candidates
+                 if path and Path(path).is_file()), None)
+
+
+def open_youtube_search(query):
+    """Open a visible YouTube search in a dedicated browser profile."""
+    if os.name != "nt":
+        raise OSError("The owned browser window is supported in the Windows app only.")
+    browser = find_chromium_browser()
+    if browser is None:
+        raise FileNotFoundError("Install Microsoft Edge or Google Chrome first.")
+    url = youtube_search_url(query)
+    profile = youtube_profile_path()
+    profile.mkdir(parents=True, exist_ok=True)
+    flags = 0x08000000  # CREATE_NO_WINDOW; the browser remains a visible GUI app.
+    return subprocess.Popen(
+        [str(browser), "--user-data-dir=" + str(profile), "--new-window", url],
+        cwd=str(browser.parent), stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        close_fds=True, creationflags=flags)
+
+
+def youtube_profile_path():
+    local_app_data = Path(os.environ.get(
+        "LOCALAPPDATA", str(Path.home() / "AppData" / "Local")))
+    return (local_app_data / "Camfrog" / "MusicDJ" / "YouTubeProfile").resolve()
+
+
+YOUTUBE_PLAYER_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Music DJ YouTube Player</title>
+<style>
+html,body{margin:0;background:#101820;color:#edf3f7;font:15px "Segoe UI",sans-serif}
+main{max-width:960px;margin:0 auto;padding:12px;box-sizing:border-box}
+h1{font-size:18px;margin:0 0 5px}.hint{margin:0 0 10px;color:#c2d0da}
+#state{min-height:20px;margin:0 0 6px;color:#9de5d0}
+#player{width:100%;max-width:800px;aspect-ratio:16/9;background:#000}
+@media(max-width:520px){main{padding:8px}h1{font-size:16px}}
+</style>
+</head>
+<body>
+<main>
+<h1>Music DJ YouTube Player</h1>
+<p class="hint">Keep this player visible. Use the standard YouTube controls. Press Play if autoplay is blocked.</p>
+<p id="state" aria-live="polite">Connecting to YouTube…</p>
+<div id="player"></div>
+</main>
+<script>
+const params=new URLSearchParams(location.search);
+const token=params.get('token')||'';
+let lastRevision=Number(params.get('revision')||0);
+let activeVideoId=params.get('video')||'';
+let player=null;
+let pollBusy=false;
+let lastState='ready';
+const stateLabel=document.getElementById('state');
+function say(text){stateLabel.textContent=text;}
+async function postEvent(kind,errorCode){
+  let videoTitle='';
+  try{videoTitle=player?player.getVideoData().title||'':'';}catch(_e){}
+  try{await fetch('/event?token='+encodeURIComponent(token),{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({kind:kind,error_code:errorCode||0,
+      video_id:activeVideoId,revision:lastRevision,video_title:videoTitle})});}catch(_e){}
+}
+async function pollCommand(){
+  if(pollBusy||!player)return;
+  pollBusy=true;
+  try{
+    const response=await fetch('/state?token='+encodeURIComponent(token),{cache:'no-store'});
+    const state=await response.json();
+    if(state.closing){player.pauseVideo();say('Music DJ stopped. You can close this window.');postEvent('stopped');return;}
+    if(state.revision>lastRevision){
+      lastRevision=state.revision;
+      activeVideoId=state.video_id||'';
+      if(state.video_id){say('Loading YouTube video…');player.loadVideoById(state.video_id);}
+      else{player.stopVideo();say('Playback stopped.');}
+    }
+  }catch(_e){}
+  finally{pollBusy=false;}
+}
+window.onYouTubeIframeAPIReady=function(){
+  const video=activeVideoId;
+  player=new YT.Player('player',{
+    width:'800',height:'450',videoId:video,
+    playerVars:{autoplay:1,controls:1,enablejsapi:1,playsinline:1,origin:location.origin},
+    events:{
+      onReady:function(){say('Player ready.');postEvent('ready');pollCommand();},
+      onStateChange:function(event){
+        const names={'-1':'ready',0:'ended',1:'playing',2:'paused',3:'buffering',5:'cued'};
+        lastState=names[event.data]||'ready';
+        say(lastState==='playing'?'Playing':lastState==='ended'?'Track ended':'Player '+lastState);
+        postEvent(lastState);
+      },
+      onError:function(event){say('YouTube player error '+event.data+'. Skip or choose another video.');postEvent('error',event.data);},
+      onAutoplayBlocked:function(){say('Autoplay was blocked. Press Play in the YouTube player.');postEvent('blocked');}
+    }
+  });
+  setInterval(function(){postEvent('heartbeat');pollCommand();},1000);
+};
+document.addEventListener('visibilitychange',function(){
+  if(document.hidden){if(player)player.pauseVideo();say('Player hidden; playback paused.');postEvent('hidden');}
+  else{say('Player visible. Press Play to resume if needed.');postEvent('visible');}
+});
+const script=document.createElement('script');
+script.src='https://www.youtube.com/iframe_api';
+document.head.appendChild(script);
+</script>
+</body>
+</html>"""
+
+
+class YouTubePlayerHost:
+    """Visible standard YouTube iframe player hosted by a loopback-only local page."""
+
+    ALLOWED_EVENTS = frozenset({
+        "ready", "playing", "paused", "buffering", "ended", "blocked",
+        "error", "hidden", "visible", "heartbeat", "cued", "stopped",
+    })
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._events = []
+        self._server = None
+        self._server_thread = None
+        self._browser_process = None
+        self._browser_launched = False
+        self._closing = False
+        self._closed_ack = threading.Event()
+        self._status = "stopped"
+        self._last_heartbeat = 0.0
+        self._launched_at = 0.0
+        self._visible = False
+        self._video_id = ""
+        self._revision = 0
+        self._token = secrets.token_urlsafe(32)
+
+    @property
+    def origin(self):
+        if self._server is None:
+            return ""
+        return "http://127.0.0.1:{0}".format(self._server.server_address[1])
+
+    @property
+    def status(self):
+        with self._lock:
+            if self._closing:
+                return "stopped"
+            now = time.monotonic()
+            heartbeat_lost = (self._last_heartbeat and
+                              now - self._last_heartbeat > 8.0)
+            startup_lost = (not self._last_heartbeat and self._launched_at and
+                            now - self._launched_at > 20.0)
+            if self._browser_launched and (heartbeat_lost or startup_lost):
+                self._status = "disconnected"
+                self._browser_launched = False
+            return self._status
+
+    @property
+    def revision(self):
+        with self._lock:
+            return self._revision
+
+    @property
+    def video_id(self):
+        with self._lock:
+            return self._video_id
+
+    @property
+    def visible(self):
+        with self._lock:
+            return self._visible
+
+    def start_server(self):
+        if self._server is not None:
+            return self.origin
+        owner = self
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def log_message(self, _format, *_args):
+                return
+
+            def _authorized(self, parsed, require_origin=False):
+                query = urllib.parse.parse_qs(parsed.query)
+                supplied = query.get("token", [""])[0]
+                expected_host = "127.0.0.1:{0}".format(owner._server.server_address[1])
+                if (self.client_address[0] != "127.0.0.1" or
+                        self.headers.get("Host", "").casefold() != expected_host.casefold() or
+                        not hmac.compare_digest(str(supplied), owner._token)):
+                    return False
+                if require_origin and self.headers.get("Origin") != owner.origin:
+                    return False
+                return True
+
+            def _respond(self, code, content=b"", content_type="application/json"):
+                self.send_response(code)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(content)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("X-Frame-Options", "DENY")
+                self.end_headers()
+                if content:
+                    try:
+                        self.wfile.write(content)
+                    except OSError:
+                        pass
+
+            def do_GET(self):
+                parsed = urllib.parse.urlsplit(self.path)
+                if not self._authorized(parsed):
+                    self._respond(403)
+                    return
+                if parsed.path == "/":
+                    query = urllib.parse.parse_qs(parsed.query)
+                    try:
+                        video_id = youtube_video_id(query.get("video", [""])[0])
+                        revision = int(query.get("revision", ["0"])[0])
+                    except (ValueError, TypeError):
+                        self._respond(400)
+                        return
+                    with owner._lock:
+                        if (owner._closing or video_id != owner._video_id or
+                                revision != owner._revision):
+                            self._respond(409)
+                            return
+                    page = YOUTUBE_PLAYER_HTML.replace(
+                        "const token=params.get('token')||'';",
+                        "const token=params.get('token')||'';")
+                    page = page.replace(
+                        "let lastRevision=Number(params.get('revision')||0);",
+                        "let lastRevision={0};".format(max(0, revision)))
+                    page = page.replace(
+                        "const video=params.get('video')||'';",
+                        "const video={0};".format(json.dumps(video_id)))
+                    self._respond(200, page.encode("utf-8"), "text/html; charset=utf-8")
+                    return
+                if parsed.path == "/state":
+                    with owner._lock:
+                        state = {"revision": owner._revision,
+                                 "video_id": owner._video_id,
+                                 "closing": owner._closing}
+                    self._respond(200, json.dumps(state).encode("utf-8"))
+                    return
+                self._respond(404)
+
+            def do_POST(self):
+                parsed = urllib.parse.urlsplit(self.path)
+                if parsed.path != "/event" or not self._authorized(parsed, True):
+                    self._respond(403)
+                    return
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                    if not 0 < length <= 4096:
+                        raise ValueError
+                    payload = json.loads(self.rfile.read(length).decode("utf-8"))
+                    if not isinstance(payload, dict):
+                        raise ValueError
+                    kind = payload.get("kind")
+                    if not isinstance(kind, str) or kind not in owner.ALLOWED_EVENTS:
+                        raise ValueError
+                    error_code = payload.get("error_code", 0)
+                    if isinstance(error_code, bool) or not isinstance(error_code, int):
+                        raise ValueError
+                    video_id = payload.get("video_id")
+                    revision = payload.get("revision")
+                    video_title = payload.get("video_title", "")
+                    if (not isinstance(video_id, str) or
+                            isinstance(revision, bool) or not isinstance(revision, int) or
+                            not isinstance(video_title, str) or len(video_title) > 512):
+                        raise ValueError
+                    if not owner.record_event(
+                            kind, error_code, video_id, revision, video_title):
+                        self._respond(409)
+                        return
+                except (UnicodeError, ValueError, json.JSONDecodeError):
+                    self._respond(400)
+                    return
+                self._respond(204)
+
+        class LocalHTTPServer(http.server.ThreadingHTTPServer):
+            daemon_threads = True
+            block_on_close = False
+
+        try:
+            self._server = LocalHTTPServer(("127.0.0.1", 0), Handler)
+            self._server_thread = threading.Thread(
+                target=self._server.serve_forever,
+                name="music-dj-youtube-http", daemon=True)
+            self._server_thread.start()
+        except OSError:
+            self._server = None
+            self._server_thread = None
+            raise OSError("Could not start the local YouTube player bridge.") from None
+        return self.origin
+
+    def record_event(self, kind, error_code=0, video_id=None, revision=None,
+                     video_title=""):
+        now = time.monotonic()
+        with self._lock:
+            if video_id != self._video_id or revision != self._revision:
+                return False
+            self._last_heartbeat = now
+            if kind == "heartbeat":
+                self._browser_launched = True
+                self._launched_at = now
+                if self._status == "disconnected":
+                    self._status = "ready"
+                return True
+            self._status = kind
+            self._visible = kind not in ("hidden", "disconnected", "stopped")
+            if kind == "stopped":
+                self._closed_ack.set()
+            event = {"kind": kind, "video_id": video_id, "revision": revision,
+                     "video_title": youtube_display_title(video_title, video_id)}
+            if kind == "error":
+                event["error_code"] = max(0, min(int(error_code), 999))
+            self._events.append(event)
+            del self._events[:-32]
+            return True
+
+    def consume_events(self):
+        with self._lock:
+            events, self._events = self._events, []
+            return [event for event in events
+                    if event.get("video_id") == self._video_id and
+                    event.get("revision") == self._revision]
+
+    def _open_player_window(self, video_id):
+        if os.name != "nt":
+            raise OSError("The YouTube player window is supported in the Windows app only.")
+        browser = find_chromium_browser()
+        if browser is None:
+            raise FileNotFoundError("Install Microsoft Edge or Google Chrome first.")
+        profile = youtube_profile_path()
+        profile.mkdir(parents=True, exist_ok=True)
+        with self._lock:
+            revision = self._revision
+        url = self.origin + "/?" + urllib.parse.urlencode({
+            "token": self._token, "video": video_id, "revision": revision})
+        try:
+            self._browser_process = subprocess.Popen(
+                [str(browser), "--user-data-dir=" + str(profile), "--new-window", url],
+                cwd=str(browser.parent), stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                close_fds=True, creationflags=0x08000000)
+        except OSError:
+            raise OSError("Could not open the YouTube player browser window.") from None
+        with self._lock:
+            self._browser_launched = True
+            self._launched_at = time.monotonic()
+            self._status = "loading"
+
+    def load_video(self, value):
+        video_id = youtube_video_id(value)
+        self.start_server()
+        with self._lock:
+            self._video_id = video_id
+            self._revision += 1
+            self._status = "loading"
+            launched = self._browser_launched
+        if not launched:
+            try:
+                self._open_player_window(video_id)
+            except Exception:
+                self.close()
+                raise
+        return True
+
+    def stop_video(self):
+        with self._lock:
+            self._video_id = ""
+            self._revision += 1
+            self._status = "stopped"
+            self._visible = False
+
+    def close(self):
+        with self._lock:
+            if self._closing:
+                return
+            self._closing = True
+        server = self._server
+        thread = self._server_thread
+        if server is not None:
+            # The visible page polls once per second and acknowledges after pausing.
+            self._closed_ack.wait(1.5)
+            try:
+                server.shutdown()
+            except (OSError, RuntimeError):
+                pass
+            server.server_close()
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=1.0)
+        self._server = None
+        self._server_thread = None
 
 
 def dj_find_song(music_dir, title):
@@ -1771,6 +2677,7 @@ class Runner:
         self._mtime = self.cfg_path.stat().st_mtime if self.cfg_path and self.cfg_path.exists() else 0
         self._next_reload = 0.0
         self._next_resolve_retry = 0.0
+        self._next_dj_control_state = 0.0
         self.marq, self.lang_i, self.msg_i, self.current_text = None, 0, {}, None
         self.next_attach = 0.0
         self.im_wins, self.im_next_attach, self.im_hint_at = {}, 0.0, 0.0
@@ -1778,6 +2685,13 @@ class Runner:
         # retry loop degrades to warnings instead of AttributeError.
         self.win = self.status_edit = self.apply_btn = None
         self.history = self.input = self.chat_win = None
+        self.youtube_player = None
+        self._dj_youtube_requested = None
+        self._dj_youtube_announced = None
+        self._dj_youtube_blocked = None
+        self._dj_youtube_error = None
+        self._dj_youtube_retries = 0
+        self._dj_youtube_disconnected_notice = None
         self.apply_cfg(cfg)
         self.sender_last, self.sent = {}, []
         self.im_sender_last, self.im_day, self.im_sent, self.im_next_ok = {}, {}, [], 0.0
@@ -1795,6 +2709,15 @@ class Runner:
 
     def apply_cfg(self, cfg):
         cfg = apply_app_profile(cfg)
+        previous = getattr(self, "cfg", None)
+        if previous is not None:
+            old_dj, new_dj = previous.get("dj", {}), cfg.get("dj", {})
+            if (old_dj.get("audio_backend", "chat") != new_dj.get("audio_backend", "chat") or
+                    old_dj.get("enabled", False) != new_dj.get("enabled", False)):
+                self.dj_stop_playback()
+                if self.youtube_player is not None:
+                    self.youtube_player.close()
+                    self.youtube_player = None
         self.cfg = cfg
         self.dry = cfg["dry_run"]
         self.stop_file = BASE / cfg["safety"]["stop_file"]
@@ -2186,23 +3109,53 @@ class Runner:
 
     def dj_command(self, queue, dj, cmd, arg, nick, owner):
         """One DJ chat command -> reply text (None = not a DJ command)."""
+        if cmd in ("randommusic", "musicrandom", "ytmusic"):
+            query, url = random_youtube_music_link()
+            try:
+                save_random_youtube_music_link(query, url)
+            except (OSError, UnicodeError, ValueError):
+                log.exception("Could not persist generated YouTube music search")
+                raise DJError(bi("could not save random YouTube music link; check the local data folder|"
+                                 "บันทึกลิงก์เพลง YouTube ไม่ได้ โปรดตรวจสอบโฟลเดอร์ข้อมูลของแอป")) from None
+            return bi("[dj] Random YouTube music search (saved): {url}|"
+                      "[dj] สุ่มลิงก์ค้นหาเพลง YouTube (บันทึกแล้ว): {url}").format(url=url)
         if cmd in ("request", "req", "song"):
             title = arg
-            if dj.get("audio_backend", "chat") == "local":
+            video_id = None
+            backend = dj.get("audio_backend", "chat")
+            if backend == "local":
                 song = dj_find_song(BASE / dj.get("music_dir", "music"), arg)
                 if song is None:
                     raise DJError(f'no supported audio file found in music/: "{arg}"')
                 title = song.stem
-            if queue.current is not None \
-                    and queue.current["title"].lower() == title.lower():
-                raise DJError(f'"{title}" is playing now')
-            pos = queue.add(title, nick, dj.get("max_per_user", 3))
+            elif backend == "youtube":
+                try:
+                    video_id = youtube_video_id(arg)
+                    title = video_id
+                except ValueError:
+                    raise DJError("use !request <YouTube video URL or 11-character ID>") from None
+            if queue.current is not None:
+                current_key = queue.current["title"].lower()
+                if backend == "youtube":
+                    try:
+                        current_key = dj_youtube_video_id(queue.current)
+                    except ValueError:
+                        pass
+                if current_key == (video_id if video_id else title.lower()):
+                    raise DJError(f'"{title}" is playing now')
+            pos = queue.add(title, nick, dj.get("max_per_user", 3), video_id)
             if queue.current is None:
                 queue.current = queue.queue.pop(0)
                 if not self.dj_start_playback(queue, dj):
                     queue.current = None
+                    if backend == "youtube":
+                        raise DJError("could not open the visible YouTube player window")
                     raise DJError(bi("could not start local audio; check the file and Windows audio support|"
                                      "เริ่มเล่นเสียงในเครื่องไม่ได้ โปรดตรวจสอบไฟล์และ codec ของ Windows"))
+                if backend == "youtube":
+                    return bi("[dj] Loading YouTube video {title}. Press Play in the player if needed.|"
+                              "[dj] กำลังโหลดวิดีโอ YouTube {title} หากระบบไม่เล่นอัตโนมัติให้กด Play ในหน้าต่างผู้เล่น").format(
+                                  title=title)
                 return dj["announce_now"].format(title=queue.current["title"],
                                                 user=queue.current["user"])
             return dj["announce_queued"].format(pos=pos, title=title)
@@ -2215,29 +3168,96 @@ class Runner:
         if cmd in ("current", "np"):
             if queue.current is None:
                 return "[dj] nothing is playing"
-            return "[dj] current: {0} ({1})".format(queue.current["title"],
-                                                   queue.current["user"])
+            elapsed = (max(0.0, time.monotonic() - self.dj_started)
+                       if self.dj_started else None)
+            return dj_status_summary(queue.current, queue.queue[0] if queue.queue else None,
+                                     elapsed, self.dj_length)
         if cmd == "skip":
             nxt = queue.skip(nick, owner)
             if not self.dj_start_playback(queue, dj):
                 queue.current = None
+                if dj.get("audio_backend", "chat") == "youtube":
+                    raise DJError("skipped, but could not open the YouTube player window")
                 raise DJError(bi("skipped, but could not start local audio|ข้ามเพลงแล้ว แต่เริ่มเล่นเสียงในเครื่องไม่ได้"))
             if nxt is None:
                 return "[dj] skipped, queue is empty"
+            if dj.get("audio_backend", "chat") == "youtube":
+                return bi("[dj] Loading YouTube video {title}. Press Play in the player if needed.|"
+                          "[dj] กำลังโหลดวิดีโอ YouTube {title} หากระบบไม่เล่นอัตโนมัติให้กด Play ในหน้าต่างผู้เล่น").format(
+                              title=nxt["title"])
             return dj["announce_now"].format(title=nxt["title"], user=nxt["user"])
         if cmd == "help":
-            return "[dj] commands: !request <song> !queue !current !skip"
+            request_help = ("<YouTube video URL or ID>" if
+                            dj.get("audio_backend", "chat") == "youtube" else "<song>")
+            return "[dj] commands: !request {0} !randommusic !queue !current !skip !help".format(
+                request_help)
         return None
 
-    def dj_start_playback(self, queue, dj):
-        """Begin local audio for the current song (or stop when empty)."""
+    def dj_stop_playback(self):
+        """Stop local audio and tell any visible YouTube player to pause."""
         self.dj_started, self.dj_length = 0.0, 0.0
-        if queue.current is None or self.dry:
-            dj_stop()
-            return True
-        if dj.get("audio_backend", "chat") != "local":
-            return True
         dj_stop()
+        if self.youtube_player is not None:
+            self.youtube_player.stop_video()
+        self._dj_youtube_requested = None
+        self._dj_youtube_announced = None
+        self._dj_youtube_blocked = None
+        self._dj_youtube_error = None
+        self._dj_youtube_disconnected_notice = None
+
+    def dj_start_playback(self, queue, dj):
+        """Begin the selected backend for the current song (or stop when empty)."""
+        self.dj_started, self.dj_length = 0.0, 0.0
+        if queue.current is None:
+            self.dj_stop_playback()
+            return True
+        if self.dry:
+            if dj.get("audio_backend", "chat") == "youtube":
+                try:
+                    self._dj_youtube_requested = (
+                        dj_youtube_video_id(queue.current), queue.current["user"])
+                except ValueError:
+                    return False
+            return True
+        backend = dj.get("audio_backend", "chat")
+        if backend == "youtube":
+            try:
+                video_id = dj_youtube_video_id(queue.current)
+            except ValueError:
+                return False
+            key = (video_id, queue.current["user"])
+            if key != self._dj_youtube_requested:
+                self._dj_youtube_announced = None
+                self._dj_youtube_blocked = None
+                self._dj_youtube_error = None
+                self._dj_youtube_retries = 0
+                self._dj_youtube_disconnected_notice = None
+            player = self.youtube_player
+            try:
+                if player is None:
+                    player = YouTubePlayerHost()
+                    self.youtube_player = player
+                player.load_video(video_id)
+            except (OSError, ValueError) as exc:
+                log.warning("Could not start YouTube player: %s", exc)
+                if player is not None:
+                    # A failed startup must not leave a dead bridge bound to a port.
+                    try:
+                        player.close()
+                    except Exception:
+                        log.debug("Failed to close YouTube player bridge", exc_info=True)
+                    if self.youtube_player is player:
+                        self.youtube_player = None
+                self._dj_youtube_requested = None
+                return False
+            self._dj_youtube_requested = key
+            return True
+        if self.youtube_player is not None:
+            self.youtube_player.close()
+            self.youtube_player = None
+        dj_stop()
+        if backend != "local":
+            return True
         song = dj_find_song(BASE / dj.get("music_dir", "music"), queue.current["title"])
         if song is None:
             return False
@@ -2250,6 +3270,8 @@ class Runner:
 
     def dj_auto_advance(self, queue, dj):
         """Advance finished tracks and recover queued work when none is current."""
+        if dj.get("audio_backend", "chat") == "youtube":
+            return self.dj_auto_advance_youtube(queue, dj)
         if queue.current is None:
             if not queue.queue:
                 return False
@@ -2289,6 +3311,87 @@ class Runner:
             self.say_now(dj["announce_now"].format(title=nxt["title"], user=nxt["user"]))
         return True
 
+    def dj_auto_advance_youtube(self, queue, dj):
+        """Use current player events to announce and advance YouTube requests."""
+        dirty = False
+        if queue.current is None:
+            if not queue.queue:
+                if self._dj_youtube_requested is not None:
+                    self.dj_stop_playback()
+                return False
+            queue.current = queue.queue.pop(0)
+            dirty = True
+        try:
+            video_id = dj_youtube_video_id(queue.current)
+        except ValueError:
+            queue.current = None
+            self.say_now("[dj] current queue item is not a valid YouTube video")
+            return True
+        key = (video_id, queue.current["user"])
+        if self._dj_youtube_requested != key:
+            if not self.dj_start_playback(queue, dj):
+                queue.current = None
+                self.say_now("[dj] could not open the visible YouTube player window")
+                return True
+            if self.dry:
+                return dirty
+        player = self.youtube_player
+        if player is None:
+            return dirty
+        for event in player.consume_events():
+            if (event.get("revision") != player.revision or
+                    event.get("video_id") != player.video_id or
+                    queue.current is None or event.get("video_id") != video_id):
+                continue
+            kind = event.get("kind")
+            if kind in ("ready", "playing"):
+                title = youtube_display_title(event.get("video_title"), video_id)
+                if title != queue.current["title"]:
+                    queue.current["title"] = title
+                    dirty = True
+            if kind == "playing":
+                if self._dj_youtube_announced != key:
+                    self.dj_started = time.monotonic()
+                    self.say_now(dj["announce_now"].format(
+                        title=queue.current["title"], user=queue.current["user"]))
+                    self._dj_youtube_announced = key
+                self._dj_youtube_retries = 0
+                self._dj_youtube_disconnected_notice = None
+            elif kind == "blocked" and self._dj_youtube_blocked != key:
+                self._dj_youtube_blocked = key
+                self.say_now("[dj] YouTube blocked autoplay; press Play in the visible player window")
+            elif kind == "error":
+                marker = (key, event.get("error_code", 0))
+                if self._dj_youtube_error != marker:
+                    self._dj_youtube_error = marker
+                    self.say_now("[dj] YouTube player error {0}; use !skip to continue".format(
+                        event.get("error_code", 0)))
+            elif kind == "ended":
+                nxt = queue.advance()
+                dirty = True
+                self._dj_youtube_requested = None
+                if nxt is None:
+                    self.say_now("[dj] queue finished")
+                    self.dj_stop_playback()
+                elif not self.dj_start_playback(queue, dj):
+                    queue.current = None
+                    self.say_now("[dj] could not load the next YouTube video")
+                break
+
+        if (queue.current is not None and player.status == "disconnected"):
+            retry_at = getattr(self, "dj_retry_at", 0.0)
+            now = time.monotonic()
+            if self._dj_youtube_retries < 2 and now >= retry_at:
+                self._dj_youtube_retries += 1
+                self.dj_retry_at = now + 15.0
+                if not self.dj_start_playback(queue, dj):
+                    self.say_now("[dj] YouTube player could not reconnect; use !skip to continue")
+            elif (self._dj_youtube_retries >= 2 and
+                  self._dj_youtube_disconnected_notice != key):
+                self._dj_youtube_disconnected_notice = key
+                self.say_now("[dj] YouTube player is disconnected; reopen the player or use !skip")
+        return dirty
+
     def say_now(self, text):
         if not self.send(self.input, text, None, self.chat_win):
             raise RuntimeError(t("reply_fail"))
@@ -2302,7 +3405,7 @@ class Runner:
         ar = self.cfg["autoreply"]
         cur = read_chat(self.history, ar["history_tail"]).splitlines()
         fresh, self.dj_prev = new_lines(getattr(self, "dj_prev", []), cur), cur
-        queue = DJQueue(BASE / dj["queue_file"])
+        queue = DJQueue(dj_queue_path_for_config(self.cfg))
         queue.load()
         pre = dj.get("prefix", "!") or "!"
         owner = self.own
@@ -2331,6 +3434,16 @@ class Runner:
         if dirty:
             queue.save()
 
+    def _watch_dj_control_requests(self, stop_event):
+        """Wake the owner loop promptly without processing queue state off-thread."""
+        directory = dj_control_directory()
+        while not stop_event.wait(0.1):
+            try:
+                if next(directory.glob("*.request.json"), None) is not None:
+                    self._dj_control_wakeup.set()
+            except OSError:
+                continue
+
     def run(self):
         cfg = self.cfg
         if not self.dry and cfg["autoreply"]["enabled"] and not self.own:
@@ -2347,6 +3460,12 @@ class Runner:
         log.info(t("running", dry=self.dry, stop=self.stop_file.name))
         self.im_summary()
         fails = 0
+        self._dj_control_wakeup = threading.Event()
+        control_watch_stop = threading.Event()
+        control_watch = threading.Thread(
+            target=self._watch_dj_control_requests,
+            args=(control_watch_stop,), name="music-dj-control-watch", daemon=True)
+        control_watch.start()
         try:
             while not self.stop_file.exists():
                 try:
@@ -2366,6 +3485,10 @@ class Runner:
                     if self.history is not None:
                         self.do_chat(active)
                     self.do_dj(active)
+                    process_dj_control_request(self.cfg, runner=self)
+                    if now >= self._next_dj_control_state:
+                        publish_dj_control_state(self.cfg, runner=self)
+                        self._next_dj_control_state = now + 1.0
                     if _im(self.cfg)["enabled"]:
                         self.attach_im(now)
                         self.do_im(active)
@@ -2392,10 +3515,18 @@ class Runner:
                     # full poll interval to every frame. The frame interval
                     # itself remains rate-limited by status.marquee.step_seconds.
                     wait = min(wait, max(0.01, self.marq["next"] - time.monotonic()))
-                time.sleep(wait)
+                self._dj_control_wakeup.wait(wait)
+                self._dj_control_wakeup.clear()
             log.info(t("stopped"))
             return 0
         finally:
+            control_watch_stop.set()
+            self._dj_control_wakeup.set()
+            control_watch.join(timeout=1.0)
+            self.dj_stop_playback()
+            if self.youtube_player is not None:
+                self.youtube_player.close()
+                self.youtube_player = None
             self.write_stats(time.monotonic(), force=True)
 
 
@@ -3365,7 +4496,7 @@ class ClipboardController:
 
 
 
-APP_NAME = "Music DJ"
+APP_NAME = "ZeaZDev room Music DJ"
 
 
 
@@ -3921,7 +5052,7 @@ def build_app():
         def dj_queue_path(self):
             cfg, errs = self.collect()
             draft = cfg if not errs else self.draft
-            return BASE / (draft.get("dj") or DEFAULTS["dj"]).get("queue_file", "dj_queue.json")
+            return dj_queue_path_for_config(draft)
 
         def dj_load_queue(self):
             q = DJQueue(self.dj_queue_path())
@@ -3973,12 +5104,65 @@ def build_app():
             if selected:
                 self.dj_music_dir_var.set(str(Path(selected)))
 
+        def dj_speak_text(self, value=None):
+            try:
+                text = validate_room_speech_text(
+                    self.dj_speech_var.get() if value is None else value)
+            except ValueError as exc:
+                self.say(str(exc), bad=True)
+                return
+
+            def complete(error):
+                message = ("Voice output failed: {0}".format(error) if error else
+                           bi("Voice finished through Windows output.|อ่านเสียงผ่านเอาต์พุต Windows เสร็จแล้ว"))
+                self.q.put(("speech", 1 if error else 0, message))
+
+            try:
+                start_room_speech(text, complete)
+            except (RuntimeError, ValueError) as exc:
+                self.say(str(exc), bad=True)
+                return
+            self.say(bi("Speaking through Windows default output...|กำลังอ่านเสียงผ่านเอาต์พุตหลักของ Windows..."))
+
+        def dj_speak_current(self):
+            queue = self.dj_load_queue()
+            if queue.current is None:
+                self.say(bi("No current song to speak.|ไม่มีเพลงที่กำลังเล่นให้อ่านเสียง"), bad=True)
+                return
+            elapsed, duration = dj_playback_times()
+            self.dj_speak_text(dj_status_speech(
+                queue.current, queue.queue[0] if queue.queue else None, elapsed, duration))
+
+        def dj_open_youtube_search(self):
+            try:
+                process = open_youtube_search(self.dj_youtube_query_var.get())
+            except (OSError, ValueError) as exc:
+                self.msg.configure(text=bi("YouTube search could not open: {0}|เปิดค้นหา YouTube ไม่ได้: {0}").format(exc))
+                return
+            self.msg.configure(text=bi(
+                "Opened YouTube in a separate visible browser profile. Choose a result and press Play.|"
+                "เปิด YouTube ด้วยโปรไฟล์เบราว์เซอร์แยกแล้ว เลือกผลค้นหาและกดเล่นเอง")
+                + " (PID {0})".format(process.pid))
+
         def tab_music(self, f):
+            brand = ttk.Frame(f)
+            brand.pack(fill="x", pady=(0, 4))
+            try:
+                original = tk.PhotoImage(
+                    master=self.root, file=str(app_resource_path("assets/zeazdev-room.png")))
+                factor = max(1, (original.width() + 47) // 48)
+                self.zeazdev_room_photo = original.subsample(factor, factor)
+                ttk.Label(brand, image=self.zeazdev_room_photo).pack(side="left", padx=(0, 6))
+            except (OSError, tk.TclError):
+                self.zeazdev_room_photo = None
+            ttk.Label(brand, text="ZeaZDev room", font=("Segoe UI", 12, "bold")).pack(side="left")
+            ttk.Label(brand, text=bi("Music DJ|ดีเจเพลง"), foreground="#087b83").pack(
+                side="left", padx=8)
             g = ttk.Frame(f)
             g.pack(fill="x")
             self.field(g, "DJ enabled|เปิดใช้ DJ", ("dj", "enabled"), "bool")
             self.field(g, "Command prefix|คำสั่งขึ้นต้น", ("dj", "prefix"), width=6,
-                       hint="e.g. ! !request !queue !current !skip !help")
+                       hint="e.g. ! !request !randommusic !queue !current !skip !help")
             self.field(g, "Queue file|ไฟล์คิว", ("dj", "queue_file"), width=24)
             self.field(g, "Max songs per user|เพลงสูงสุดต่อคน", ("dj", "max_per_user"), "int", width=6)
             self.dj_music_dir_var = self.field(g, "Music folder|โฟลเดอร์เพลง", ("dj", "music_dir"), width=24)
@@ -3987,19 +5171,47 @@ def build_app():
                 g, text=bi("Browse...|เลือก..."), command=self.dj_browse_music_folder)
             self.btn_dj_browse_music.grid(row=music_row, column=2, sticky="w", padx=4, pady=2)
             ttk.Label(g, text=bi("Windows-supported audio files|ไฟล์เสียงที่ Windows รองรับ"),
-                      foreground="#626d7a").grid(row=music_row, column=3, sticky="w")
-            self.field(g, "Audio backend|เสียง", ("dj", "audio_backend"), "choice", ("chat", "local"), 10,
-                       hint="chat = announce in chat, local = play audio on this PC|chat = ประกาศในแชท local = เล่นเสียงบนเครื่องนี้")
+                      foreground="#666").grid(row=music_row, column=3, sticky="w")
+            self.field(g, "Audio backend|เสียง", ("dj", "audio_backend"), "choice", ("chat", "local", "youtube"), 10,
+                       hint="chat = announce only; local = play a file on this PC; youtube = visible player using !request URL or ID|chat = ประกาศ; local = เล่นไฟล์เสียงบนเครื่องนี้; youtube = เปิดวิดีโอในหน้าต่างผู้เล่น ใช้ !request ตามด้วย URL หรือ ID")
             self.field(g, "Now playing template|แม่แบบกำลังเล่น", ("dj", "announce_now"), width=44,
                        hint="placeholders {title} {user}")
             self.field(g, "Queued template|แม่แบบคิว", ("dj", "announce_queued"), width=44,
                        hint="placeholders {pos} {title}")
             ttk.Label(f, text=bi(
-                "Chat commands: !request <song>  !queue  !current  !skip  !help. "
+                "Chat commands: !request <song>  !randommusic  !queue  !current  !skip  !help. "
                 "Local audio plays on this PC - route it into Camfrog with a virtual cable or stereo mix.|"
-                "คำสั่งในแชท: !request <เพลง> !queue !current !skip !help "
+                "คำสั่งในแชท: !request <เพลง> !randommusic !queue !current !skip !help "
                 "เสียง local เล่นบนเครื่องนี้ - ส่งเข้า Camfrog ด้วย virtual cable หรือ stereo mix"),
-                foreground="#626d7a", wraplength=900).pack(anchor="w", pady=(8, 4))
+                foreground="#666", wraplength=900).pack(anchor="w", pady=(8, 4))
+            voice_row = ttk.LabelFrame(
+                f, text=bi("Speak to room with Windows voice|ใช้เสียง Windows พูดเข้าห้อง"), padding=6)
+            voice_row.pack(fill="x", pady=(2, 6))
+            self.dj_speech_var = tk.StringVar()
+            speech_entry = ttk.Entry(voice_row, textvariable=self.dj_speech_var, width=58)
+            speech_entry.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            speech_entry.bind("<Return>", lambda _event: self.dj_speak_text())
+            ttk.Button(voice_row, text=bi("Speak text|พูดข้อความ"),
+                       command=self.dj_speak_text).pack(side="left", padx=(0, 4))
+            ttk.Button(voice_row, text=bi("Speak current song|พูดข้อมูลเพลงปัจจุบัน"),
+                       command=self.dj_speak_current).pack(side="left")
+            ttk.Label(f, text=bi(
+                "Voice uses the installed Windows speech voice and default playback device. Connect that output to Camfrog's microphone input; text is limited to 240 characters.|"
+                "ใช้เสียงพูดที่ติดตั้งใน Windows และอุปกรณ์เล่นเสียงหลัก ต่อเอาต์พุตนั้นเข้าไมโครโฟน Camfrog จำกัดข้อความ 240 ตัวอักษร"),
+                foreground="#666", wraplength=900).pack(anchor="w", pady=(0, 4))
+            youtube_row = ttk.LabelFrame(f, text=bi("YouTube assisted playback|เปิด YouTube แบบช่วยควบคุม"), padding=6)
+            youtube_row.pack(fill="x", pady=(2, 6))
+            self.dj_youtube_query_var = tk.StringVar()
+            ttk.Entry(youtube_row, textvariable=self.dj_youtube_query_var).pack(
+                side="left", fill="x", expand=True, padx=(0, 6))
+            ttk.Button(youtube_row, text=bi("Open search window|เปิดหน้าต่างค้นหา"),
+                       command=self.dj_open_youtube_search).pack(side="left")
+            ttk.Label(f, text=bi(
+                "Queue playback: set audio backend to youtube and use !request <YouTube URL or ID>. "
+                "The visible player announces on play and advances on end; press Play if autoplay is blocked.|"
+                "เล่นจากคิว: ตั้ง audio backend เป็น youtube แล้วใช้ !request <URL หรือ ID YouTube> "
+                "player จะประกาศเมื่อเริ่มเล่นและเลื่อนคิวเมื่อจบ หาก autoplay ถูกบล็อกให้กด Play"),
+                foreground="#666", wraplength=900).pack(anchor="w", pady=(0, 4))
             lf = ttk.LabelFrame(f, text=bi("Queue|คิวเพลง"), padding=6)
             lf.pack(fill="both", expand=True)
             self.dj_tree = ttk.Treeview(lf, columns=("n", "title", "user"), show="headings", height=10)
@@ -4330,6 +5542,9 @@ def build_app():
             try:
                 while True:
                     kind, rc, out = self.q.get_nowait()
+                    if kind == "speech":
+                        self.say(out.splitlines()[-1] if out else t("ok"), rc not in (0, None))
+                        continue
                     self.busy = False
                     self.say(out.splitlines()[-1] if out else t("ok"), rc not in (0, None))
                     if kind == "start" and rc == 0 and getattr(self, "_close_after", False):
