@@ -19,7 +19,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Added a read-only Camfrog public presence probe that fingerprints bounded GIF responses and persists raw evidence locally while classifying every observation as UNKNOWN.
 
 ### Fixed
-- Release uploads now use the `SHA256SUMS.txt` asset name expected by app updaters.
+- Release publishing now uploads the flat checksum manifest as `SHA256SUMS.txt`, matching the name expected by existing app updaters.
 
 ### Changed
 - Web Status now defaults to switching non-empty status slots every 60 seconds.
