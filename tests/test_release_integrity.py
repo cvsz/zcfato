@@ -63,6 +63,18 @@ def test_full_build_checks_and_lists_every_release_executable():
         assert expected_path in outputs
 
 
+
+
+def test_windows_build_uses_fresh_pytest_basetemp_per_invocation():
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "build.bat").read_text(encoding="utf-8")
+
+    assert 'set "PYTEST_RUN_ID=%RANDOM%-%RANDOM%-%RANDOM%"' in script
+    assert 'set "PYTEST_TMP_DIR=%CD%\\build\\pytest_tmp_%PYTEST_RUN_ID%"' in script
+    assert 'rmdir /s /q "%PYTEST_TMP_DIR%"' not in script
+    assert '--basetemp="%PYTEST_TMP_DIR%"' in script
+    assert '--basetemp="%PYTEST_TMP_DIR%_private"' in script
+
 def test_music_dj_packages_zeazdev_room_mascot_with_the_executable():
     root = Path(__file__).resolve().parents[1]
     build = (root / "build.bat").read_text(encoding="utf-8")
