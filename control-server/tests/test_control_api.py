@@ -267,7 +267,6 @@ def test_account_agent_assignment_is_one_to_one_and_cancels_pending_commands(
     assert first_agent_id != second_agent["id"]
 
 
-
 def test_revoking_agent_cancels_claimed_command_and_invalidates_lease(
     api_client: tuple[TestClient, object, str],
 ) -> None:
