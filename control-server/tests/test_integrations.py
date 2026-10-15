@@ -23,7 +23,8 @@ def _account_and_agent(client: TestClient, admin_token: str) -> tuple[dict, dict
         json={"nickname": "integration-user", "agent_id": agent.json()["id"]},
     )
     assert account.status_code == 201
-    return agent.json(), account.json()
+    account_data = account.json()
+    return {**agent.json(), "agent_token": account_data["agent_token"]}, account_data
 
 
 def test_dashboard_is_served_with_security_headers(
@@ -98,11 +99,17 @@ def test_agent_snapshot_populates_profile_friends_and_presence(
     assert presence.json()["state"] == "online"
 
     other_agent = client.post(
-        "/api/v1/agents", headers=headers, json={"name": "unassigned-agent"}
+        "/api/v1/agents", headers=headers, json={"name": "other-account-agent"}
     ).json()
+    other_account = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={"nickname": "other-account", "agent_id": other_agent["id"]},
+    )
+    assert other_account.status_code == 201
     forbidden = client.put(
         "/api/v1/agent/accounts/snapshot",
-        headers=_headers(other_agent["agent_token"]),
+        headers=_headers(other_account.json()["agent_token"]),
         json={
             "account_id": account["id"],
             "profile": {"client_presence": "offline"},

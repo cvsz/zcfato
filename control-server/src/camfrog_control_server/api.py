@@ -29,6 +29,7 @@ from .models import (
 )
 from .schemas import (
     AccountAgentAssign,
+    AccountAgentAssignmentRead,
     AccountCreate,
     AccountRead,
     AgentChatMessage,
@@ -38,6 +39,7 @@ from .schemas import (
     AgentCreated,
     AgentRead,
     AgentRuntimeState,
+    AgentTokenRotated,
     AuditRead,
     ChatMessageAckRequest,
     ChatMessageDirection,
@@ -168,6 +170,21 @@ def add_audit(
             details=details or {},
         )
     )
+
+
+def _account_assignment_read(
+    account: Account, agent_token: str | None = None
+) -> AccountAgentAssignmentRead:
+    result = AccountAgentAssignmentRead.model_validate(account)
+    if agent_token is None:
+        return result
+    return result.model_copy(update={"agent_token": agent_token})
+
+
+def _rotate_agent_token(agent: Agent) -> str:
+    token = new_agent_token()
+    agent.token_hash = hash_token(token)
+    return token
 
 
 def _find_idempotent_chat_message(
@@ -346,12 +363,47 @@ def revoke_agent(
     return agent
 
 
-@router.post("/accounts", response_model=AccountRead, status_code=status.HTTP_201_CREATED)
+@router.post("/agents/{agent_id}/rotate-token", response_model=AgentTokenRotated)
+def rotate_agent_token(
+    agent_id: UUID,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AgentTokenRotated:
+    agent = db.scalar(select(Agent).where(Agent.id == agent_id).with_for_update())
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found.")
+    if agent.revoked_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Revoked agents cannot rotate tokens."
+        )
+
+    token = _rotate_agent_token(agent)
+    account_id = db.scalar(select(Account.id).where(Account.agent_id == agent.id))
+    add_audit(
+        db,
+        actor_type="admin",
+        actor_id="admin",
+        action="agent.token_rotated",
+        resource_type="agent",
+        resource_id=str(agent.id),
+        details={"account_id": str(account_id) if account_id else None},
+    )
+    db.commit()
+    return AgentTokenRotated(agent_id=agent.id, agent_token=token)
+
+
+@router.post(
+    "/accounts",
+    response_model=AccountAgentAssignmentRead,
+    response_model_exclude_unset=True,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_account(
     body: AccountCreate,
     _admin: Annotated[None, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-) -> Account:
+) -> AccountAgentAssignmentRead:
+    agent = None
     if body.agent_id is not None:
         agent = db.scalar(
             select(Agent)
@@ -369,6 +421,7 @@ def create_account(
             )
 
     account = Account(nickname=body.nickname, agent_id=body.agent_id, enabled=body.enabled)
+    agent_token = _rotate_agent_token(agent) if agent is not None else None
     db.add(account)
     try:
         db.flush()
@@ -396,31 +449,53 @@ def create_account(
             detail="Agent is already assigned to another account.",
         ) from exc
     db.refresh(account)
-    return account
+    return _account_assignment_read(account, agent_token)
 
 
-@router.patch("/accounts/{account_id}/agent", response_model=AccountRead)
+@router.patch(
+    "/accounts/{account_id}/agent",
+    response_model=AccountAgentAssignmentRead,
+    response_model_exclude_unset=True,
+)
 def assign_account_agent(
     account_id: UUID,
     body: AccountAgentAssign,
     _admin: Annotated[None, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-) -> Account:
-    new_agent = None
-    if body.agent_id is not None:
-        new_agent = db.scalar(
-            select(Agent)
-            .where(Agent.id == body.agent_id, Agent.revoked_at.is_(None))
-            .with_for_update()
+) -> AccountAgentAssignmentRead:
+    observed = db.execute(
+        select(Account.id, Account.agent_id).where(Account.id == account_id)
+    ).one_or_none()
+    if observed is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+
+    previous_agent_id = observed.agent_id
+    agent_ids = {
+        agent_id for agent_id in (previous_agent_id, body.agent_id) if agent_id is not None
+    }
+    locked_agents = (
+        db.scalars(
+            select(Agent).where(Agent.id.in_(agent_ids)).order_by(Agent.id).with_for_update()
+        ).all()
+        if agent_ids
+        else []
+    )
+    agents_by_id = {agent.id: agent for agent in locked_agents}
+    new_agent = agents_by_id.get(body.agent_id) if body.agent_id is not None else None
+    if body.agent_id is not None and (new_agent is None or new_agent.revoked_at is not None):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Active agent not found."
         )
-        if new_agent is None:
-            raise HTTPException(
-                status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Active agent not found."
-            )
 
     account = db.scalar(select(Account).where(Account.id == account_id).with_for_update())
     if account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+    if account.agent_id != previous_agent_id:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account assignment changed concurrently; retry the request.",
+        )
 
     if new_agent is not None:
         assigned_account = db.scalar(
@@ -479,9 +554,8 @@ def assign_account_agent(
         .with_for_update()
     ).all()
 
-    previous_agent_id = account.agent_id
     if previous_agent_id == body.agent_id:
-        return account
+        return _account_assignment_read(account)
 
     pending = db.scalars(
         select(ControlCommand).where(
@@ -505,6 +579,10 @@ def assign_account_agent(
         message.claim_token_hash = None
         message.claim_expires_at = None
     account.agent_id = body.agent_id
+    previous_agent = agents_by_id.get(previous_agent_id) if previous_agent_id is not None else None
+    if previous_agent is not None:
+        _rotate_agent_token(previous_agent)
+    agent_token = _rotate_agent_token(new_agent) if new_agent is not None else None
     add_audit(
         db,
         actor_type="admin",
@@ -529,7 +607,7 @@ def assign_account_agent(
             detail="Agent is already assigned to another account.",
         ) from exc
     db.refresh(account)
-    return account
+    return _account_assignment_read(account, agent_token)
 
 
 @router.get("/accounts", response_model=list[AccountRead])

@@ -15,6 +15,9 @@ from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 from uuid import UUID
 
+from pydantic import ValidationError
+
+from .schemas import AgentChatMessage
 from .windows_client import WindowsCamfrogClientProvider
 
 
@@ -113,12 +116,18 @@ class ControlPlaneClient:
     def poll_chat_message(self) -> dict[str, Any] | None:
         """Claim one operator message; callers must acknowledge only after delivery."""
         response = self.request("GET", "/agent/messages/next")
-        if not isinstance(response, dict):
+        if not isinstance(response, dict) or "message" not in response:
             raise AgentTransportError("Control plane returned an invalid chat response.")
         message = response.get("message")
-        if message is not None and not isinstance(message, dict):
+        if message is None:
+            return None
+        if not isinstance(message, dict):
             raise AgentTransportError("Control plane returned an invalid chat message.")
-        return message
+        try:
+            validated = AgentChatMessage.model_validate(message)
+        except ValidationError:
+            raise AgentTransportError("Control plane returned an invalid chat message.") from None
+        return validated.model_dump(mode="json")
 
     def acknowledge_chat_message(self, message_id: str, claim_token: str) -> None:
         """Acknowledge a claimed message after the receiving client accepts it."""

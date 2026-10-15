@@ -8,6 +8,7 @@ from camfrog_control_server.adapters import (
     parse_cloud_bot_status_response,
 )
 from camfrog_control_server.agent import (
+    AgentTransportError,
     ControlPlaneClient,
     NoCamfrogProvider,
     poll_once,
@@ -154,6 +155,95 @@ def test_control_plane_client_exposes_idempotent_chat_transport() -> None:
         client.submit_chat_message("invalid", claimed["client_message_id"], "message")
     with pytest.raises(ValueError, match="token"):
         client.acknowledge_chat_message(claimed["id"], "short")
+
+
+@pytest.mark.parametrize(
+    "invalid_message",
+    [
+        {},
+        {
+            "id": "invalid",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "a" * 43,
+            "claim_expires_at": "2026-10-15T10:00:00Z",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "not-a-uuid",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "a" * 43,
+            "claim_expires_at": "2026-10-15T10:00:00Z",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "short",
+            "claim_expires_at": "2026-10-15T10:00:00Z",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "x" * 4001,
+            "claim_token": "a" * 43,
+            "claim_expires_at": "2026-10-15T10:00:00Z",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "a" * 43,
+            "claim_expires_at": "not-a-datetime",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "a" * 43,
+            "claim_expires_at": "2026-10-15T10:00:00",
+        },
+    ],
+)
+def test_control_plane_client_rejects_malformed_claimed_chat_messages(
+    invalid_message: dict,
+) -> None:
+    client = ControlPlaneClient("https://control.example", "agent-token")
+    client.request = lambda *_args, **_kwargs: {"message": invalid_message}
+
+    with pytest.raises(AgentTransportError, match="invalid chat message"):
+        client.poll_chat_message()
+
+
+def test_poll_once_does_not_deliver_unvalidated_server_chat_data() -> None:
+    client = ControlPlaneClient("https://control.example", "agent-token")
+
+    def fake_request(_method: str, path: str, _body: dict | None = None):
+        if path == "/agent/commands/next":
+            return {"command": None}
+        if path == "/agent/messages/next":
+            return {"message": {"id": "invalid", "body": "untrusted"}}
+        return None
+
+    client.request = fake_request
+
+    class Provider(NoCamfrogProvider):
+        called = False
+
+        def receive_chat_message(self, _message: dict) -> bool:
+            self.called = True
+            return True
+
+    provider = Provider()
+    with pytest.raises(AgentTransportError):
+        poll_once(client, provider)
+    assert provider.called is False
 
 
 def test_cloud_bot_rpc_adapter_uses_observed_request_and_reason_precedence() -> None:

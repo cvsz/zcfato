@@ -99,6 +99,11 @@ class AgentCreated(BaseModel):
     created_at: datetime
 
 
+class AgentTokenRotated(BaseModel):
+    agent_id: UUID
+    agent_token: str = Field(repr=False)
+
+
 class AgentRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -136,6 +141,10 @@ class AccountRead(BaseModel):
     agent_id: UUID | None
     enabled: bool
     created_at: datetime
+
+
+class AccountAgentAssignmentRead(AccountRead):
+    agent_token: str | None = Field(default=None, repr=False)
 
 
 class HeartbeatRequest(BaseModel):
@@ -226,14 +235,19 @@ class ChatMessageCreate(BaseModel):
     @field_validator("body")
     @classmethod
     def clean_body(cls, value: str) -> str:
-        value = value.replace("\r\n", "\n").replace("\r", "\n")
-        if not value.strip():
-            raise ValueError("Message body cannot be empty or whitespace only.")
-        if any((ord(char) < 32 and char not in "\n\t") or ord(char) == 127 for char in value):
-            raise ValueError("Message body cannot contain control characters.")
-        if len(value) > 4000:
-            raise ValueError("Message body must contain at most 4000 characters.")
-        return value
+        return clean_chat_body(value)
+
+
+def clean_chat_body(value: str) -> str:
+    """Normalize and validate the text body shared by both chat directions."""
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    if not value.strip():
+        raise ValueError("Message body cannot be empty or whitespace only.")
+    if any((ord(char) < 32 and char not in "\n\t") or ord(char) == 127 for char in value):
+        raise ValueError("Message body cannot contain control characters.")
+    if len(value) > 4000:
+        raise ValueError("Message body must contain at most 4000 characters.")
+    return value
 
 
 class AgentChatMessageCreate(ChatMessageCreate):
@@ -263,9 +277,21 @@ class AgentChatMessage(BaseModel):
     id: UUID
     account_id: UUID
     client_message_id: UUID
-    body: str = Field(repr=False)
-    claim_token: str = Field(repr=False)
+    body: str = Field(min_length=1, max_length=4000, repr=False)
+    claim_token: str = Field(min_length=32, max_length=128, repr=False)
     claim_expires_at: datetime
+
+    @field_validator("body")
+    @classmethod
+    def clean_body(cls, value: str) -> str:
+        return clean_chat_body(value)
+
+    @field_validator("claim_expires_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Claim expiry must include a timezone.")
+        return value
 
 
 class ChatMessagePollResponse(BaseModel):

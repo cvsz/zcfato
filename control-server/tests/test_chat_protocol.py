@@ -28,7 +28,8 @@ def _provision_account(client: TestClient, admin_token: str, suffix: str) -> tup
         json={"nickname": f"chat-account-{suffix}", "agent_id": agent["id"]},
     )
     assert account_response.status_code == 201
-    return agent, account_response.json()
+    account = account_response.json()
+    return {**agent, "agent_token": account["agent_token"]}, account
 
 
 def test_operator_message_is_idempotent_leased_and_acknowledged(
@@ -228,6 +229,14 @@ def test_account_reassignment_and_agent_revocation_preserve_message_ownership(
         json={"agent_id": next_agent["id"]},
     )
     assert reassigned.status_code == 200
+    replacement_token = reassigned.json()["agent_token"]
+    assert replacement_token != next_agent["agent_token"]
+    assert (
+        client.get(
+            "/api/v1/agent/messages/next", headers=_headers(original_agent["agent_token"])
+        ).status_code
+        == 401
+    )
     history = client.get(f"/api/v1/accounts/{account['id']}/messages", headers=admin_headers).json()
     assert history[0]["state"] == "canceled"
     assert history[0]["agent_id"] == original_agent["id"]
@@ -241,9 +250,9 @@ def test_account_reassignment_and_agent_revocation_preserve_message_ownership(
             "body": "Claimed by the replacement agent",
         },
     )
-    claimed = client.get(
-        "/api/v1/agent/messages/next", headers=_headers(next_agent["agent_token"])
-    ).json()["message"]
+    claimed = client.get("/api/v1/agent/messages/next", headers=_headers(replacement_token)).json()[
+        "message"
+    ]
     assert claimed["id"] == next_message.json()["id"]
 
     blocked_reassignment = client.patch(
@@ -260,7 +269,7 @@ def test_account_reassignment_and_agent_revocation_preserve_message_ownership(
     assert (
         client.post(
             f"/api/v1/agent/messages/{claimed['id']}/ack",
-            headers=_headers(next_agent["agent_token"]),
+            headers=_headers(replacement_token),
             json={"claim_token": claimed["claim_token"]},
         ).status_code
         == 401
@@ -304,6 +313,7 @@ def test_reassignment_cancels_expired_chat_claim_and_invalidates_token(
     )
     assert reassigned.status_code == 200
     assert reassigned.json()["agent_id"] == replacement_agent["id"]
+    assert reassigned.json()["agent_token"] != replacement_agent["agent_token"]
 
     history = client.get(f"/api/v1/accounts/{account['id']}/messages", headers=admin_headers).json()
     assert history[0]["state"] == "canceled"
@@ -319,7 +329,7 @@ def test_reassignment_cancels_expired_chat_claim_and_invalidates_token(
         headers=_headers(original_agent["agent_token"]),
         json={"claim_token": claimed["claim_token"]},
     )
-    assert stale_ack.status_code == 409
+    assert stale_ack.status_code == 401
 
 
 def test_expired_chat_leases_redeliver_and_fail_after_the_retry_limit(

@@ -59,10 +59,12 @@ All routes are under `/api/v1` unless shown otherwise.
 |---|---|---|
 | `POST /auth/session` | Bootstrap bearer token | Exchange bootstrap token for a short-lived dashboard JWT |
 | `GET /overview` | Admin JWT | Dashboard summary |
-| `POST /agents`, `GET /agents` | Admin JWT | Register agents and list them without tokens |
+| `POST /agents` | Admin JWT | Create an agent and issue an initial one-time token |
+| `GET /agents` | Admin JWT | List agents without their tokens |
 | `POST /agents/{id}/revoke` | Admin JWT | Revoke an agent and cancel its pending/claimed commands |
-| `POST /accounts`, `GET /accounts` | Admin JWT | Create and list account metadata |
-| `PATCH /accounts/{id}/agent` | Admin JWT | Assign or unassign one account from an agent |
+| `POST /agents/{id}/rotate-token` | Admin JWT | Rotate an active agent token and return the replacement once |
+| `POST /accounts`, `GET /accounts` | Admin JWT | Create and list account metadata; an assigned-agent token is returned once |
+| `PATCH /accounts/{id}/agent` | Admin JWT | Assign or unassign one account; assignments rotate the agent token |
 | `POST /commands`, `GET /commands` | Admin JWT | Queue and inspect commands |
 | `POST /messages` | Admin JWT | Queue an operator message for an account's assigned agent |
 | `GET /accounts/{id}/messages` | Admin JWT | Read chronological account history; use the oldest ID in a page as `before` to fetch older messages |
@@ -78,7 +80,7 @@ All routes are under `/api/v1` unless shown otherwise.
 | `GET /cloud-bots`, `GET /cloud-bots/{id}/status` | Admin JWT | Read Cloud Bot registry and last reported state |
 | `GET /store/catalog/items` | Admin JWT | Read operator-imported catalog metadata |
 
-Exchange the bootstrap token using `POST /api/v1/auth/session`; use the returned short-lived JWT for dashboard/admin routes. Agent routes use the one-time token returned by `POST /agents`. Revoke an agent and provision a new one to rotate that token. Restart the server with rotated `CONTROL_ADMIN_TOKEN` and `CONTROL_JWT_SECRET` values to invalidate dashboard sessions.
+Exchange the bootstrap token using `POST /api/v1/auth/session`; use the returned short-lived JWT for dashboard/admin routes. `POST /agents` issues an initial one-time token. Assigning that agent through `POST /accounts` or `PATCH /accounts/{id}/agent` rotates the token and returns the active one-time `agent_token` in that assignment response; install that latest token on the assigned machine. Reassignment invalidates both the previous agent token and the replacement agent's earlier token. Use `POST /agents/{id}/rotate-token` to recover a lost token without changing the account assignment; this invalidates the previous token and returns the replacement once. Account and agent list/read responses never include tokens. Revoking an agent is permanent. Restart the server with rotated `CONTROL_ADMIN_TOKEN` and `CONTROL_JWT_SECRET` values to invalidate dashboard sessions.
 
 ## Windows agent
 
