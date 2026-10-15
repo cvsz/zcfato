@@ -27,6 +27,7 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Added a read-only Camfrog public presence probe that fingerprints bounded GIF responses and persists raw evidence locally while classifying every observation as UNKNOWN.
 
 ### Fixed
+- Camfrog window selection now fails closed when the configured title filter spans multiple or unverifiable processes instead of choosing the first matching client.
 - Release publishing now uploads the flat checksum manifest as `SHA256SUMS.txt`, matching the name expected by existing app updaters.
 - Fixed `validate_repo.py` performance and exclusion list with `os.walk` directory pruning, reducing scan execution time by 98%.
 - Fixed GitHub Actions supply-chain security by pinning actions to immutable commit SHAs with least-privilege `contents: read` permissions.
