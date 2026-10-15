@@ -1,6 +1,7 @@
 """Tests for the repository validator that do not need the real tree."""
 import json
 import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -68,25 +69,30 @@ def test_clean_prunes_generated_directories_before_recursive_scans():
 
 
 def test_clean_returns_failure_when_a_filesystem_scan_fails(tmp_path):
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    fake_find = fake_bin / "find"
-    fake_find.write_text(
-        "#!/bin/sh\nprintf 'simulated-find-failure\\n' >&2\nexit 73\n",
+    fake_scan = tmp_path / "fake_scan.py"
+    fake_scan.write_text(
+        "import sys\nprint('simulated-find-failure', file=sys.stderr)\nsys.exit(73)\n",
         encoding="utf-8",
     )
-    fake_find.chmod(0o755)
-    if os.name == "nt":
-        (fake_bin / "find.cmd").write_text(
-            "@echo simulated-find-failure 1>&2\r\n@exit /b 73\r\n", encoding="utf-8"
-        )
-    environment = os.environ.copy()
-    environment["PATH"] = os.pathsep.join((str(fake_bin), environment["PATH"]))
+    command = (
+        subprocess.list2cmdline([sys.executable, str(fake_scan)])
+        if os.name == "nt"
+        else " ".join(shlex.quote(part) for part in (sys.executable, str(fake_scan)))
+    )
+    makefile = validate_repo.ROOT / "Makefile"
+    lines = makefile.read_text(encoding="utf-8").splitlines()
+    replaced = 0
+    for index, line in enumerate(lines):
+        if line.startswith("\tfind ."):
+            lines[index] = "\t" + command
+            replaced += 1
+    assert replaced == 3
+    test_makefile = tmp_path / "Makefile"
+    test_makefile.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     result = subprocess.run(
-        ["make", "-f", str(validate_repo.ROOT / "Makefile"), "clean"],
+        ["make", "-f", str(test_makefile), "clean"],
         cwd=tmp_path,
-        env=environment,
         capture_output=True,
         text=True,
         check=False,
