@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
 
@@ -424,7 +425,7 @@ def create_cloud_bot(
     agent = db.scalar(select(Agent).where(Agent.id == body.agent_id, Agent.revoked_at.is_(None)))
     if agent is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Active agent not found."
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Active agent not found."
         )
     bot = CloudBot(name=body.name, agent_id=body.agent_id)
     db.add(bot)

@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+from fastapi import status
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
@@ -290,6 +291,22 @@ def test_cloud_bot_status_maps_reason_before_status(
     status_read = client.get(f"/api/v1/cloud-bots/{bot['id']}/status", headers=headers)
     assert status_read.json()["state"] == "online"
     assert status_read.json()["raw_status"] == "paused"
+
+
+def test_cloud_bot_creation_uses_422_when_new_starlette_constant_is_unavailable(
+    api_client: tuple[TestClient, object, str], monkeypatch
+) -> None:
+    client, _, admin_token = api_client
+    monkeypatch.delattr(status, "HTTP_422_UNPROCESSABLE_CONTENT", raising=False)
+
+    response = client.post(
+        "/api/v1/cloud-bots",
+        headers=_headers(admin_token),
+        json={"name": "missing-cloud-bot-agent", "agent_id": str(UUID(int=1))},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Active agent not found."
 
 
 def test_subscription_lifetime_baseline_returns_after_expired_overlay(
