@@ -588,6 +588,39 @@ def test_get_window_skips_own_tk_gui(monkeypatch):
         c.get_window({"window_title_regex": ".*Camfrog.*"})
 
 
+
+
+def test_window_selection_rejects_multiple_processes():
+    from types import SimpleNamespace
+
+    windows = [
+        SimpleNamespace(process_id=lambda: 101),
+        SimpleNamespace(process_id=lambda: 202),
+    ]
+    with pytest.raises(RuntimeError, match="processes match"):
+        c._require_single_window_process(windows)
+
+
+def test_window_selection_allows_multiple_windows_from_one_process():
+    from types import SimpleNamespace
+
+    windows = [
+        SimpleNamespace(process_id=lambda: 101),
+        SimpleNamespace(process_id=lambda: 101),
+    ]
+    c._require_single_window_process(windows)
+
+
+def test_window_selection_rejects_unverifiable_process_in_multi_window_set():
+    from types import SimpleNamespace
+
+    windows = [
+        SimpleNamespace(process_id=lambda: 101),
+        SimpleNamespace(),
+    ]
+    with pytest.raises(RuntimeError, match="unverifiable"):
+        c._require_single_window_process(windows)
+
 def test_is_own_gui_window_matches_split_status_app_titles_when_class_lookup_fails():
     from types import SimpleNamespace
 
