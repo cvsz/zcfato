@@ -265,3 +265,105 @@ def test_account_agent_assignment_is_one_to_one_and_cancels_pending_commands(
     commands = client.get("/api/v1/commands", headers=headers).json()
     assert commands[0]["state"] == "canceled"
     assert first_agent_id != second_agent["id"]
+
+
+
+def test_revoking_agent_cancels_claimed_command_and_invalidates_lease(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, admin_token, agent_token, account_id = _provision(api_client)
+    headers = _headers(admin_token)
+    queued = client.post(
+        "/api/v1/commands",
+        headers=headers,
+        json={"account_id": account_id, "operation": "launch"},
+    )
+    assert queued.status_code == 201
+    command_id = queued.json()["id"]
+
+    claimed = client.get("/api/v1/agent/commands/next", headers=_headers(agent_token))
+    assert claimed.status_code == 200
+    assert claimed.json()["command"]["id"] == command_id
+
+    agent_id = client.get("/api/v1/agents", headers=headers).json()[0]["id"]
+    revoked = client.post(f"/api/v1/agents/{agent_id}/revoke", headers=headers)
+    assert revoked.status_code == 200
+
+    with Session(engine) as session:
+        command = session.get(ControlCommand, UUID(command_id))
+        assert command is not None
+        assert command.state == "canceled"
+        assert command.claim_token_hash is None
+        assert command.claim_expires_at is None
+        assert command.finished_at is not None
+
+
+def test_expired_lease_cleanup_is_scoped_to_polling_agent(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, admin_token, first_token, _ = _provision(api_client)
+    headers = _headers(admin_token)
+
+    created = client.post(
+        "/api/v1/agents",
+        headers=headers,
+        json={"name": "agent-02"},
+    )
+    assert created.status_code == 201
+    second = created.json()
+    account = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={"nickname": "second-account", "agent_id": second["id"]},
+    )
+    assert account.status_code == 201
+
+    queued = client.post(
+        "/api/v1/commands",
+        headers=headers,
+        json={"account_id": account.json()["id"], "operation": "launch"},
+    )
+    assert queued.status_code == 201
+    command_id = queued.json()["id"]
+
+    claimed = client.get(
+        "/api/v1/agent/commands/next",
+        headers=_headers(second["agent_token"]),
+    )
+    assert claimed.status_code == 200
+    assert claimed.json()["command"]["id"] == command_id
+
+    with Session(engine) as session:
+        command = session.get(ControlCommand, UUID(command_id))
+        assert command is not None
+        command.claim_attempts = 3
+        command.claim_expires_at = utcnow() - timedelta(seconds=1)
+        session.commit()
+
+    unrelated_poll = client.get(
+        "/api/v1/agent/commands/next",
+        headers=_headers(first_token),
+    )
+    assert unrelated_poll.status_code == 200
+    assert unrelated_poll.json()["command"] is None
+
+    with Session(engine) as session:
+        command = session.get(ControlCommand, UUID(command_id))
+        assert command is not None
+        assert command.state == "claimed"
+        assert command.claim_token_hash is not None
+
+    owner_poll = client.get(
+        "/api/v1/agent/commands/next",
+        headers=_headers(second["agent_token"]),
+    )
+    assert owner_poll.status_code == 200
+    assert owner_poll.json()["command"] is None
+
+    with Session(engine) as session:
+        command = session.get(ControlCommand, UUID(command_id))
+        assert command is not None
+        assert command.state == "failed"
+        assert command.result_code == "lease_expired"
+        assert command.claim_token_hash is None
+        assert command.claim_expires_at is None
