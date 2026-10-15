@@ -24,7 +24,7 @@ The available browser and source observations confirm the authenticated-state ma
 
 Do not treat this subproject as production-ready. The rate limiter is per process and is not shared across workers. Windows process/URI behavior has unit coverage but no Windows runtime acceptance. Public status-image semantics, Cloud Bot RPC envelope, Store response, multi-ID isolation, PostgreSQL deployment, secret rotation, backup/restore, and soak evidence remain open.
 
-Commands are delivered at least once after lease expiry. An action may have completed just before an agent lost its lease, so future providers must define idempotency and operator reconciliation. The control server stores no Camfrog passwords, browser profiles, session cookies, CSRF values, payment tokens, CAPTCHA answers, or room access keys.
+Commands are delivered at least once after lease expiry. An action may have completed just before an agent lost its lease, so future providers must define idempotency and operator reconciliation. Lease expiry cleanup is agent-scoped, and revoking an agent immediately cancels any outstanding pending or claimed commands while invalidating stored claim hashes. The control server stores no Camfrog passwords, browser profiles, session cookies, CSRF values, payment tokens, CAPTCHA answers, or room access keys.
 
 ## Local setup
 
@@ -59,7 +59,7 @@ All routes are under `/api/v1` unless shown otherwise.
 | `POST /auth/session` | Bootstrap bearer token | Exchange bootstrap token for a short-lived dashboard JWT |
 | `GET /overview` | Admin JWT | Dashboard summary |
 | `POST /agents`, `GET /agents` | Admin JWT | Register agents and list them without tokens |
-| `POST /agents/{id}/revoke` | Admin JWT | Revoke an agent and cancel pending commands |
+| `POST /agents/{id}/revoke` | Admin JWT | Revoke an agent and cancel its pending/claimed commands |
 | `POST /accounts`, `GET /accounts` | Admin JWT | Create and list account metadata |
 | `PATCH /accounts/{id}/agent` | Admin JWT | Assign or unassign one account from an agent |
 | `POST /commands`, `GET /commands` | Admin JWT | Queue and inspect commands |
