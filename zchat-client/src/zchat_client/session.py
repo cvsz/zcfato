@@ -75,14 +75,10 @@ class AgentChatWorker:
         if self.is_alive:
             raise RuntimeError("Chat worker is already running.")
         if self._started:
-            raise RuntimeError(
-                "Chat worker sessions cannot be restarted; create a new session."
-            )
+            raise RuntimeError("Chat worker sessions cannot be restarted; create a new session.")
         self._started = True
         self._stop.clear()
-        self._thread = threading.Thread(
-            target=self._run, name="zchat-agent-session", daemon=True
-        )
+        self._thread = threading.Thread(target=self._run, name="zchat-agent-session", daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
@@ -102,9 +98,7 @@ class AgentChatWorker:
         client_message_id = str(uuid4())
         with self._pending_send_lock:
             if self._pending_send_count >= MAX_PENDING_SENDS:
-                raise ValueError(
-                    "The outgoing queue is full. Wait for pending messages to send."
-                )
+                raise ValueError("The outgoing queue is full. Wait for pending messages to send.")
             self._pending_send_count += 1
         self._commands.put(("send", client_message_id, normalized))
         self._wake.set()
@@ -219,9 +213,7 @@ class AgentChatWorker:
                 if account_id is not None and pending_sends:
                     message_id, body = pending_sends.popleft()
                     try:
-                        result = client.submit_chat_message(
-                            account_id, message_id, body
-                        )
+                        result = client.submit_chat_message(account_id, message_id, body)
                     except AgentTransportError as exc:
                         if exc.status_code == 401:
                             self._emit("auth_required")
@@ -251,9 +243,7 @@ class AgentChatWorker:
                         message_id = str(message["id"])
                         if self._is_accepted(message_id):
                             try:
-                                client.acknowledge_chat_message(
-                                    message_id, message["claim_token"]
-                                )
+                                client.acknowledge_chat_message(message_id, message["claim_token"])
                             except AgentTransportError as exc:
                                 if exc.status_code == 401:
                                     self._emit("auth_required")
@@ -267,9 +257,7 @@ class AgentChatWorker:
                                         status_code=exc.status_code,
                                     )
                                 else:
-                                    pending_acks.appendleft(
-                                        (message_id, message["claim_token"])
-                                    )
+                                    pending_acks.appendleft((message_id, message["claim_token"]))
                                     queued_ack_ids.add(message_id)
                                     raise
                             else:
@@ -297,9 +285,7 @@ class AgentChatWorker:
                     )
                     return
                 failures += 1
-                delay = min(
-                    self._retry_max, self._retry_base * (2 ** min(failures - 1, 10))
-                )
+                delay = min(self._retry_max, self._retry_base * (2 ** min(failures - 1, 10)))
                 self._emit("connection_error", message=str(exc), retry_seconds=delay)
             self._wake.wait(delay)
             self._wake.clear()

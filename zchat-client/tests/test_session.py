@@ -4,13 +4,12 @@ import queue
 import time
 
 import pytest
-from camfrog_control_server.transport import AgentTransportError
 from zchat_client.session import AgentChatWorker, WorkerEvent
 
+from camfrog_control_server.transport import AgentTransportError
 
-def _wait_for_event(
-    worker: AgentChatWorker, kind: str, timeout: float = 2.0
-) -> WorkerEvent:
+
+def _wait_for_event(worker: AgentChatWorker, kind: str, timeout: float = 2.0) -> WorkerEvent:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -168,9 +167,7 @@ def test_outgoing_retry_reuses_the_same_idempotency_key() -> None:
         def heartbeat(self) -> dict:
             return {"account_id": account_id}
 
-        def submit_chat_message(
-            self, _account_id: str, message_id: str, _body: str
-        ) -> dict:
+        def submit_chat_message(self, _account_id: str, message_id: str, _body: str) -> dict:
             submitted_ids.append(message_id)
             if not self.failed_once:
                 self.failed_once = True
@@ -223,6 +220,4 @@ def test_outgoing_queue_is_bounded() -> None:
     except ValueError as exc:
         assert "queue is full" in str(exc)
     else:
-        raise AssertionError(
-            "The outgoing queue accepted more than its configured limit"
-        )
+        raise AssertionError("The outgoing queue accepted more than its configured limit")

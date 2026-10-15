@@ -45,23 +45,15 @@ class AgentChatWindow:
         connection.pack(fill=tk.X)
         connection.columnconfigure(1, weight=1)
 
-        ttk.Label(connection, text="Server URL").grid(
-            row=0, column=0, sticky=tk.W, padx=(0, 8)
-        )
+        ttk.Label(connection, text="Server URL").grid(row=0, column=0, sticky=tk.W, padx=(0, 8))
         self.server_entry = ttk.Entry(connection, textvariable=self.server_url)
         self.server_entry.grid(row=0, column=1, sticky=tk.EW, pady=3)
 
-        ttk.Label(connection, text="Agent token").grid(
-            row=1, column=0, sticky=tk.W, padx=(0, 8)
-        )
-        self.token_entry = ttk.Entry(
-            connection, textvariable=self.agent_token, show="*"
-        )
+        ttk.Label(connection, text="Agent token").grid(row=1, column=0, sticky=tk.W, padx=(0, 8))
+        self.token_entry = ttk.Entry(connection, textvariable=self.agent_token, show="*")
         self.token_entry.grid(row=1, column=1, sticky=tk.EW, pady=3)
 
-        self.connect_button = ttk.Button(
-            connection, text="Connect", command=self._connect
-        )
+        self.connect_button = ttk.Button(connection, text="Connect", command=self._connect)
         self.connect_button.grid(row=0, column=2, rowspan=2, padx=(10, 0), sticky=tk.NS)
 
         status_row = ttk.Frame(container)
@@ -189,18 +181,12 @@ class AgentChatWindow:
                 "Status", f"Message {data['message_id'][:8]} was rejected by the server"
             )
         elif event.kind == "connection_error":
-            self.status.set(
-                f"Connection issue; retrying in {data['retry_seconds']:.1f}s"
-            )
+            self.status.set(f"Connection issue; retrying in {data['retry_seconds']:.1f}s")
         elif event.kind == "auth_required":
-            self.status.set(
-                "Token rejected or revoked; reconnect with a newly issued token"
-            )
+            self.status.set("Token rejected or revoked; reconnect with a newly issued token")
             self._append_entry("Status", "Authentication is no longer valid")
         elif event.kind == "ack_failed":
-            self._append_entry(
-                "Status", f"Could not acknowledge message {data['message_id'][:8]}"
-            )
+            self._append_entry("Status", f"Could not acknowledge message {data['message_id'][:8]}")
         elif event.kind == "error":
             self.status.set(data["message"])
             self._append_entry("Status", data["message"])
