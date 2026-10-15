@@ -5,7 +5,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-GENERATED_DIRS = {".git", ".venv", "build", "dist", "__pycache__"}
+GENERATED_DIRS = {".git", ".venv", "venv", "build", "dist", "__pycache__"}
 
 
 def test_taskkill_invocations_use_windows_system_directory_helper():

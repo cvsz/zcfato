@@ -321,3 +321,32 @@ def test_cors_middleware_and_security_headers() -> None:
         assert api_res.headers.get("cache-control") == "no-store"
 
     engine.dispose()
+
+
+def test_unhandled_request_errors_are_logged_without_exception_details(
+    api_client: tuple[TestClient, object, str],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, _, _ = api_client
+
+    def fail_request() -> None:
+        raise RuntimeError("Authorization: Bearer do-not-log-this")
+
+    client.app.add_api_route("/test/unhandled-error", fail_request, methods=["GET"])
+    with caplog.at_level(logging.ERROR, logger="camfrog_control_server.http"):
+        response = client.get(
+            "/test/unhandled-error",
+            headers={"X-Request-ID": "error-request-1"},
+        )
+
+    assert response.status_code == 500
+    event = next(
+        json.loads(record.message)
+        for record in caplog.records
+        if json.loads(record.message).get("event") == "request_failed"
+    )
+    assert event["request_id"] == "error-request-1"
+    assert event["method"] == "GET"
+    assert event["path"] == "/test/unhandled-error"
+    assert event["error_type"] == "RuntimeError"
+    assert "do-not-log-this" not in caplog.text

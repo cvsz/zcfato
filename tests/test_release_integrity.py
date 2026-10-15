@@ -48,6 +48,21 @@ def test_verify_feature_hashes_rejects_missing_manifest(tmp_path, monkeypatch):
         release.verify_feature_hashes()
 
 
+def test_full_build_checks_and_lists_every_release_executable():
+    root = Path(__file__).resolve().parents[1]
+    script = (root / "full-build.bat").read_text(encoding="utf-8").lower()
+    checks = script.split("rem --- verify all build outputs ---", 1)[1].split(
+        "rem --- publish the github release", 1
+    )[0]
+    outputs = script.split("echo outputs:", 1)[1]
+
+    for artifact in release.FEATURE_EXES.values():
+        relative_path = artifact.relative_to(release.DIST).as_posix().replace("/", "\\")
+        expected_path = "dist\\" + relative_path.lower()
+        assert f"if not exist {expected_path}" in checks
+        assert expected_path in outputs
+
+
 def test_music_dj_packages_zeazdev_room_mascot_with_the_executable():
     root = Path(__file__).resolve().parents[1]
     build = (root / "build.bat").read_text(encoding="utf-8")
