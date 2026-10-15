@@ -160,6 +160,12 @@ class HeartbeatResponse(BaseModel):
     last_seen_at: datetime
 
 
+class AgentChatSessionRead(BaseModel):
+    """Read the current assignment without changing command-agent presence."""
+
+    account_id: UUID | None
+
+
 class AccountRuntimeRead(BaseModel):
     account_id: UUID
     nickname: str

@@ -70,6 +70,7 @@ All routes are under `/api/v1` unless shown otherwise.
 | `GET /accounts/{id}/messages` | Admin JWT | Read chronological account history; use the oldest ID in a page as `before` to fetch older messages |
 | `GET /audit` | Admin JWT | Read audit history |
 | `POST /agent/heartbeat`, `GET /agent/commands/next` | Agent token | Heartbeat and claim a leased command |
+| `GET /agent/chat/session` | Agent token | Read the account assignment without refreshing command-agent presence |
 | `POST /agent/commands/{id}/result` | Agent token | Complete a command using its one-time claim token |
 | `POST /agent/messages` | Agent token | Submit a message for the agent's assigned account |
 | `GET /agent/messages/next` | Agent token | Claim the next operator message with a bounded lease |

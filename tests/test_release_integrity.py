@@ -48,6 +48,25 @@ def test_verify_feature_hashes_rejects_missing_manifest(tmp_path, monkeypatch):
         release.verify_feature_hashes()
 
 
+def test_verify_zchat_hash_checks_the_separate_client_manifest(tmp_path, monkeypatch):
+    dist = tmp_path / "dist"
+    output = dist / "zchat-client"
+    output.mkdir(parents=True)
+    executable = output / "zchat-client.exe"
+    executable.write_bytes(b"zchat-client-build")
+    digest = hashlib.sha256(executable.read_bytes()).hexdigest()
+    (output / "SHA256SUMS.txt").write_text(
+        f"{digest}  zchat-client.exe\n", encoding="ascii"
+    )
+    monkeypatch.setattr(release, "DIST", dist)
+
+    release.verify_zchat_hash()
+
+    executable.write_bytes(b"tampered-client-build")
+    with pytest.raises(SystemExit, match="checksum mismatch: zchat-client.exe"):
+        release.verify_zchat_hash()
+
+
 def test_full_build_checks_and_lists_every_release_executable():
     root = Path(__file__).resolve().parents[1]
     script = (root / "full-build.bat").read_text(encoding="utf-8").lower()
@@ -61,6 +80,13 @@ def test_full_build_checks_and_lists_every_release_executable():
         expected_path = "dist\\" + relative_path.lower()
         assert f"if not exist {expected_path}" in checks
         assert expected_path in outputs
+
+    client = release.OTHER_ASSETS["zchat-client.exe"]
+    relative_client = client.relative_to(release.DIST).as_posix().replace("/", "\\")
+    expected_client = "dist\\" + relative_client.lower()
+    assert f"if not exist {expected_client}" in checks
+    assert expected_client in outputs
+    assert "dist\\zchat-client\\sha256sums.txt" in checks
 
 
 
@@ -89,6 +115,7 @@ def test_release_rejects_existing_tag_without_upload(monkeypatch, tmp_path):
     monkeypatch.setattr(release, "app_version", lambda: "2.99.0")
     monkeypatch.setattr(release, "check_assets", lambda: None)
     monkeypatch.setattr(release, "verify_feature_hashes", lambda: None)
+    monkeypatch.setattr(release, "verify_zchat_hash", lambda: None)
     monkeypatch.setattr(release, "flat_sums", lambda pairs: "abc\n")
     monkeypatch.setattr(release, "release_notes", lambda ver: "notes")
     monkeypatch.setattr(release, "release_target", lambda: "a" * 40)
@@ -112,6 +139,7 @@ def test_release_pins_tag_to_verified_commit(monkeypatch, tmp_path):
     monkeypatch.setattr(release, "app_version", lambda: "2.19.2")
     monkeypatch.setattr(release, "check_assets", lambda: None)
     monkeypatch.setattr(release, "verify_feature_hashes", lambda: None)
+    monkeypatch.setattr(release, "verify_zchat_hash", lambda: None)
     monkeypatch.setattr(release, "FEATURE_EXES", {})
     monkeypatch.setattr(release, "OTHER_ASSETS", {})
     monkeypatch.setattr(release, "flat_sums", lambda pairs: "abc\n")
@@ -189,6 +217,7 @@ def test_release_rejects_mismatched_remote_tag_before_gh(monkeypatch, tmp_path):
     monkeypatch.setattr(release, "app_version", lambda: "2.19.2")
     monkeypatch.setattr(release, "check_assets", lambda: None)
     monkeypatch.setattr(release, "verify_feature_hashes", lambda: None)
+    monkeypatch.setattr(release, "verify_zchat_hash", lambda: None)
     monkeypatch.setattr(release, "FEATURE_EXES", {})
     monkeypatch.setattr(release, "OTHER_ASSETS", {})
     monkeypatch.setattr(release, "flat_sums", lambda pairs: "abc\n")
