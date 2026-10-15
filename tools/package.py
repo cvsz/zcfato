@@ -55,13 +55,15 @@ def validate_package_name(name: str) -> str:
 def write_sums(dist: Path | str, name: str) -> Path:
     dist = Path(dist)
     name = validate_package_name(name)
+    executables = list(dist.rglob("*.exe"))
+    symlinks = [p for p in executables if p.is_symlink()]
+    if symlinks:
+        raise ValueError(
+            f"Refusing to checksum symbolic link: {symlinks[0].relative_to(dist)}"
+        )
     if name == "camfrog-features":
         expected = set(FEATURE_EXECUTABLES)
-        actual = {
-            p.relative_to(dist).as_posix()
-            for p in dist.rglob("*.exe")
-            if p.is_file() and not p.is_symlink()
-        }
+        actual = {p.relative_to(dist).as_posix() for p in executables if p.is_file()}
         if actual != expected:
             missing = sorted(expected - actual)
             unexpected = sorted(actual - expected)
@@ -71,12 +73,7 @@ def write_sums(dist: Path | str, name: str) -> Path:
         exes = [dist / relative for relative in FEATURE_EXECUTABLES]
     else:
         primary = dist / f"{name}.exe"
-        candidates = sorted(p for p in dist.rglob("*.exe") if p.is_file())
-        symlinks = [p for p in candidates if p.is_symlink()]
-        if symlinks:
-            raise ValueError(
-                f"Refusing to checksum symbolic link: {symlinks[0].relative_to(dist)}"
-            )
+        candidates = sorted(p for p in executables if p.is_file())
         if primary.is_file():
             exes = [primary] + sorted(p for p in dist.glob("*.exe") if p != primary)
         else:
@@ -124,27 +121,30 @@ def make_zip(
             delete=False,
         ) as handle:
             temporary_path = Path(handle.name)
+        temporary_archive_path = temporary_path.resolve()
         with zipfile.ZipFile(temporary_path, "w", zipfile.ZIP_DEFLATED) as z:
             for p in sorted(dist.rglob("*")):
                 include = p.suffix.lower() == ".exe" or p.name in (
                     "SHA256SUMS.txt",
                     "app.ico",
                 )
-                if not p.is_file() or (executables_only and not include):
+                if not p.is_file():
                     continue
                 if p.is_symlink():
                     raise ValueError(
                         f"Refusing to package symbolic link: {p.relative_to(dist)}"
                     )
                 resolved = p.resolve()
+                if resolved in (archive_path, temporary_archive_path):
+                    continue
+                if executables_only and not include:
+                    continue
                 try:
                     resolved.relative_to(dist_root)
                 except ValueError as exc:
                     raise ValueError(
                         f"Package input escapes dist/: {p.relative_to(dist)}"
                     ) from exc
-                if resolved == archive_path:
-                    continue
                 z.write(p, p.relative_to(dist).as_posix())
         os.replace(temporary_path, zip_path)
     except BaseException:
@@ -152,6 +152,29 @@ def make_zip(
             temporary_path.unlink(missing_ok=True)
         raise
     return zip_path
+
+
+def _restore_file(path: Path, content: bytes | None) -> None:
+    if content is None:
+        path.unlink(missing_ok=True)
+        return
+
+    temporary_path = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "wb",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(content)
+        os.replace(temporary_path, path)
+    except BaseException:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+        raise
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -178,15 +201,32 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         parser.error(str(exc))
     try:
+        sums_path = DIST / "SHA256SUMS.txt"
+        if sums_path.is_symlink():
+            raise ValueError("Refusing to replace symbolic link: SHA256SUMS.txt")
+        previous_sums = sums_path.read_bytes() if sums_path.exists() else None
         sums = write_sums(DIST, name)
-        print(f"wrote {sums.name}: {sums.read_text(encoding='utf-8').strip()}")
         if not args.hash_only:
             executables_only = (
                 args.executables_only or not (DIST / f"{name}.exe").is_file()
             )
-            z = make_zip(
-                DIST, ROOT / f"{name}-windows.zip", executables_only=executables_only
-            )
+            try:
+                z = make_zip(
+                    DIST,
+                    ROOT / f"{name}-windows.zip",
+                    executables_only=executables_only,
+                )
+            except BaseException as package_error:
+                try:
+                    _restore_file(sums_path, previous_sums)
+                except OSError as rollback_error:
+                    raise OSError(
+                        f"{package_error}; failed to restore previous checksums: "
+                        f"{rollback_error}"
+                    ) from rollback_error
+                raise
+        print(f"wrote {sums.name}: {sums.read_text(encoding='utf-8').strip()}")
+        if not args.hash_only:
             print(f"wrote {z.name} ({z.stat().st_size} bytes)")
     except (OSError, ValueError, zipfile.LargeZipFile) as e:
         print(f"package failed: {e}")
