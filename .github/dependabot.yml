@@ -27,6 +27,10 @@ updates:
       codeql-actions:
         patterns:
           - github/codeql-action/*
+      codeql-security-updates:
+        applies-to: security-updates
+        patterns:
+          - github/codeql-action/*
 
   - package-ecosystem: docker
     directory: /
