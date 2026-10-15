@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository includes project-specific Windows packaging and manual release tooling in `full-build.bat`, `full-build.ps1`, and `tools/release.py`; publishing credentials and approval policy remain operator-managed. The ZChat Control Server Compose stack is for local development, binds to loopback, and has no public deployment workflow.
+This repository includes project-specific Windows packaging and manual release tooling in `full-build.bat`, `full-build.ps1`, and `tools/release.py`; release assets include the ZChat agent chat executable, Camfrog feature apps, and LINE status app. Publishing credentials and approval policy remain operator-managed. The ZChat Control Server Compose stack is for local development, binds to loopback, and has no public deployment workflow.
 
 ## Versioning
 

@@ -111,6 +111,7 @@ def test_build_and_dist_exclusions(tmp_path, monkeypatch):
         ".ruff_cache",
         "__pycache__",
         "node_modules",
+        "camfrog-client",
     ):
         d = tmp_path / folder
         d.mkdir(parents=True, exist_ok=True)

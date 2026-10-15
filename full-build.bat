@@ -4,7 +4,7 @@ setlocal
 cd /d "%~dp0"
 
 echo ============================================================
-echo FULL BUILD: Camfrog feature apps + line-status-changer
+echo FULL BUILD: Camfrog feature apps + line-status-changer + zchat-client
 echo ============================================================
 echo.
 echo Usage: full-build.bat [--release]
@@ -25,7 +25,7 @@ for %%A in ("%BUILD_STATUS_FILE%") do if %%~zA EQU 0 set "BUILD_SOURCE_CLEAN=tru
 if exist "%BUILD_STATUS_FILE%" del "%BUILD_STATUS_FILE%" >nul 2>nul
 
 rem --- Build Camfrog feature apps ---
-echo [1/3] Building Camfrog feature apps...
+echo [1/4] Building Camfrog feature apps...
 call build.bat
 if errorlevel 1 (
     echo.
@@ -35,7 +35,7 @@ if errorlevel 1 (
 echo.
 
 rem --- Build line-status-changer ---
-echo [2/3] Building line-status-changer...
+echo [2/4] Building line-status-changer...
 cd line
 call build.bat
 if errorlevel 1 (
@@ -47,8 +47,18 @@ if errorlevel 1 (
 cd ..
 echo.
 
+rem --- Build the separate ZChat agent chat client ---
+echo [3/4] Building zchat-client...
+call zchat-client\build.bat
+if errorlevel 1 (
+    echo.
+    echo BUILD FAILED: zchat-client
+    exit /b 1
+)
+echo.
+
 rem --- Verify all build outputs ---
-echo [3/3] Verifying outputs...
+echo [4/4] Verifying outputs...
 if not exist dist\room-control\room-control.exe (
     echo ERROR: dist\room-control\room-control.exe not found
     exit /b 1
@@ -87,6 +97,14 @@ if not exist line\dist\line-status-changer.exe (
 )
 if not exist line\dist\line_config.json (
     echo ERROR: line\dist\line_config.json not found
+    exit /b 1
+)
+if not exist dist\zchat-client\zchat-client.exe (
+    echo ERROR: dist\zchat-client\zchat-client.exe not found
+    exit /b 1
+)
+if not exist dist\zchat-client\SHA256SUMS.txt (
+    echo ERROR: dist\zchat-client\SHA256SUMS.txt not found
     exit /b 1
 )
 if not exist camfrog-features-windows.zip (
@@ -141,6 +159,8 @@ echo   dist\im-autoreply\im-autoreply.exe
 echo   dist\web-status\web-status.exe
 echo   dist\music-dj\music-dj.exe
 echo   dist\status-changer\status-changer.exe
+echo   dist\zchat-client\zchat-client.exe
+echo   dist\zchat-client\SHA256SUMS.txt
 echo   camfrog-features-windows.zip
 echo   dist\SHA256SUMS.txt
 echo   dist\BUILD_SOURCE.txt

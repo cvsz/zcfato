@@ -51,6 +51,7 @@ EXCLUDED_DIRS = {
     ".pytest_cache",
     "__pycache__",
     "node_modules",
+    "camfrog-client",
 }
 
 LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")

@@ -28,6 +28,8 @@ def test_server_url_rejects_embedded_credentials_and_fragments() -> None:
         validate_server_url("https://operator@profiles.camfrog.com")
     with pytest.raises(ValueError):
         validate_server_url("https://profiles.camfrog.com/path#fragment")
+    with pytest.raises(ValueError, match="port"):
+        validate_server_url("https://profiles.camfrog.com:invalid")
 
 
 def test_provider_fails_closed_until_configured() -> None:
@@ -37,6 +39,12 @@ def test_provider_fails_closed_until_configured() -> None:
         "provider_not_configured",
     )
     assert provider.process_state() == "unknown"
+
+
+@pytest.mark.parametrize("token", ["agent token", "agent\r\ntoken", "tökén"])
+def test_control_plane_client_rejects_invalid_bearer_tokens(token: str) -> None:
+    with pytest.raises(ValueError, match="one-time-issued agent token"):
+        ControlPlaneClient("https://control.example", token)
 
 
 def test_poll_once_includes_account_client_state_in_heartbeat() -> None:
@@ -122,7 +130,20 @@ def test_control_plane_client_exposes_idempotent_chat_transport() -> None:
         calls.append((method, path, body))
         if path == "/agent/messages/next":
             return {"message": claimed}
-        return {"state": "received"}
+        if path == "/agent/messages":
+            return {
+                "id": "ef8a3056-60d8-42f5-b3d9-a11d2a2f62bf",
+                "account_id": claimed["account_id"],
+                "agent_id": "7b34b6a3-9475-4b32-8d5c-2cefe34f2381",
+                "client_message_id": claimed["client_message_id"],
+                "direction": "agent_to_operator",
+                "body": "Agent message",
+                "state": "received",
+                "claim_attempts": 0,
+                "created_at": "2026-10-15T10:00:00Z",
+                "delivered_at": None,
+            }
+        return None
 
     client.request = fake_request
     submitted = client.submit_chat_message(
@@ -131,7 +152,8 @@ def test_control_plane_client_exposes_idempotent_chat_transport() -> None:
     polled = client.poll_chat_message()
     client.acknowledge_chat_message(claimed["id"], claimed["claim_token"])
 
-    assert submitted == {"state": "received"}
+    assert submitted["state"] == "received"
+    assert submitted["body"] == "Agent message"
     assert polled == claimed
     assert calls == [
         (
@@ -219,6 +241,25 @@ def test_control_plane_client_rejects_malformed_claimed_chat_messages(
 
     with pytest.raises(AgentTransportError, match="invalid chat message"):
         client.poll_chat_message()
+
+
+def test_control_plane_client_validates_heartbeat_assignment() -> None:
+    client = ControlPlaneClient("https://control.example", "agent-token")
+    client.request = lambda *_args, **_kwargs: {
+        "agent_id": "7b34b6a3-9475-4b32-8d5c-2cefe34f2381",
+        "state": "running",
+        "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+        "client_process_state": None,
+        "last_seen_at": "2026-10-15T10:00:00Z",
+    }
+
+    heartbeat = client.heartbeat()
+
+    assert heartbeat["account_id"] == "f6f17f92-ae7a-4c65-94d3-8376f08c909e"
+
+    client.request = lambda *_args, **_kwargs: {"account_id": "invalid"}
+    with pytest.raises(AgentTransportError, match="invalid heartbeat"):
+        client.heartbeat()
 
 
 def test_poll_once_does_not_deliver_unvalidated_server_chat_data() -> None:
