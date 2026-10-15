@@ -106,11 +106,12 @@ if errorlevel 1 goto :fail
 echo.
 echo === TESTS ===
 
-rem Use an isolated base temp directory in build/ to avoid WinError 5 / permission
-rem errors on Windows when %TEMP%\pytest-of-* has restrictive ACLs.
-set "PYTEST_TMP_DIR=%CD%\build\pytest_tmp"
-if exist "%PYTEST_TMP_DIR%" rmdir /s /q "%PYTEST_TMP_DIR%" >nul 2>nul
+rem Use a fresh per-invocation base temp directory in build/ to avoid WinError 5 /
+rem permission errors on Windows when %TEMP%\pytest-of-* or a stale build temp
+rem directory has restrictive ACLs or a file is still held by another process.
 if not exist "build" mkdir "build"
+set "PYTEST_RUN_ID=%RANDOM%-%RANDOM%-%RANDOM%"
+set "PYTEST_TMP_DIR=%CD%\build\pytest_tmp_%PYTEST_RUN_ID%"
 
 rem Tk initialization on Windows is process-global. GUI fixtures that create or
 rem destroy a root in one test module can invalidate Tcl's tcl_findLibrary
