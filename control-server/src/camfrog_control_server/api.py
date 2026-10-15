@@ -442,7 +442,12 @@ def create_account(
             detail="Account nickname is already registered.",
         ) from exc
 
-    account = Account(nickname=body.nickname, agent_id=body.agent_id, enabled=body.enabled)
+    account = Account(
+        nickname=body.nickname,
+        nickname_key=nickname_key,
+        agent_id=body.agent_id,
+        enabled=body.enabled,
+    )
     agent_token = _rotate_agent_token(agent) if agent is not None else None
     db.add(account)
     try:

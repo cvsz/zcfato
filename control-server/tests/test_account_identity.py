@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from uuid import uuid4
 
+import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
@@ -61,6 +63,28 @@ def test_account_creation_rejects_case_insensitive_duplicates_without_rotating_a
         assert session.scalar(select(func.count()).select_from(AccountNicknameClaim)) == 1
 
 
+def test_presence_lookup_rejects_ambiguous_preserved_duplicate_nicknames(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, admin_token = api_client
+    key = account_nickname_key("Seaza")
+    with Session(engine) as session:
+        session.add_all(
+            [
+                Account(nickname="Seaza", nickname_key=key, created_at=utcnow()),
+                Account(nickname="seaza", nickname_key=key, created_at=utcnow()),
+            ]
+        )
+        session.commit()
+
+    response = client.get("/api/v1/presence/SEAZA", headers=_headers(admin_token))
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Nickname is ambiguous because multiple legacy accounts exist."
+    )
+
+
 def test_nickname_claim_migration_preserves_legacy_duplicate_accounts(
     tmp_path: Path,
     monkeypatch,
@@ -75,14 +99,27 @@ def test_nickname_claim_migration_preserves_legacy_duplicate_accounts(
     command.upgrade(config, "0005_internal_chat")
 
     engine = create_engine(database_url)
-    with Session(engine) as session:
-        session.add_all(
+    with engine.begin() as connection:
+        legacy_accounts = sa.Table("accounts", sa.MetaData(), autoload_with=connection)
+        connection.execute(
+            legacy_accounts.insert(),
             [
-                Account(nickname="Seaza", created_at=utcnow()),
-                Account(nickname="seaza", created_at=utcnow()),
-            ]
+                {
+                    "id": uuid4().hex,
+                    "nickname": "Seaza",
+                    "agent_id": None,
+                    "enabled": True,
+                    "created_at": utcnow(),
+                },
+                {
+                    "id": uuid4().hex,
+                    "nickname": "seaza",
+                    "agent_id": None,
+                    "enabled": True,
+                    "created_at": utcnow(),
+                },
+            ],
         )
-        session.commit()
     engine.dispose()
 
     command.upgrade(config, "head")
@@ -94,5 +131,11 @@ def test_nickname_claim_migration_preserves_legacy_duplicate_accounts(
             assert session.scalar(select(func.count()).select_from(Account)) == 2
             claim = session.get(AccountNicknameClaim, account_nickname_key("Seaza"))
             assert claim is not None
+            assert (
+                session.scalar(
+                    select(func.count()).where(Account.nickname_key == claim.nickname_key)
+                )
+                == 2
+            )
     finally:
         migrated_engine.dispose()
