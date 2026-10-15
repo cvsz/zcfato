@@ -6,7 +6,7 @@ from datetime import timedelta
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -95,7 +95,12 @@ def _profile_read(
     )
 
 
-@router.put("/agent/accounts/snapshot", status_code=status.HTTP_204_NO_CONTENT)
+@router.put(
+    "/agent/accounts/snapshot",
+    response_class=Response,
+    response_model=None,
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def ingest_account_snapshot(
     body: AccountSnapshotInput,
     agent: Annotated[Agent, Depends(require_agent)],

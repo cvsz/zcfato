@@ -125,6 +125,10 @@ echo === ISOLATED PRIVATE-CHAT GUI TESTS ===
 "%VENV_PY%" -m pytest -p no:cacheprovider -q tests/test_private_chat_gui.py --basetemp="%PYTEST_TMP_DIR%_private"
 if errorlevel 1 goto :fail
 
+echo.
+echo === WINDOWS MCI INTEGRATION TESTS ===
+"%VENV_PY%" -m pytest -p no:cacheprovider -q windows_tests --basetemp="%PYTEST_TMP_DIR%_mci"
+if errorlevel 1 goto :fail
 
 echo.
 echo === CONFIG VALIDATION EN ===

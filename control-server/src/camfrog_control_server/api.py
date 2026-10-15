@@ -5,6 +5,7 @@ from __future__ import annotations
 import hmac
 import secrets
 from datetime import UTC, timedelta
+from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
 
@@ -359,7 +360,7 @@ def create_account(
         )
         if agent is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Active agent not found."
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Active agent not found."
             )
         if db.scalar(select(Account.id).where(Account.agent_id == body.agent_id)) is not None:
             raise HTTPException(
@@ -414,7 +415,7 @@ def assign_account_agent(
         )
         if new_agent is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="Active agent not found."
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Active agent not found."
             )
 
     account = db.scalar(select(Account).where(Account.id == account_id).with_for_update())
@@ -641,7 +642,7 @@ def list_chat_messages(
 ) -> list[ChatMessage]:
     if not 1 <= limit <= 200:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="limit must be 1..200."
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
         )
     if db.get(Account, account_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
@@ -737,7 +738,7 @@ def list_commands(
 ) -> list[ControlCommand]:
     if not 1 <= limit <= 200:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="limit must be 1..200."
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
         )
     return list(
         db.scalars(
@@ -786,7 +787,7 @@ def list_audit(
 ) -> list[AuditEvent]:
     if not 1 <= limit <= 200:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail="limit must be 1..200."
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
         )
     return list(
         db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)).all()
@@ -1009,6 +1010,8 @@ def claim_next_chat_message(
 
 @router.post(
     "/agent/messages/{message_id}/ack",
+    response_class=Response,
+    response_model=None,
     status_code=status.HTTP_204_NO_CONTENT,
 )
 def acknowledge_chat_message(
@@ -1152,7 +1155,12 @@ def claim_next_command(
     )
 
 
-@router.post("/agent/commands/{command_id}/result", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/agent/commands/{command_id}/result",
+    response_class=Response,
+    response_model=None,
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def report_command_result(
     command_id: UUID,
     body: CommandResultRequest,

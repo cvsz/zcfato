@@ -43,6 +43,8 @@ make validate-template
 
 Do not merge from an older green commit after the PR head changes. Required checks must pass for the current exact head.
 
+Windows-only integration checks live in `windows_tests/` and run from `build.bat`. Run the Windows build workflow to validate the native MCI audio path; the portable suite uses mocked MCI commands.
+
 Repository-administration changes require an authenticated admin identity and read-back verification. Supply the exact target repository, branch, and each required status-check name; the helper deliberately has no built-in repository or check defaults:
 
 ```bash
