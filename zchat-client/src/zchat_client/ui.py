@@ -13,7 +13,7 @@ from camfrog_control_server.transport import validate_server_url
 
 from .session import AgentChatWorker, WorkerEvent
 
-DEFAULT_SERVER_URL = "https://zchat.zeaz.dev"
+DEFAULT_SERVER_URL = ""
 
 
 class AgentChatWindow:
@@ -91,7 +91,10 @@ class AgentChatWindow:
         self.send_button.grid(row=0, column=1, sticky=tk.NS, padx=(8, 0))
         ttk.Label(
             container,
-            text="Messages and the token stay in memory only. Ctrl+Enter sends a message.",
+            text=(
+                "Enter your control server's HTTPS URL. Messages and the token stay "
+                "in memory only. Ctrl+Enter sends a message."
+            ),
         ).pack(anchor=tk.W, pady=(6, 0))
         self._set_chat_enabled(False)
 
@@ -116,6 +119,7 @@ class AgentChatWindow:
             )
             return
 
+        self._clear_conversation()
         self.worker = AgentChatWorker(server_url, token)
         self.agent_token.set("")
         self._set_connection_fields_enabled(False)
@@ -208,6 +212,16 @@ class AgentChatWindow:
         self.transcript.delete("1.0", tk.END)
         self.transcript.insert(tk.END, "\n\n".join(self._entries))
         self.transcript.see(tk.END)
+        self.transcript.configure(state=tk.DISABLED)
+
+    def _clear_conversation(self) -> None:
+        self._entries.clear()
+        self.message_input.configure(state=tk.NORMAL)
+        self.message_input.delete("1.0", tk.END)
+        self.message_input.configure(state=tk.DISABLED)
+        self.assignment.set("No account assigned")
+        self.transcript.configure(state=tk.NORMAL)
+        self.transcript.delete("1.0", tk.END)
         self.transcript.configure(state=tk.DISABLED)
 
     def _set_chat_enabled(self, enabled: bool) -> None:

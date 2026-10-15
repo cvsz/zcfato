@@ -29,7 +29,7 @@ MAX_REMEMBERED_MESSAGE_IDS = 10_000
 
 
 class AgentChatWorker:
-    """Run heartbeat, chat polling, sends, and acknowledgements on one worker thread."""
+    """Run assignment refresh, chat polling, sends, and acknowledgements on one worker thread."""
 
     def __init__(
         self,
@@ -38,21 +38,21 @@ class AgentChatWorker:
         *,
         client_factory: ClientFactory = ControlPlaneClient,
         poll_interval: float = 2.0,
-        heartbeat_interval: float = 30.0,
+        assignment_refresh_interval: float = 30.0,
         retry_base: float = 1.0,
         retry_max: float = 60.0,
     ) -> None:
         if not 0.2 <= poll_interval <= 60:
             raise ValueError("Poll interval must be between 0.2 and 60 seconds.")
-        if not 1 <= heartbeat_interval <= 300:
-            raise ValueError("Heartbeat interval must be between 1 and 300 seconds.")
+        if not 1 <= assignment_refresh_interval <= 300:
+            raise ValueError("Assignment refresh interval must be between 1 and 300 seconds.")
         if not 0.01 <= retry_base <= retry_max <= 300:
             raise ValueError("Retry delays must be between 0.01 and 300 seconds.")
         self._server_url = server_url
         self._agent_token = agent_token
         self._client_factory = client_factory
         self._poll_interval = poll_interval
-        self._heartbeat_interval = heartbeat_interval
+        self._assignment_refresh_interval = assignment_refresh_interval
         self._retry_base = retry_base
         self._retry_max = retry_max
         self.events: queue.SimpleQueue[WorkerEvent] = queue.SimpleQueue()
@@ -160,7 +160,7 @@ class AgentChatWorker:
         queued_ack_ids: set[str] = set()
         delivered_ids: OrderedDict[str, None] = OrderedDict()
         account_id: str | None = None
-        next_heartbeat = 0.0
+        next_assignment_refresh = 0.0
         next_poll = 0.0
         failures = 0
         self._emit("connected")
@@ -179,12 +179,12 @@ class AgentChatWorker:
 
             now = time.monotonic()
             try:
-                if now >= next_heartbeat:
-                    heartbeat = client.heartbeat()
-                    assigned = heartbeat.get("account_id")
+                if now >= next_assignment_refresh:
+                    session = client.chat_session()
+                    assigned = session.get("account_id")
                     account_id = str(assigned) if assigned is not None else None
                     self._emit("assignment", account_id=account_id)
-                    next_heartbeat = now + self._heartbeat_interval
+                    next_assignment_refresh = now + self._assignment_refresh_interval
 
                 if pending_acks:
                     message_id, claim_token = pending_acks.popleft()
@@ -270,7 +270,7 @@ class AgentChatWorker:
                     next_poll = time.monotonic() + self._poll_interval
 
                 failures = 0
-                deadlines = [next_heartbeat]
+                deadlines = [next_assignment_refresh]
                 if account_id is not None:
                     deadlines.append(next_poll)
                 delay = max(0.05, min(deadlines) - time.monotonic())

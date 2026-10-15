@@ -262,6 +262,26 @@ def test_control_plane_client_validates_heartbeat_assignment() -> None:
         client.heartbeat()
 
 
+def test_control_plane_client_validates_chat_session_assignment() -> None:
+    client = ControlPlaneClient("https://control.example", "agent-token")
+    requests: list[tuple[str, str]] = []
+
+    def fake_request(method: str, path: str, *_args, **_kwargs):
+        requests.append((method, path))
+        return {"account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e"}
+
+    client.request = fake_request
+
+    session = client.chat_session()
+
+    assert session["account_id"] == "f6f17f92-ae7a-4c65-94d3-8376f08c909e"
+    assert requests == [("GET", "/agent/chat/session")]
+
+    client.request = lambda *_args, **_kwargs: {"account_id": "invalid"}
+    with pytest.raises(AgentTransportError, match="invalid chat session"):
+        client.chat_session()
+
+
 def test_poll_once_does_not_deliver_unvalidated_server_chat_data() -> None:
     client = ControlPlaneClient("https://control.example", "agent-token")
 

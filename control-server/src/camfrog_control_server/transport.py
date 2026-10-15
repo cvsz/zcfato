@@ -11,7 +11,7 @@ from uuid import UUID
 
 from pydantic import ValidationError
 
-from .schemas import AgentChatMessage, ChatMessageRead, HeartbeatResponse
+from .schemas import AgentChatMessage, AgentChatSessionRead, ChatMessageRead, HeartbeatResponse
 
 
 class AgentTransportError(RuntimeError):
@@ -104,6 +104,16 @@ class ControlPlaneClient:
         except ValidationError:
             raise AgentTransportError(
                 "Control plane returned an invalid heartbeat response."
+            ) from None
+
+    def chat_session(self) -> dict[str, Any]:
+        """Read the current chat assignment without refreshing agent presence."""
+        response = self.request("GET", "/agent/chat/session")
+        try:
+            return AgentChatSessionRead.model_validate(response).model_dump(mode="json")
+        except ValidationError:
+            raise AgentTransportError(
+                "Control plane returned an invalid chat session response."
             ) from None
 
     def submit_chat_message(

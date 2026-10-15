@@ -35,7 +35,7 @@ def test_incoming_message_is_acknowledged_only_after_ui_acceptance() -> None:
         def __init__(self, _server_url: str, _token: str) -> None:
             self.first_poll = True
 
-        def heartbeat(self) -> dict:
+        def chat_session(self) -> dict:
             return {"account_id": message["account_id"]}
 
         def poll_chat_message(self) -> dict | None:
@@ -55,7 +55,7 @@ def test_incoming_message_is_acknowledged_only_after_ui_acceptance() -> None:
         "agent-token",
         client_factory=FakeClient,
         poll_interval=0.2,
-        heartbeat_interval=1,
+        assignment_refresh_interval=1,
     )
     worker.start()
 
@@ -75,14 +75,14 @@ def test_stopped_session_cannot_restart_after_its_token_is_cleared() -> None:
         def __init__(self, _server_url: str, _token: str) -> None:
             pass
 
-        def heartbeat(self) -> dict:
+        def chat_session(self) -> dict:
             return {"account_id": None}
 
     worker = AgentChatWorker(
         "https://control.example",
         "agent-token",
         client_factory=FakeClient,
-        heartbeat_interval=1,
+        assignment_refresh_interval=1,
     )
     worker.start()
     _wait_for_event(worker, "assignment")
@@ -93,6 +93,37 @@ def test_stopped_session_cannot_restart_after_its_token_is_cleared() -> None:
         worker.start()
 
 
+def test_chat_session_reads_assignment_without_command_heartbeat() -> None:
+    heartbeat_calls = 0
+
+    class FakeClient:
+        def __init__(self, _server_url: str, _token: str) -> None:
+            pass
+
+        def chat_session(self) -> dict:
+            return {"account_id": None}
+
+        def heartbeat(self) -> dict:
+            nonlocal heartbeat_calls
+            heartbeat_calls += 1
+            raise AssertionError("Chat-only sessions must not refresh command-agent presence")
+
+    worker = AgentChatWorker(
+        "https://control.example",
+        "agent-token",
+        client_factory=FakeClient,
+        assignment_refresh_interval=1,
+    )
+    worker.start()
+
+    assignment = _wait_for_event(worker, "assignment")
+    worker.stop()
+    worker.join(timeout=1)
+
+    assert assignment.data["account_id"] is None
+    assert heartbeat_calls == 0
+
+
 def test_unassigned_agent_does_not_poll_or_send_chat() -> None:
     polled = False
 
@@ -100,7 +131,7 @@ def test_unassigned_agent_does_not_poll_or_send_chat() -> None:
         def __init__(self, _server_url: str, _token: str) -> None:
             pass
 
-        def heartbeat(self) -> dict:
+        def chat_session(self) -> dict:
             return {"account_id": None}
 
         def poll_chat_message(self) -> None:
@@ -117,7 +148,7 @@ def test_unassigned_agent_does_not_poll_or_send_chat() -> None:
         "https://control.example",
         "agent-token",
         client_factory=FakeClient,
-        heartbeat_interval=1,
+        assignment_refresh_interval=1,
     )
     worker.start()
 
@@ -129,15 +160,15 @@ def test_unassigned_agent_does_not_poll_or_send_chat() -> None:
 
 
 def test_terminal_server_error_stops_without_retrying() -> None:
-    heartbeat_calls = 0
+    session_calls = 0
 
     class FakeClient:
         def __init__(self, _server_url: str, _token: str) -> None:
             pass
 
-        def heartbeat(self) -> dict:
-            nonlocal heartbeat_calls
-            heartbeat_calls += 1
+        def chat_session(self) -> dict:
+            nonlocal session_calls
+            session_calls += 1
             raise AgentTransportError("Not found", status_code=404)
 
     worker = AgentChatWorker(
@@ -152,7 +183,7 @@ def test_terminal_server_error_stops_without_retrying() -> None:
     worker.join(timeout=1)
 
     assert error.data["message"] == "Control server rejected the request (HTTP 404)."
-    assert heartbeat_calls == 1
+    assert session_calls == 1
     assert not worker.is_alive
 
 
@@ -164,7 +195,7 @@ def test_outgoing_retry_reuses_the_same_idempotency_key() -> None:
         def __init__(self, _server_url: str, _token: str) -> None:
             self.failed_once = False
 
-        def heartbeat(self) -> dict:
+        def chat_session(self) -> dict:
             return {"account_id": account_id}
 
         def submit_chat_message(self, _account_id: str, message_id: str, _body: str) -> dict:
@@ -185,7 +216,7 @@ def test_outgoing_retry_reuses_the_same_idempotency_key() -> None:
         "agent-token",
         client_factory=FakeClient,
         poll_interval=0.2,
-        heartbeat_interval=1,
+        assignment_refresh_interval=1,
         retry_base=0.01,
     )
     worker.start()
