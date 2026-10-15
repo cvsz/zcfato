@@ -127,7 +127,14 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
                     response = await call_next(request)
             else:
                 response = await call_next(request)
-        except Exception:
+        except Exception as exc:
+            request_logger.error(
+                "request_failed",
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                error_type=type(exc).__name__,
+            )
             response = JSONResponse(
                 status_code=500,
                 content={"detail": "Internal server error."},

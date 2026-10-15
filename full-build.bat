@@ -77,6 +77,10 @@ if not exist dist\music-dj\music-dj.exe (
     echo ERROR: dist\music-dj\music-dj.exe not found
     exit /b 1
 )
+if not exist dist\status-changer\status-changer.exe (
+    echo ERROR: dist\status-changer\status-changer.exe not found
+    exit /b 1
+)
 if not exist line\dist\line-status-changer.exe (
     echo ERROR: line\dist\line-status-changer.exe not found
     exit /b 1
@@ -136,6 +140,7 @@ echo   dist\status-marquee\status-marquee.exe
 echo   dist\im-autoreply\im-autoreply.exe
 echo   dist\web-status\web-status.exe
 echo   dist\music-dj\music-dj.exe
+echo   dist\status-changer\status-changer.exe
 echo   camfrog-features-windows.zip
 echo   dist\SHA256SUMS.txt
 echo   dist\BUILD_SOURCE.txt
