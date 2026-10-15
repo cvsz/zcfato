@@ -258,9 +258,7 @@ def revoke_agent(
         select(ControlCommand)
         .where(
             ControlCommand.agent_id == agent.id,
-            ControlCommand.state.in_(
-                (CommandState.pending.value, CommandState.claimed.value)
-            ),
+            ControlCommand.state.in_((CommandState.pending.value, CommandState.claimed.value)),
         )
         .with_for_update()
     ).all()
