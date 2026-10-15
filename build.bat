@@ -3,9 +3,6 @@ chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
 
-%PYSEL% tools\require_non_admin.py
-if errorlevel 1 exit /b 1
-
 set "FEATURE_NAME=camfrog-features"
 
 rem ============================================================
@@ -16,6 +13,9 @@ py -3.12-64 -c "import sys" >nul 2>&1
 if not errorlevel 1 set "PYSEL=py -3.12-64"
 
 if not defined PYSEL set "PYSEL=python"
+
+%PYSEL% tools\require_non_admin.py
+if errorlevel 1 exit /b 1
 
 echo Using Python / ใช้ Python:
 %PYSEL% -c "import sys,struct;print(sys.version);print(struct.calcsize('P')*8,'bit')"
