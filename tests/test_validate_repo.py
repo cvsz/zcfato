@@ -2,9 +2,12 @@
 import json
 import os
 import shlex
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import validate_repo
@@ -69,6 +72,10 @@ def test_clean_prunes_generated_directories_before_recursive_scans():
 
 
 def test_clean_returns_failure_when_a_filesystem_scan_fails(tmp_path):
+    make_executable = shutil.which("make")
+    if make_executable is None:
+        pytest.skip("GNU make is required to execute the Makefile clean target")
+
     fake_scan = tmp_path / "fake_scan.py"
     fake_scan.write_text(
         "import sys\nprint('simulated-find-failure', file=sys.stderr)\nsys.exit(73)\n",
@@ -91,7 +98,7 @@ def test_clean_returns_failure_when_a_filesystem_scan_fails(tmp_path):
     test_makefile.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     result = subprocess.run(
-        ["make", "-f", str(test_makefile), "clean"],
+        [make_executable, "-f", str(test_makefile), "clean"],
         cwd=tmp_path,
         capture_output=True,
         text=True,
