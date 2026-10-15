@@ -2178,8 +2178,10 @@ class Runner:
                 continue
 
             for index, line in enumerate(fresh):
-                def mark_consumed():
-                    st["prev"] = cur[:overlap + index + 1]
+                def mark_consumed(
+                    state=st, current_lines=cur, line_overlap=overlap, line_index=index
+                ):
+                    state["prev"] = current_lines[:line_overlap + line_index + 1]
 
                 m = LINE_RE.match(line.strip())
                 if not m:
@@ -3356,7 +3358,7 @@ def main(argv=None):
 # packaged app checks the same repo's latest release and downloads only its
 # own executable asset, verified against the release's SHA256SUMS.txt.
 APP_VERSION = "2.19.2"
-GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
+GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zchat")
 UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
 
 

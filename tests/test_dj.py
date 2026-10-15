@@ -174,8 +174,7 @@ def test_dj_audio_duration_reads_mci_length(tmp_path, monkeypatch):
     assert commands[-1].startswith("close ")
 
 
-@pytest.mark.skipif(os.name != "nt", reason="needs Windows MCI audio")
-def test_dj_windows_mci_reads_wav_duration(tmp_path):
+def test_dj_mci_reads_wav_duration_with_mocked_backend(tmp_path, monkeypatch):
     import wave
 
     song = tmp_path / "MCI audio test.wav"
@@ -185,10 +184,20 @@ def test_dj_windows_mci_reads_wav_duration(tmp_path):
         wav.setframerate(8000)
         wav.writeframes(b"\0\0" * 800)
 
+    commands = []
+
+    def fake_mci(command):
+        commands.append(command)
+        return "100" if command.endswith("length") else ""
+
+    monkeypatch.setattr(c, "_dj_windows_audio", lambda: True)
+    monkeypatch.setattr(c, "_dj_mci_command", fake_mci)
+
     duration = c.dj_audio_duration(song)
-    if duration is None:
-        pytest.skip("Windows MCI audio backend is unavailable on this runner")
     assert duration == pytest.approx(0.1, abs=0.02)
+    assert commands[0].startswith('open "') and str(song.resolve()) in commands[0]
+    assert any("time format milliseconds" in command for command in commands)
+    assert commands[-1].startswith("close ")
 
 
 @pytest.mark.parametrize("extension", ["wav", "mp3", "flac", "mid"])

@@ -1910,7 +1910,6 @@ def publish_dj_control_state(cfg, now=None, base=None, runner=None):
     """Publish a bounded queue snapshot for the local Bot Manager UI."""
     now = time.time() if now is None else float(now)
     dj = cfg.get("dj") or DEFAULTS["dj"]
-    data_dir = Path(base or BASE)
     try:
         queue_path = dj_queue_path_for_config(cfg, base)
     except (OSError, ValueError):
@@ -5723,7 +5722,7 @@ def main(argv=None):
 # packaged app checks the same repo's latest release and downloads only its
 # own executable asset, verified against the release's SHA256SUMS.txt.
 APP_VERSION = "2.19.2"
-GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
+GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zchat")
 UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
 
 

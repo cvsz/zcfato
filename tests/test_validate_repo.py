@@ -1,5 +1,8 @@
 """Tests for the repository validator that do not need the real tree."""
 import json
+import os
+import shlex
+import subprocess
 import sys
 from pathlib import Path
 
@@ -62,6 +65,41 @@ def test_clean_prunes_generated_directories_before_recursive_scans():
     )
     assert "-type d -name '.pytest_cache' -prune -exec rm -rf" in commands[1]
     assert "-type d -name '.ruff_cache' -prune -exec rm -rf" in commands[2]
+    assert all("2>/dev/null" not in command and "|| true" not in command for command in commands)
+
+
+def test_clean_returns_failure_when_a_filesystem_scan_fails(tmp_path):
+    fake_scan = tmp_path / "fake_scan.py"
+    fake_scan.write_text(
+        "import sys\nprint('simulated-find-failure', file=sys.stderr)\nsys.exit(73)\n",
+        encoding="utf-8",
+    )
+    command = (
+        subprocess.list2cmdline([sys.executable, str(fake_scan)])
+        if os.name == "nt"
+        else " ".join(shlex.quote(part) for part in (sys.executable, str(fake_scan)))
+    )
+    makefile = validate_repo.ROOT / "Makefile"
+    lines = makefile.read_text(encoding="utf-8").splitlines()
+    replaced = 0
+    for index, line in enumerate(lines):
+        if line.startswith("\tfind ."):
+            lines[index] = "\t" + command
+            replaced += 1
+    assert replaced == 3
+    test_makefile = tmp_path / "Makefile"
+    test_makefile.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    result = subprocess.run(
+        ["make", "-f", str(test_makefile), "clean"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "simulated-find-failure" in result.stdout + result.stderr
 
 
 def test_build_and_dist_exclusions(tmp_path, monkeypatch):

@@ -7,7 +7,13 @@ from camfrog_control_server.adapters import (
     build_cloud_bot_status_request,
     parse_cloud_bot_status_response,
 )
-from camfrog_control_server.agent import NoCamfrogProvider, poll_once, validate_server_url
+from camfrog_control_server.agent import (
+    AgentTransportError,
+    ControlPlaneClient,
+    NoCamfrogProvider,
+    poll_once,
+    validate_server_url,
+)
 
 
 def test_remote_agent_requires_https() -> None:
@@ -49,6 +55,195 @@ def test_poll_once_includes_account_client_state_in_heartbeat() -> None:
         "/agent/heartbeat",
         {"state": "running", "client_process_state": "unknown"},
     )
+
+
+def test_poll_once_acknowledges_messages_only_after_provider_acceptance() -> None:
+    message = {
+        "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+        "claim_token": "a" * 43,
+    }
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, dict | None]] = []
+
+        def request(self, method: str, path: str, body: dict | None = None):
+            self.calls.append((method, path, body))
+            if path == "/agent/commands/next":
+                return {"command": None}
+            if path == "/agent/messages/next":
+                return {"message": message}
+            return None
+
+        def poll_chat_message(self):
+            return self.request("GET", "/agent/messages/next")["message"]
+
+        def acknowledge_chat_message(self, message_id: str, claim_token: str) -> None:
+            self.request(
+                "POST",
+                f"/agent/messages/{message_id}/ack",
+                {"claim_token": claim_token},
+            )
+
+    class AcceptingProvider(NoCamfrogProvider):
+        def receive_chat_message(self, _message: dict) -> bool:
+            return True
+
+    client = FakeClient()
+    assert poll_once(client, AcceptingProvider()) is True
+    assert client.calls[-1] == (
+        "POST",
+        f"/agent/messages/{message['id']}/ack",
+        {"claim_token": message["claim_token"]},
+    )
+
+    class RejectingProvider(NoCamfrogProvider):
+        def receive_chat_message(self, _message: dict) -> bool:
+            return False
+
+    rejected_client = FakeClient()
+    assert poll_once(rejected_client, RejectingProvider()) is False
+    assert not any(path.endswith("/ack") for _, path, _ in rejected_client.calls)
+
+
+def test_control_plane_client_exposes_idempotent_chat_transport() -> None:
+    client = ControlPlaneClient("https://control.example", "agent-token")
+    calls: list[tuple[str, str, dict | None]] = []
+    claimed = {
+        "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+        "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+        "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+        "body": "Operator message",
+        "claim_token": "a" * 43,
+        "claim_expires_at": "2026-10-15T10:00:00Z",
+    }
+
+    def fake_request(method: str, path: str, body: dict | None = None):
+        calls.append((method, path, body))
+        if path == "/agent/messages/next":
+            return {"message": claimed}
+        return {"state": "received"}
+
+    client.request = fake_request
+    submitted = client.submit_chat_message(
+        claimed["account_id"], claimed["client_message_id"], "Agent message"
+    )
+    polled = client.poll_chat_message()
+    client.acknowledge_chat_message(claimed["id"], claimed["claim_token"])
+
+    assert submitted == {"state": "received"}
+    assert polled == claimed
+    assert calls == [
+        (
+            "POST",
+            "/agent/messages",
+            {
+                "account_id": claimed["account_id"],
+                "client_message_id": claimed["client_message_id"],
+                "body": "Agent message",
+            },
+        ),
+        ("GET", "/agent/messages/next", None),
+        (
+            "POST",
+            f"/agent/messages/{claimed['id']}/ack",
+            {"claim_token": claimed["claim_token"]},
+        ),
+    ]
+
+    with pytest.raises(ValueError, match="UUIDs"):
+        client.submit_chat_message("invalid", claimed["client_message_id"], "message")
+    with pytest.raises(ValueError, match="token"):
+        client.acknowledge_chat_message(claimed["id"], "short")
+
+
+@pytest.mark.parametrize(
+    "invalid_message",
+    [
+        {},
+        {
+            "id": "invalid",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "a" * 43,
+            "claim_expires_at": "2026-10-15T10:00:00Z",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "not-a-uuid",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "a" * 43,
+            "claim_expires_at": "2026-10-15T10:00:00Z",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "short",
+            "claim_expires_at": "2026-10-15T10:00:00Z",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "x" * 4001,
+            "claim_token": "a" * 43,
+            "claim_expires_at": "2026-10-15T10:00:00Z",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "a" * 43,
+            "claim_expires_at": "not-a-datetime",
+        },
+        {
+            "id": "3a16ee61-7e66-4bf4-bf83-b2a8ed4939b5",
+            "account_id": "f6f17f92-ae7a-4c65-94d3-8376f08c909e",
+            "client_message_id": "ce5dbd3a-c6d7-46fa-963f-5350a9fc0c70",
+            "body": "Operator message",
+            "claim_token": "a" * 43,
+            "claim_expires_at": "2026-10-15T10:00:00",
+        },
+    ],
+)
+def test_control_plane_client_rejects_malformed_claimed_chat_messages(
+    invalid_message: dict,
+) -> None:
+    client = ControlPlaneClient("https://control.example", "agent-token")
+    client.request = lambda *_args, **_kwargs: {"message": invalid_message}
+
+    with pytest.raises(AgentTransportError, match="invalid chat message"):
+        client.poll_chat_message()
+
+
+def test_poll_once_does_not_deliver_unvalidated_server_chat_data() -> None:
+    client = ControlPlaneClient("https://control.example", "agent-token")
+
+    def fake_request(_method: str, path: str, _body: dict | None = None):
+        if path == "/agent/commands/next":
+            return {"command": None}
+        if path == "/agent/messages/next":
+            return {"message": {"id": "invalid", "body": "untrusted"}}
+        return None
+
+    client.request = fake_request
+
+    class Provider(NoCamfrogProvider):
+        called = False
+
+        def receive_chat_message(self, _message: dict) -> bool:
+            self.called = True
+            return True
+
+    provider = Provider()
+    with pytest.raises(AgentTransportError):
+        poll_once(client, provider)
+    assert provider.called is False
 
 
 def test_cloud_bot_rpc_adapter_uses_observed_request_and_reason_precedence() -> None:

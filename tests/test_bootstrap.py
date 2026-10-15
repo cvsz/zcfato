@@ -17,7 +17,7 @@ class BootstrapTest(unittest.TestCase):
             "README.md": "# zTemplate\n",
             "ABOUT.md": "# About cvsz\n",
             ".github/CODEOWNERS": "* @cvsz\n/.github/ @cvsz\n",
-            ".github/ISSUE_TEMPLATE/config.yml": "url: https://github.com/cvsz/ztemplate/security\n",
+            ".github/ISSUE_TEMPLATE/config.yml": "url: https://github.com/cvsz/zchat/security/advisories/new\n",
             "templates/project-readme.md": "# {{PROJECT_NAME}}\n{{DESCRIPTION}}\n{{OWNER}}\n",
             "templates/project-about.md": "# About {{PROJECT_NAME}}\n{{DESCRIPTION}}\n",
         }
@@ -42,7 +42,7 @@ class BootstrapTest(unittest.TestCase):
         self.assertIn("# example-app", (self.root / "README.md").read_text())
         self.assertIn("@example-org/maintainers", (self.root / ".github/CODEOWNERS").read_text())
         self.assertIn(
-            "github.com/example-org/example-app/security",
+            "github.com/example-org/example-app/security/advisories/new",
             (self.root / ".github/ISSUE_TEMPLATE/config.yml").read_text(),
         )
         self.assertEqual(self.run_init(apply=True), [])

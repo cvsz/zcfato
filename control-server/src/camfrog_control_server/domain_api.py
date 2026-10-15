@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -95,7 +96,12 @@ def _profile_read(
     )
 
 
-@router.put("/agent/accounts/snapshot", status_code=status.HTTP_204_NO_CONTENT)
+@router.put(
+    "/agent/accounts/snapshot",
+    response_class=Response,
+    response_model=None,
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def ingest_account_snapshot(
     body: AccountSnapshotInput,
     agent: Annotated[Agent, Depends(require_agent)],
@@ -419,7 +425,7 @@ def create_cloud_bot(
     agent = db.scalar(select(Agent).where(Agent.id == body.agent_id, Agent.revoked_at.is_(None)))
     if agent is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Active agent not found."
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Active agent not found."
         )
     bot = CloudBot(name=body.name, agent_id=body.agent_id)
     db.add(bot)

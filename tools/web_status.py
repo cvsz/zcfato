@@ -22,6 +22,7 @@ Security rules (fail closed):
 import argparse
 import getpass
 import json
+import math
 import os
 import re
 import shutil
@@ -79,7 +80,7 @@ def parse_rotate_interval(raw):
         value = float(str(raw).strip())
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError("invalid interval: {0!r}".format(raw)) from exc
-    if not (value == value and value not in (float("inf"), float("-inf"))):
+    if not math.isfinite(value):
         raise ValueError("invalid interval: {0!r}".format(raw))
     return min(ROTATE_INTERVAL_MAX, max(ROTATE_INTERVAL_MIN, value))
 

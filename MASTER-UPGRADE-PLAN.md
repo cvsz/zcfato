@@ -1,7 +1,7 @@
 # 🚀 Master Production-Grade Upgrade Plan — Camfrog Automation Suite
 
-> **Repo:** `/mnt/d/data/camfrog` · **Branch:** `main` · **Latest tag:** `v2.19.2`
-> **Language rule:** Thai สำหรับการสื่อสาร · English สำหรับ code/tech/commits
+> **Repository:** `cvsz/zchat` · **Document:** upgrade plan
+> **Communication:** Thai · **Code and technical documentation:** English
 
 ---
 

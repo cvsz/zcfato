@@ -1,4 +1,4 @@
-# ZCFATO safe Windows updater. Run from PowerShell: .\update-local.ps1 -Build
+# ZChat safe Windows updater. Run from PowerShell: .\update-local.ps1 -Build
 [CmdletBinding()]
 param(
     [switch]$Build,
@@ -22,8 +22,8 @@ try {
         throw "Run from repository root ($root) or pass -RepoPath explicitly."
     }
     $remote = (& git remote get-url origin 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $remote -notmatch '(^|[:/])cvsz/zcfato(\.git)?$') {
-        throw "Unexpected origin remote: $remote. Expected cvsz/zcfato."
+    if ($LASTEXITCODE -ne 0 -or $remote -notmatch '(^|[:/])cvsz/zchat(\.git)?$') {
+        throw "Unexpected origin remote: $remote. Expected cvsz/zchat."
     }
     $changes = @(& git status --porcelain --untracked-files=normal)
     if ($LASTEXITCODE -ne 0) { throw 'Could not inspect Git status.' }
@@ -69,7 +69,7 @@ try {
     } else {
         Write-Host '[4/4] Build skipped (pass -Build or -FullBuild).' 
     }
-    Write-Host "SUCCESS: ZCFATO local main is at $sha" -ForegroundColor Green
+    Write-Host "SUCCESS: ZChat local main is at $sha" -ForegroundColor Green
     Write-Host 'No release or deployment was published.'
 } finally {
     Pop-Location

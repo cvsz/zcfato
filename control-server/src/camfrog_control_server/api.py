@@ -5,10 +5,11 @@ from __future__ import annotations
 import hmac
 import secrets
 from datetime import UTC, timedelta
+from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +20,7 @@ from .models import (
     AccountRuntimeSnapshot,
     Agent,
     AuditEvent,
+    ChatMessage,
     CloudBot,
     ControlCommand,
     ProfileSnapshot,
@@ -27,14 +29,23 @@ from .models import (
 )
 from .schemas import (
     AccountAgentAssign,
+    AccountAgentAssignmentRead,
     AccountCreate,
     AccountRead,
+    AgentChatMessage,
+    AgentChatMessageCreate,
     AgentCommand,
     AgentCreate,
     AgentCreated,
     AgentRead,
     AgentRuntimeState,
+    AgentTokenRotated,
     AuditRead,
+    ChatMessageAckRequest,
+    ChatMessageDirection,
+    ChatMessagePollResponse,
+    ChatMessageRead,
+    ChatMessageState,
     ClientProcessState,
     CommandCreate,
     CommandPollResponse,
@@ -43,6 +54,7 @@ from .schemas import (
     CommandState,
     HeartbeatRequest,
     HeartbeatResponse,
+    OperatorChatMessageCreate,
     Overview,
 )
 from .security import (
@@ -160,6 +172,44 @@ def add_audit(
     )
 
 
+def _account_assignment_read(
+    account: Account, agent_token: str | None = None
+) -> AccountAgentAssignmentRead:
+    result = AccountAgentAssignmentRead.model_validate(account)
+    if agent_token is None:
+        return result
+    return result.model_copy(update={"agent_token": agent_token})
+
+
+def _rotate_agent_token(agent: Agent) -> str:
+    token = new_agent_token()
+    agent.token_hash = hash_token(token)
+    return token
+
+
+def _find_idempotent_chat_message(
+    db: Session,
+    *,
+    account_id: UUID,
+    direction: ChatMessageDirection,
+    client_message_id: UUID,
+    body: str,
+) -> ChatMessage | None:
+    existing = db.scalar(
+        select(ChatMessage).where(
+            ChatMessage.account_id == account_id,
+            ChatMessage.direction == direction.value,
+            ChatMessage.client_message_id == client_message_id,
+        )
+    )
+    if existing is not None and existing.body != body:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="client_message_id was already used with a different body.",
+        )
+    return existing
+
+
 @router.get("/overview", response_model=Overview)
 def overview(
     _admin: Annotated[None, Depends(require_admin)],
@@ -274,6 +324,26 @@ def revoke_agent(
         command.claim_expires_at = None
         command.finished_at = now
 
+    outstanding_messages = db.scalars(
+        select(ChatMessage)
+        .where(
+            ChatMessage.agent_id == agent.id,
+            ChatMessage.direction == ChatMessageDirection.operator_to_agent.value,
+            ChatMessage.state.in_((ChatMessageState.queued.value, ChatMessageState.claimed.value)),
+        )
+        .with_for_update()
+    ).all()
+    pending_messages_canceled = 0
+    claimed_messages_canceled = 0
+    for message in outstanding_messages:
+        if message.state == ChatMessageState.queued.value:
+            pending_messages_canceled += 1
+        else:
+            claimed_messages_canceled += 1
+        message.state = ChatMessageState.canceled.value
+        message.claim_token_hash = None
+        message.claim_expires_at = None
+
     add_audit(
         db,
         actor_type="admin",
@@ -284,6 +354,8 @@ def revoke_agent(
         details={
             "pending_commands_canceled": pending_canceled,
             "claimed_commands_canceled": claimed_canceled,
+            "pending_messages_canceled": pending_messages_canceled,
+            "claimed_messages_canceled": claimed_messages_canceled,
         },
     )
     db.commit()
@@ -291,12 +363,47 @@ def revoke_agent(
     return agent
 
 
-@router.post("/accounts", response_model=AccountRead, status_code=status.HTTP_201_CREATED)
+@router.post("/agents/{agent_id}/rotate-token", response_model=AgentTokenRotated)
+def rotate_agent_token(
+    agent_id: UUID,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AgentTokenRotated:
+    agent = db.scalar(select(Agent).where(Agent.id == agent_id).with_for_update())
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Agent not found.")
+    if agent.revoked_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Revoked agents cannot rotate tokens."
+        )
+
+    token = _rotate_agent_token(agent)
+    account_id = db.scalar(select(Account.id).where(Account.agent_id == agent.id))
+    add_audit(
+        db,
+        actor_type="admin",
+        actor_id="admin",
+        action="agent.token_rotated",
+        resource_type="agent",
+        resource_id=str(agent.id),
+        details={"account_id": str(account_id) if account_id else None},
+    )
+    db.commit()
+    return AgentTokenRotated(agent_id=agent.id, agent_token=token)
+
+
+@router.post(
+    "/accounts",
+    response_model=AccountAgentAssignmentRead,
+    response_model_exclude_unset=True,
+    status_code=status.HTTP_201_CREATED,
+)
 def create_account(
     body: AccountCreate,
     _admin: Annotated[None, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-) -> Account:
+) -> AccountAgentAssignmentRead:
+    agent = None
     if body.agent_id is not None:
         agent = db.scalar(
             select(Agent)
@@ -305,7 +412,7 @@ def create_account(
         )
         if agent is None:
             raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Active agent not found."
+                status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Active agent not found."
             )
         if db.scalar(select(Account.id).where(Account.agent_id == body.agent_id)) is not None:
             raise HTTPException(
@@ -314,6 +421,7 @@ def create_account(
             )
 
     account = Account(nickname=body.nickname, agent_id=body.agent_id, enabled=body.enabled)
+    agent_token = _rotate_agent_token(agent) if agent is not None else None
     db.add(account)
     try:
         db.flush()
@@ -341,31 +449,53 @@ def create_account(
             detail="Agent is already assigned to another account.",
         ) from exc
     db.refresh(account)
-    return account
+    return _account_assignment_read(account, agent_token)
 
 
-@router.patch("/accounts/{account_id}/agent", response_model=AccountRead)
+@router.patch(
+    "/accounts/{account_id}/agent",
+    response_model=AccountAgentAssignmentRead,
+    response_model_exclude_unset=True,
+)
 def assign_account_agent(
     account_id: UUID,
     body: AccountAgentAssign,
     _admin: Annotated[None, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
-) -> Account:
-    new_agent = None
-    if body.agent_id is not None:
-        new_agent = db.scalar(
-            select(Agent)
-            .where(Agent.id == body.agent_id, Agent.revoked_at.is_(None))
-            .with_for_update()
+) -> AccountAgentAssignmentRead:
+    observed = db.execute(
+        select(Account.id, Account.agent_id).where(Account.id == account_id)
+    ).one_or_none()
+    if observed is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+
+    previous_agent_id = observed.agent_id
+    agent_ids = {
+        agent_id for agent_id in (previous_agent_id, body.agent_id) if agent_id is not None
+    }
+    locked_agents = (
+        db.scalars(
+            select(Agent).where(Agent.id.in_(agent_ids)).order_by(Agent.id).with_for_update()
+        ).all()
+        if agent_ids
+        else []
+    )
+    agents_by_id = {agent.id: agent for agent in locked_agents}
+    new_agent = agents_by_id.get(body.agent_id) if body.agent_id is not None else None
+    if body.agent_id is not None and (new_agent is None or new_agent.revoked_at is not None):
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Active agent not found."
         )
-        if new_agent is None:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Active agent not found."
-            )
 
     account = db.scalar(select(Account).where(Account.id == account_id).with_for_update())
     if account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+    if account.agent_id != previous_agent_id:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account assignment changed concurrently; retry the request.",
+        )
 
     if new_agent is not None:
         assigned_account = db.scalar(
@@ -391,9 +521,41 @@ def assign_account_agent(
             detail="Account has a claimed command; wait for it to finish before reassignment.",
         )
 
-    previous_agent_id = account.agent_id
+    now = utcnow()
+    claimed_message = db.scalar(
+        select(ChatMessage.id)
+        .where(
+            ChatMessage.account_id == account.id,
+            ChatMessage.direction == ChatMessageDirection.operator_to_agent.value,
+            ChatMessage.state == ChatMessageState.claimed.value,
+            ChatMessage.claim_expires_at > now,
+        )
+        .limit(1)
+        .with_for_update()
+    )
+    if claimed_message is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Account has a claimed chat message; wait for delivery or lease expiry "
+                "before reassignment."
+            ),
+        )
+
+    expired_claimed_messages = db.scalars(
+        select(ChatMessage)
+        .where(
+            ChatMessage.account_id == account.id,
+            ChatMessage.direction == ChatMessageDirection.operator_to_agent.value,
+            ChatMessage.state == ChatMessageState.claimed.value,
+            ChatMessage.claim_expires_at <= now,
+        )
+        .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        .with_for_update()
+    ).all()
+
     if previous_agent_id == body.agent_id:
-        return account
+        return _account_assignment_read(account)
 
     pending = db.scalars(
         select(ControlCommand).where(
@@ -401,11 +563,26 @@ def assign_account_agent(
             ControlCommand.state == CommandState.pending.value,
         )
     ).all()
-    now = utcnow()
+    pending_messages = db.scalars(
+        select(ChatMessage).where(
+            ChatMessage.account_id == account.id,
+            ChatMessage.direction == ChatMessageDirection.operator_to_agent.value,
+            ChatMessage.state == ChatMessageState.queued.value,
+        )
+    ).all()
     for command in pending:
         command.state = CommandState.canceled.value
         command.finished_at = now
+    canceled_messages = [*pending_messages, *expired_claimed_messages]
+    for message in canceled_messages:
+        message.state = ChatMessageState.canceled.value
+        message.claim_token_hash = None
+        message.claim_expires_at = None
     account.agent_id = body.agent_id
+    previous_agent = agents_by_id.get(previous_agent_id) if previous_agent_id is not None else None
+    if previous_agent is not None:
+        _rotate_agent_token(previous_agent)
+    agent_token = _rotate_agent_token(new_agent) if new_agent is not None else None
     add_audit(
         db,
         actor_type="admin",
@@ -417,6 +594,8 @@ def assign_account_agent(
             "previous_agent_id": str(previous_agent_id) if previous_agent_id else None,
             "agent_id": str(body.agent_id) if body.agent_id else None,
             "pending_commands_canceled": len(pending),
+            "pending_messages_canceled": len(pending_messages),
+            "expired_claimed_messages_canceled": len(expired_claimed_messages),
         },
     )
     try:
@@ -428,7 +607,7 @@ def assign_account_agent(
             detail="Agent is already assigned to another account.",
         ) from exc
     db.refresh(account)
-    return account
+    return _account_assignment_read(account, agent_token)
 
 
 @router.get("/accounts", response_model=list[AccountRead])
@@ -437,6 +616,140 @@ def list_accounts(
     db: Annotated[Session, Depends(get_db)],
 ) -> list[Account]:
     return list(db.scalars(select(Account).order_by(Account.created_at.desc())).all())
+
+
+@router.post(
+    "/messages",
+    response_model=ChatMessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_operator_chat_message(
+    body: OperatorChatMessageCreate,
+    response: Response,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ChatMessage:
+    account = db.get(Account, body.account_id)
+    if account is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+    if not account.enabled or account.agent_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Account is not assigned to an agent."
+        )
+    agent = db.scalar(
+        select(Agent)
+        .where(Agent.id == account.agent_id, Agent.revoked_at.is_(None))
+        .with_for_update()
+    )
+    if agent is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Assigned agent is unavailable."
+        )
+    account = db.scalar(
+        select(Account)
+        .where(Account.id == body.account_id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    if account is None or not account.enabled or account.agent_id != agent.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account assignment changed; retry with current state.",
+        )
+
+    direction = ChatMessageDirection.operator_to_agent
+    existing = _find_idempotent_chat_message(
+        db,
+        account_id=account.id,
+        direction=direction,
+        client_message_id=body.client_message_id,
+        body=body.body,
+    )
+    if existing is not None:
+        response.status_code = status.HTTP_200_OK
+        return existing
+
+    message = ChatMessage(
+        account_id=account.id,
+        agent_id=agent.id,
+        client_message_id=body.client_message_id,
+        direction=direction.value,
+        body=body.body,
+        state=ChatMessageState.queued.value,
+    )
+    db.add(message)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing = _find_idempotent_chat_message(
+            db,
+            account_id=body.account_id,
+            direction=direction,
+            client_message_id=body.client_message_id,
+            body=body.body,
+        )
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Message could not be queued."
+            ) from None
+        response.status_code = status.HTTP_200_OK
+        return existing
+
+    add_audit(
+        db,
+        actor_type="admin",
+        actor_id="admin",
+        action="chat_message.queued",
+        resource_type="chat_message",
+        resource_id=str(message.id),
+        details={"account_id": str(account.id), "direction": direction.value},
+    )
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+@router.get("/accounts/{account_id}/messages", response_model=list[ChatMessageRead])
+def list_chat_messages(
+    account_id: UUID,
+    _admin: Annotated[None, Depends(require_admin)],
+    db: Annotated[Session, Depends(get_db)],
+    limit: int = 100,
+    before: UUID | None = None,
+) -> list[ChatMessage]:
+    if not 1 <= limit <= 200:
+        raise HTTPException(
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
+        )
+    if db.get(Account, account_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+
+    query = select(ChatMessage).where(ChatMessage.account_id == account_id)
+    if before is not None:
+        cursor = db.scalar(
+            select(ChatMessage).where(
+                ChatMessage.id == before, ChatMessage.account_id == account_id
+            )
+        )
+        if cursor is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Message cursor not found."
+            )
+        query = query.where(
+            or_(
+                ChatMessage.created_at < cursor.created_at,
+                and_(ChatMessage.created_at == cursor.created_at, ChatMessage.id < cursor.id),
+            )
+        )
+
+    messages = list(
+        db.scalars(
+            query.order_by(ChatMessage.created_at.desc(), ChatMessage.id.desc()).limit(limit)
+        ).all()
+    )
+    messages.reverse()
+    return messages
 
 
 @router.post("/commands", response_model=CommandRead, status_code=status.HTTP_201_CREATED)
@@ -461,7 +774,12 @@ def create_command(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Assigned agent is unavailable."
         )
-    account = db.scalar(select(Account).where(Account.id == body.account_id).with_for_update())
+    account = db.scalar(
+        select(Account)
+        .where(Account.id == body.account_id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
     if account is None or not account.enabled or account.agent_id != agent.id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -498,7 +816,7 @@ def list_commands(
 ) -> list[ControlCommand]:
     if not 1 <= limit <= 200:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
         )
     return list(
         db.scalars(
@@ -547,7 +865,7 @@ def list_audit(
 ) -> list[AuditEvent]:
     if not 1 <= limit <= 200:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="limit must be 1..200."
         )
     return list(
         db.scalars(select(AuditEvent).order_by(AuditEvent.created_at.desc()).limit(limit)).all()
@@ -605,6 +923,221 @@ def agent_heartbeat(
         ),
         last_seen_at=now,
     )
+
+
+@router.post(
+    "/agent/messages",
+    response_model=ChatMessageRead,
+    status_code=status.HTTP_201_CREATED,
+)
+def submit_agent_chat_message(
+    body: AgentChatMessageCreate,
+    response: Response,
+    agent: Annotated[Agent, Depends(require_agent)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ChatMessage:
+    account = db.scalar(select(Account).where(Account.id == body.account_id).with_for_update())
+    if account is None or not account.enabled or account.agent_id != agent.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+
+    direction = ChatMessageDirection.agent_to_operator
+    existing = _find_idempotent_chat_message(
+        db,
+        account_id=account.id,
+        direction=direction,
+        client_message_id=body.client_message_id,
+        body=body.body,
+    )
+    if existing is not None:
+        response.status_code = status.HTTP_200_OK
+        return existing
+
+    now = utcnow()
+    message = ChatMessage(
+        account_id=account.id,
+        agent_id=agent.id,
+        client_message_id=body.client_message_id,
+        direction=direction.value,
+        body=body.body,
+        state=ChatMessageState.received.value,
+        delivered_at=now,
+    )
+    db.add(message)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        existing = _find_idempotent_chat_message(
+            db,
+            account_id=body.account_id,
+            direction=direction,
+            client_message_id=body.client_message_id,
+            body=body.body,
+        )
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT, detail="Message could not be accepted."
+            ) from None
+        response.status_code = status.HTTP_200_OK
+        return existing
+
+    add_audit(
+        db,
+        actor_type="agent",
+        actor_id=str(agent.id),
+        action="chat_message.received",
+        resource_type="chat_message",
+        resource_id=str(message.id),
+        details={"account_id": str(account.id), "direction": direction.value},
+    )
+    db.commit()
+    db.refresh(message)
+    return message
+
+
+@router.get("/agent/messages/next", response_model=ChatMessagePollResponse)
+def claim_next_chat_message(
+    request: Request,
+    agent: Annotated[Agent, Depends(require_agent)],
+    db: Annotated[Session, Depends(get_db)],
+) -> ChatMessagePollResponse:
+    now = utcnow()
+    maximum_attempts = request.app.state.settings.command_max_attempts
+    expired = db.scalars(
+        select(ChatMessage)
+        .where(
+            ChatMessage.agent_id == agent.id,
+            ChatMessage.direction == ChatMessageDirection.operator_to_agent.value,
+            ChatMessage.state == ChatMessageState.claimed.value,
+            ChatMessage.claim_expires_at <= now,
+            ChatMessage.claim_attempts >= maximum_attempts,
+        )
+        .with_for_update(skip_locked=True)
+    ).all()
+    for message in expired:
+        message.state = ChatMessageState.failed.value
+        message.claim_token_hash = None
+        message.claim_expires_at = None
+        add_audit(
+            db,
+            actor_type="system",
+            actor_id=None,
+            action="chat_message.lease_expired",
+            resource_type="chat_message",
+            resource_id=str(message.id),
+            details={"account_id": str(message.account_id)},
+        )
+
+    eligible = or_(
+        ChatMessage.state == ChatMessageState.queued.value,
+        and_(
+            ChatMessage.state == ChatMessageState.claimed.value,
+            ChatMessage.claim_expires_at <= now,
+        ),
+    )
+    message = db.scalar(
+        select(ChatMessage)
+        .join(Account, Account.id == ChatMessage.account_id)
+        .join(Agent, Agent.id == ChatMessage.agent_id)
+        .where(
+            ChatMessage.agent_id == agent.id,
+            ChatMessage.direction == ChatMessageDirection.operator_to_agent.value,
+            Account.agent_id == agent.id,
+            Account.enabled.is_(True),
+            Agent.revoked_at.is_(None),
+            eligible,
+            ChatMessage.claim_attempts < maximum_attempts,
+        )
+        .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        .with_for_update(skip_locked=True, of=(ChatMessage, Account))
+        .limit(1)
+    )
+    if message is None:
+        if expired:
+            db.commit()
+        return ChatMessagePollResponse(message=None)
+
+    claim_token = secrets.token_urlsafe(32)
+    message.state = ChatMessageState.claimed.value
+    message.claim_attempts += 1
+    message.claim_token_hash = hash_token(claim_token)
+    message.claim_expires_at = now + timedelta(
+        seconds=request.app.state.settings.command_lease_seconds
+    )
+    add_audit(
+        db,
+        actor_type="agent",
+        actor_id=str(agent.id),
+        action="chat_message.claimed",
+        resource_type="chat_message",
+        resource_id=str(message.id),
+        details={"account_id": str(message.account_id), "attempt": message.claim_attempts},
+    )
+    db.commit()
+    return ChatMessagePollResponse(
+        message=AgentChatMessage(
+            id=message.id,
+            account_id=message.account_id,
+            client_message_id=message.client_message_id,
+            body=message.body,
+            claim_token=claim_token,
+            claim_expires_at=message.claim_expires_at,
+        )
+    )
+
+
+@router.post(
+    "/agent/messages/{message_id}/ack",
+    response_class=Response,
+    response_model=None,
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def acknowledge_chat_message(
+    message_id: UUID,
+    body: ChatMessageAckRequest,
+    agent: Annotated[Agent, Depends(require_agent)],
+    db: Annotated[Session, Depends(get_db)],
+) -> None:
+    message = db.scalar(select(ChatMessage).where(ChatMessage.id == message_id).with_for_update())
+    if (
+        message is None
+        or message.agent_id != agent.id
+        or message.direction != ChatMessageDirection.operator_to_agent.value
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Message not found.")
+    if message.state != ChatMessageState.claimed.value or message.claim_token_hash is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Message is not claimed.")
+    expires_at = message.claim_expires_at
+    if expires_at is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Message lease is missing."
+        )
+    if expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=UTC)
+    if expires_at <= utcnow():
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Message lease has expired."
+        )
+    if not hmac.compare_digest(message.claim_token_hash, hash_token(body.claim_token)):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Claim token is stale or invalid."
+        )
+
+    now = utcnow()
+    message.state = ChatMessageState.delivered.value
+    message.claim_token_hash = None
+    message.claim_expires_at = None
+    message.delivered_at = now
+    add_audit(
+        db,
+        actor_type="agent",
+        actor_id=str(agent.id),
+        action="chat_message.delivered",
+        resource_type="chat_message",
+        resource_id=str(message.id),
+        details={"account_id": str(message.account_id)},
+    )
+    db.commit()
 
 
 @router.get("/agent/commands/next", response_model=CommandPollResponse)
@@ -700,7 +1233,12 @@ def claim_next_command(
     )
 
 
-@router.post("/agent/commands/{command_id}/result", status_code=status.HTTP_204_NO_CONTENT)
+@router.post(
+    "/agent/commands/{command_id}/result",
+    response_class=Response,
+    response_model=None,
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def report_command_result(
     command_id: UUID,
     body: CommandResultRequest,

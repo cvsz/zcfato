@@ -6,6 +6,7 @@ contains a small normalized summary; it never returns the source object or any s
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from typing import Any
 
@@ -39,7 +40,7 @@ def detect_authenticated_state(
 def _number(value: Any) -> int | float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    if value < 0 or value != value or value in {float("inf"), float("-inf")}:
+    if value < 0 or (isinstance(value, float) and not math.isfinite(value)):
         return None
     return value
 

@@ -13,7 +13,11 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
+from uuid import UUID
 
+from pydantic import ValidationError
+
+from .schemas import AgentChatMessage
 from .windows_client import WindowsCamfrogClientProvider
 
 
@@ -90,6 +94,55 @@ class ControlPlaneClient:
             message = f"Control-plane request failed ({type(exc).__name__})."
             raise AgentTransportError(message) from None
 
+    def submit_chat_message(
+        self, account_id: str, client_message_id: str, body: str
+    ) -> dict[str, Any]:
+        """Submit a message from this agent for its assigned account."""
+        try:
+            account_id = str(UUID(account_id))
+            client_message_id = str(UUID(client_message_id))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("Account and client message IDs must be UUIDs.") from exc
+        return self.request(
+            "POST",
+            "/agent/messages",
+            {
+                "account_id": account_id,
+                "client_message_id": client_message_id,
+                "body": body,
+            },
+        )
+
+    def poll_chat_message(self) -> dict[str, Any] | None:
+        """Claim one operator message; callers must acknowledge only after delivery."""
+        response = self.request("GET", "/agent/messages/next")
+        if not isinstance(response, dict) or "message" not in response:
+            raise AgentTransportError("Control plane returned an invalid chat response.")
+        message = response.get("message")
+        if message is None:
+            return None
+        if not isinstance(message, dict):
+            raise AgentTransportError("Control plane returned an invalid chat message.")
+        try:
+            validated = AgentChatMessage.model_validate(message)
+        except ValidationError:
+            raise AgentTransportError("Control plane returned an invalid chat message.") from None
+        return validated.model_dump(mode="json")
+
+    def acknowledge_chat_message(self, message_id: str, claim_token: str) -> None:
+        """Acknowledge a claimed message after the receiving client accepts it."""
+        try:
+            message_id = str(UUID(message_id))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("Message ID must be a UUID.") from exc
+        if not isinstance(claim_token, str) or not 32 <= len(claim_token) <= 128:
+            raise ValueError("A valid message claim token is required.")
+        self.request(
+            "POST",
+            f"/agent/messages/{message_id}/ack",
+            {"claim_token": claim_token},
+        )
+
 
 def poll_once(client: ControlPlaneClient, provider: Any) -> bool:
     process_state = getattr(provider, "process_state", None)
@@ -99,16 +152,30 @@ def poll_once(client: ControlPlaneClient, provider: Any) -> bool:
     client.request("POST", "/agent/heartbeat", heartbeat)
     response = client.request("GET", "/agent/commands/next")
     command = (response or {}).get("command")
-    if command is None:
-        return False
+    did_work = False
+    if command is not None:
+        state, code = provider.execute(command)
+        client.request(
+            "POST",
+            f"/agent/commands/{command['id']}/result",
+            {"claim_token": command["claim_token"], "state": state, "code": code},
+        )
+        did_work = True
 
-    state, code = provider.execute(command)
-    client.request(
-        "POST",
-        f"/agent/commands/{command['id']}/result",
-        {"claim_token": command["claim_token"], "state": state, "code": code},
-    )
-    return True
+    receive_chat_message = getattr(provider, "receive_chat_message", None)
+    if callable(receive_chat_message):
+        message = client.poll_chat_message()
+        if message is not None:
+            try:
+                delivered = receive_chat_message(message)
+            except Exception as exc:
+                # Leave the lease unacknowledged so the server can retry without logging content.
+                print(f"Chat delivery failed ({type(exc).__name__}); the lease will expire.")
+            else:
+                if delivered is True:
+                    client.acknowledge_chat_message(message["id"], message["claim_token"])
+                    did_work = True
+    return did_work
 
 
 def main() -> None:

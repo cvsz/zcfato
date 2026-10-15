@@ -11,6 +11,26 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import camfrog_status_gui as gui  # noqa: E402
 
 
+class _WindowsPlatformProxy:
+    """Expose the Windows platform name while delegating other OS helpers."""
+
+    def __init__(self, delegate):
+        self._delegate = delegate
+
+    @property
+    def name(self):
+        return "nt"
+
+    def __getattr__(self, name):
+        return getattr(self._delegate, name)
+
+
+def _enable_windows_mutex_api(monkeypatch):
+    monkeypatch.setattr(gui, "os", _WindowsPlatformProxy(gui.os))
+    monkeypatch.setattr(ctypes, "set_last_error", lambda _error: None, raising=False)
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: 0, raising=False)
+
+
 def test_status_changer_has_ten_slots_and_saves_only_visible_slots():
     assert gui.STATUS_SLOTS == 10
     entries = [f"status {i}" for i in range(1, 11)]
@@ -110,9 +130,9 @@ def test_status_gui_own_window_titles_cover_random_and_marquee_when_class_lookup
         assert gui.is_own_gui_window(own) is True
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows mutex test")
 def test_single_instance_guard_first_acquire_succeeds(monkeypatch):
     """First acquire() succeeds when mutex doesn't exist."""
+    _enable_windows_mutex_api(monkeypatch)
     mock_kernel32 = type("K32", (), {
         "CreateMutexW": staticmethod(lambda *a, **k: 1),
         "CloseHandle": staticmethod(lambda *a: None),
@@ -121,17 +141,16 @@ def test_single_instance_guard_first_acquire_succeeds(monkeypatch):
     mock_kernel32.CreateMutexW.restype = ctypes.c_void_p
     mock_kernel32.CloseHandle.argtypes = ()
     mock_kernel32.CloseHandle.restype = ctypes.c_int
-    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: mock_kernel32)
-    monkeypatch.setattr(ctypes, "get_last_error", lambda: 0)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: mock_kernel32, raising=False)
 
     guard = gui.SingleInstanceGuard("TestMutexFirst")
     assert guard.acquire() is True
     guard.release()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows mutex test")
 def test_single_instance_guard_blocks_second_instance(monkeypatch):
     """Second acquire() returns False when ERROR_ALREADY_EXISTS."""
+    _enable_windows_mutex_api(monkeypatch)
     mock_kernel32 = type("K32", (), {
         "CreateMutexW": staticmethod(lambda *a, **k: 1),
         "CloseHandle": staticmethod(lambda *a: None),
@@ -140,9 +159,9 @@ def test_single_instance_guard_blocks_second_instance(monkeypatch):
     mock_kernel32.CreateMutexW.restype = ctypes.c_void_p
     mock_kernel32.CloseHandle.argtypes = ()
     mock_kernel32.CloseHandle.restype = ctypes.c_int
-    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: mock_kernel32)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *a, **k: mock_kernel32, raising=False)
     errors = [0, 183]
-    monkeypatch.setattr(ctypes, "get_last_error", lambda: errors.pop(0))
+    monkeypatch.setattr(ctypes, "get_last_error", lambda: errors.pop(0), raising=False)
 
     guard = gui.SingleInstanceGuard("TestMutexSecond")
     assert guard.acquire() is True
