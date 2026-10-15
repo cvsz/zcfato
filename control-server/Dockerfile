@@ -10,8 +10,8 @@ COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
 
-RUN python -m pip install --no-cache-dir . \
-    && useradd --system --uid 10001 --create-home app
+RUN python -m pip install --no-cache-dir --root-user-action=ignore . \
+    && useradd --uid 10001 --user-group --no-log-init --create-home --shell /usr/sbin/nologin app
 
 USER 10001:10001
 EXPOSE 8000
