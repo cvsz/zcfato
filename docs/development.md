@@ -4,7 +4,7 @@ This repository contains the Windows feature apps and the separate ZChat Control
 
 ## Desktop apps
 
-- Build on Windows with Python 3.12 x64: run `build.bat` for the eight feature apps, or `full-build.bat` / `full-build.ps1` for the feature apps and LINE app.
+- Build on Windows with Python 3.12 x64: run `build.bat` for the eight Camfrog feature apps, `zchat-client\build.bat` for the standalone ZChat agent chat app, or `full-build.bat` / `full-build.ps1` for all desktop apps.
 - The Windows packaging job runs from the exact pull-request head. A successful local test suite alone does not prove Camfrog UI or live-room behavior.
 - On Linux, `make build` exits with a clear Windows-only message; do not treat it as a successful package build.
 

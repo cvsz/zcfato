@@ -1,0 +1,28 @@
+@echo off
+setlocal EnableExtensions
+cd /d "%~dp0\.."
+
+set "VENV_PY=%CD%\.venv\Scripts\python.exe"
+if not exist "%VENV_PY%" (
+    echo ERROR: Run the repository build.bat first to create .venv.
+    exit /b 1
+)
+
+"%VENV_PY%" -m pip install -r zchat-client\requirements-build.txt
+if errorlevel 1 exit /b 1
+
+"%VENV_PY%" -m py_compile zchat-client\main.py zchat-client\src\zchat_client\__init__.py zchat-client\src\zchat_client\session.py zchat-client\src\zchat_client\ui.py control-server\src\camfrog_control_server\transport.py
+if errorlevel 1 exit /b 1
+
+"%VENV_PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --name zchat-client --distpath dist\zchat-client --workpath build\zchat-client --paths zchat-client\src --paths control-server\src zchat-client\main.py
+if errorlevel 1 exit /b 1
+
+if not exist dist\zchat-client\zchat-client.exe (
+    echo ERROR: dist\zchat-client\zchat-client.exe was not created.
+    exit /b 1
+)
+
+"%VENV_PY%" -c "import hashlib,pathlib; p=pathlib.Path('dist/zchat-client/zchat-client.exe'); digest=hashlib.sha256(p.read_bytes()).hexdigest(); pathlib.Path('dist/zchat-client/SHA256SUMS.txt').write_text(f'{digest}  {p.name}\n',encoding='ascii')"
+if errorlevel 1 exit /b 1
+
+echo Built dist\zchat-client\zchat-client.exe

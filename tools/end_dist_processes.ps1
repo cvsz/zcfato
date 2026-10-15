@@ -12,7 +12,8 @@ $names = @(
     'status-marquee.exe',
     'status-changer.exe',
     'im-autoreply.exe',
-    'web-status.exe'
+    'web-status.exe',
+    'zchat-client.exe'
 )
 
 function Get-ProjectProcesses {

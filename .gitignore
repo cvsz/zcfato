@@ -54,3 +54,6 @@ samsung-*.xml
 docs/Camfrog Status 2009.exe
 presence-evidence/
 presence-evidence.sqlite3*
+
+# Locally installed Camfrog client distribution and access data.
+/camfrog-client/

@@ -254,6 +254,28 @@ def test_agent_token_rotation_returns_one_time_secret_without_changing_assignmen
     assert new_token not in client.get("/api/v1/audit", headers=admin_headers).text
 
 
+def test_chat_session_reads_assignment_without_refreshing_agent_presence(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, _, agent_token, account_id = _provision(api_client)
+
+    with Session(engine) as session:
+        agent = session.scalar(select(Agent).where(Agent.name == "agent-01"))
+        assert agent is not None
+        assert agent.runtime_state == "unknown"
+        assert agent.last_seen_at is None
+
+    response = client.get("/api/v1/agent/chat/session", headers=_headers(agent_token))
+
+    assert response.status_code == 200
+    assert response.json() == {"account_id": account_id}
+    with Session(engine) as session:
+        agent = session.scalar(select(Agent).where(Agent.name == "agent-01"))
+        assert agent is not None
+        assert agent.runtime_state == "unknown"
+        assert agent.last_seen_at is None
+
+
 def test_expired_lease_cannot_submit_result_and_can_be_reclaimed(
     api_client: tuple[TestClient, object, str],
 ) -> None:

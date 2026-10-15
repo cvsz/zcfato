@@ -34,6 +34,7 @@ from .schemas import (
     AccountRead,
     AgentChatMessage,
     AgentChatMessageCreate,
+    AgentChatSessionRead,
     AgentCommand,
     AgentCreate,
     AgentCreated,
@@ -923,6 +924,18 @@ def agent_heartbeat(
         ),
         last_seen_at=now,
     )
+
+
+@router.get("/agent/chat/session", response_model=AgentChatSessionRead)
+def get_agent_chat_session(
+    agent: Annotated[Agent, Depends(require_agent)],
+    db: Annotated[Session, Depends(get_db)],
+) -> AgentChatSessionRead:
+    """Read the active account assignment without refreshing command-agent presence."""
+    account = db.scalar(
+        select(Account).where(Account.agent_id == agent.id, Account.enabled.is_(True))
+    )
+    return AgentChatSessionRead(account_id=account.id if account is not None else None)
 
 
 @router.post(
