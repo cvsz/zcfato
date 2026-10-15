@@ -1,6 +1,8 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0\.."
+call tools\require_non_admin.cmd
+if errorlevel 1 exit /b 1
 
 set "VENV_PY=%CD%\.venv\Scripts\python.exe"
 if not exist "%VENV_PY%" (

@@ -15,7 +15,10 @@ The launcher adds the local `control-server/src` package to the import path. The
 
 ## Build the Windows executable
 
-Run the repository build first to create `.venv`, then build the standalone executable:
+Run these commands from a non-elevated terminal. Build scripts stop early when
+launched as Administrator because PyInstaller does not support administrator
+builds. Run the repository build first to create `.venv`, then build the
+standalone executable:
 
 ```cmd
 build.bat

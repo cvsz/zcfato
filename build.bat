@@ -3,6 +3,9 @@ chcp 65001 >nul
 setlocal EnableExtensions
 cd /d "%~dp0"
 
+call tools\require_non_admin.cmd
+if errorlevel 1 exit /b 1
+
 set "FEATURE_NAME=camfrog-features"
 
 rem ============================================================
