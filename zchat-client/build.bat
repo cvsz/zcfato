@@ -1,14 +1,15 @@
 @echo off
 setlocal EnableExtensions
 cd /d "%~dp0\.."
-call tools\require_non_admin.cmd
-if errorlevel 1 exit /b 1
 
 set "VENV_PY=%CD%\.venv\Scripts\python.exe"
 if not exist "%VENV_PY%" (
     echo ERROR: Run the repository build.bat first to create .venv.
     exit /b 1
 )
+
+"%VENV_PY%" tools\require_non_admin.py
+if errorlevel 1 exit /b 1
 
 if not exist "zchat-client\app.ico" (
     echo ERROR: zchat-client\app.ico is required to build the application icon.
