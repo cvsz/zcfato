@@ -1,5 +1,23 @@
 version: 2
 updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: pip
+    directory: /control-server
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: pip
+    directory: /line
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
   - package-ecosystem: github-actions
     directory: /
     schedule:
@@ -8,6 +26,12 @@ updates:
 
   - package-ecosystem: docker
     directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: docker
+    directory: /control-server
     schedule:
       interval: weekly
     open-pull-requests-limit: 10

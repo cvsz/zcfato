@@ -1,5 +1,7 @@
 """Tests for the repository validator that do not need the real tree."""
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -62,6 +64,29 @@ def test_clean_prunes_generated_directories_before_recursive_scans():
     )
     assert "-type d -name '.pytest_cache' -prune -exec rm -rf" in commands[1]
     assert "-type d -name '.ruff_cache' -prune -exec rm -rf" in commands[2]
+    assert all("2>/dev/null" not in command and "|| true" not in command for command in commands)
+
+
+def test_clean_returns_failure_when_a_filesystem_scan_fails(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_find = fake_bin / "find"
+    fake_find.write_text("#!/bin/sh\nexit 73\n", encoding="utf-8")
+    fake_find.chmod(0o755)
+    environment = os.environ.copy()
+    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+
+    result = subprocess.run(
+        ["make", "-f", str(validate_repo.ROOT / "Makefile"), "clean"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode != 0
+    assert "Error 73" in result.stderr
 
 
 def test_build_and_dist_exclusions(tmp_path, monkeypatch):

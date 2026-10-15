@@ -6792,7 +6792,7 @@ def _cookies_to_string(cookies):
 # packaged app checks the same repo's latest release and downloads only its
 # own executable asset, verified against the release's SHA256SUMS.txt.
 APP_VERSION = "2.19.2"
-GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
+GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zchat")
 UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
 
 

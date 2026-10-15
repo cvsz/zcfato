@@ -6,6 +6,7 @@ ZChat Control Server is an independent ZEAZDEV product for operator-managed acco
 
 - PostgreSQL-backed FastAPI service with Alembic migrations, `/healthz`, and database-aware `/readyz`.
 - Bootstrap admin token exchanged for a short-lived HS256 dashboard JWT. The dashboard keeps the JWT in memory only. Agent bearer tokens are scoped to one agent, issued once, and stored as SHA-256 hashes.
+- Account-scoped operator/agent chat transport with message-body validation, idempotency keys, paginated history, leased agent polling, and explicit delivery acknowledgements. This is an internal ZChat control-plane protocol, not a Camfrog network chat protocol.
 - Same-origin dashboard for agents, accounts, snapshots, commands, Cloud Bot status, imported Store metadata, and audit history.
 - Account-to-agent one-to-one assignment, heartbeat, leased command queue, command results, retry limit, revocation, and append-only-by-API audit events.
 - Opt-in Windows provider for launching/stopping its own Camfrog process and opening official `join_room`, `add`, and `im` URI handlers. URI handoff means Windows accepted the URI; it does not prove Camfrog joined a room or completed an action.
@@ -24,7 +25,7 @@ The available browser and source observations confirm the authenticated-state ma
 
 Do not treat this subproject as production-ready. The rate limiter is per process and is not shared across workers. Windows process/URI behavior has unit coverage but no Windows runtime acceptance. Public status-image semantics, Cloud Bot RPC envelope, Store response, multi-ID isolation, PostgreSQL deployment, secret rotation, backup/restore, and soak evidence remain open.
 
-Commands are delivered at least once after lease expiry. An action may have completed just before an agent lost its lease, so future providers must define idempotency and operator reconciliation. Lease expiry cleanup is agent-scoped, and revoking an agent immediately cancels any outstanding pending or claimed commands while invalidating stored claim hashes. The control server stores no Camfrog passwords, browser profiles, session cookies, CSRF values, payment tokens, CAPTCHA answers, or room access keys.
+Commands are delivered at least once after lease expiry. An action may have completed just before an agent lost its lease, so future providers must define idempotency and operator reconciliation. Lease expiry cleanup is agent-scoped, and revoking an agent immediately cancels any outstanding pending or claimed commands while invalidating stored claim hashes. The service does not collect Camfrog passwords, browser profiles, session cookies, CSRF values, payment tokens, CAPTCHA answers, or room access keys as structured account fields. Message bodies are user-provided opaque text and may still contain sensitive content; follow the chat data policy below.
 
 ## Local setup
 
@@ -63,9 +64,14 @@ All routes are under `/api/v1` unless shown otherwise.
 | `POST /accounts`, `GET /accounts` | Admin JWT | Create and list account metadata |
 | `PATCH /accounts/{id}/agent` | Admin JWT | Assign or unassign one account from an agent |
 | `POST /commands`, `GET /commands` | Admin JWT | Queue and inspect commands |
+| `POST /messages` | Admin JWT | Queue an operator message for an account's assigned agent |
+| `GET /accounts/{id}/messages` | Admin JWT | Read chronological account history; use the oldest ID in a page as `before` to fetch older messages |
 | `GET /audit` | Admin JWT | Read audit history |
 | `POST /agent/heartbeat`, `GET /agent/commands/next` | Agent token | Heartbeat and claim a leased command |
 | `POST /agent/commands/{id}/result` | Agent token | Complete a command using its one-time claim token |
+| `POST /agent/messages` | Agent token | Submit a message for the agent's assigned account |
+| `GET /agent/messages/next` | Agent token | Claim the next operator message with a bounded lease |
+| `POST /agent/messages/{id}/ack` | Agent token | Acknowledge delivery using the claim token |
 | `POST /agent/accounts/snapshot` | Agent token | Submit a sanitized profile/auth/friends snapshot |
 | `GET /accounts/{id}/profile`, `GET /accounts/{id}/friends`, `GET /accounts/{id}/runtime` | Admin JWT | Read snapshots reported by the assigned agent |
 | `GET /accounts/{id}/auth-state`, `GET /presence/{nickname}` | Admin JWT | Read independent auth and presence state |
@@ -82,6 +88,14 @@ Use `python -m camfrog_control_server.agent --help` to review the supported argu
 
 The remote server URL must use HTTPS. Plain HTTP is accepted only for loopback development addresses. The sample rejects redirects, does not persist tokens, and uses jittered exponential backoff for transport failures. `launch`, `stop`, `restart`, `join_room`, `add_friend`, and `open_im` are supported by the local provider. `leave_room` remains disabled until an official action is verified.
 
+## Internal chat transport
+
+Operator messages use `POST /api/v1/messages` with an account ID, a client-generated UUID `client_message_id`, and a UTF-8 text body of 1 to 4,000 characters. The server scopes each message to the account's currently assigned, enabled agent. Repeating the same ID and body returns the original message; reusing the ID with different content returns `409 Conflict`.
+
+Agents claim operator messages from `GET /api/v1/agent/messages/next`. A claim token is returned once, stored only as a hash, and must be supplied to the acknowledgement endpoint. Expired claims become eligible for bounded redelivery; delivery is therefore at least once, and agent-side handlers must deduplicate using the message ID before acknowledging. Exhausted claims become failed. Agents submit messages in the reverse direction through `POST /api/v1/agent/messages`, using a client-generated idempotency ID. Admin history is account-scoped, returned oldest to newest within each page, and paginated by passing the oldest message ID in the current page as `before`.
+
+The HTTP contract, agent transport helpers, and API tests are implemented. The reference polling loop consumes messages only when a provider exposes `receive_chat_message`; the current Windows Camfrog adapter does not implement that method or inject messages into the desktop client. A claim/ack proves that a provider accepted the message only; it does not prove that a Camfrog user saw or sent it. No Camfrog private wire protocol is implemented or claimed.
+
 ## Deployment boundaries
 
 - Put the API behind TLS and restrict network access to the operator dashboard/API and registered agents.
@@ -92,6 +106,7 @@ The remote server URL must use HTTPS. Plain HTTP is accepted only for loopback d
 - Set aggregate SQLAlchemy pool limits against the database's actual connection budget before increasing worker count.
 - The in-process limiter does not coordinate across multiple API workers or replicas; production multi-instance deployments need a shared limiter such as Redis before scaling out.
 - Gold nickname changes, settings mutations, Store checkout, and Cloud Bot control operations remain disabled. Future sensitive actions must use the official flow, show exact changes/costs, and require fresh explicit confirmation.
+- Chat bodies are stored as plaintext in PostgreSQL. Do not send passwords, session material, payment data, CAPTCHA responses, or other secrets through this API. Define retention, backup access, and deletion policy before production use.
 
 ## Validation
 
