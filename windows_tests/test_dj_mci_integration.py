@@ -6,11 +6,15 @@ from pathlib import Path
 
 import pytest
 
+MCIERR_WAVE_OUTPUTSUNSUITABLE = 326
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import camfrog_music_gui as c
 
 
-def test_dj_windows_mci_reads_wav_duration(tmp_path, caplog):
+def test_dj_windows_mci_reads_wav_duration_or_reports_missing_output_device(
+    tmp_path, caplog
+):
     if sys.platform != "win32":
         pytest.fail("This integration test must run on Windows.")
 
@@ -24,8 +28,11 @@ def test_dj_windows_mci_reads_wav_duration(tmp_path, caplog):
     with caplog.at_level("DEBUG", logger="camfrog_music"):
         duration = c.dj_audio_duration(song)
 
-    assert duration is not None, (
-        "[DBG-MCI-4f1c] The native Windows MCI backend could not read the WAV file. "
-        f"MCI diagnostic: {caplog.text.strip() or 'no debug detail was recorded'}"
-    )
+    if duration is None:
+        assert f"MCI command failed ({MCIERR_WAVE_OUTPUTSUNSUITABLE})" in caplog.text, (
+            "Native MCI failed for a reason other than the known missing waveform "
+            f"output device: {caplog.text.strip() or 'no debug detail was recorded'}"
+        )
+        return
+
     assert duration == pytest.approx(0.1, abs=0.02)

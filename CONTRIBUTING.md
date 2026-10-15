@@ -43,7 +43,7 @@ make validate-template
 
 Do not merge from an older green commit after the PR head changes. Required checks must pass for the current exact head.
 
-Windows-only integration checks live in `windows_tests/` and run from `build.bat`. Run the Windows build workflow to validate the native MCI audio path; the portable suite uses mocked MCI commands.
+Windows-only integration checks live in `windows_tests/` and run from `build.bat`. The native MCI duration test verifies WAV duration when a compatible waveform output device is available. On headless Windows runners without one, it verifies that MCI reports the expected unavailable-device error and the application handles it gracefully. Run the test on a Windows desktop with audio output to verify the successful duration path; the portable suite uses mocked MCI commands.
 
 Repository-administration changes require an authenticated admin identity and read-back verification. Supply the exact target repository, branch, and each required status-check name; the helper deliberately has no built-in repository or check defaults:
 
