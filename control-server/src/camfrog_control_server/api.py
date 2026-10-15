@@ -445,14 +445,17 @@ def assign_account_agent(
             detail="Account has a claimed command; wait for it to finish before reassignment.",
         )
 
+    now = utcnow()
     claimed_message = db.scalar(
         select(ChatMessage.id)
         .where(
             ChatMessage.account_id == account.id,
             ChatMessage.direction == ChatMessageDirection.operator_to_agent.value,
             ChatMessage.state == ChatMessageState.claimed.value,
+            ChatMessage.claim_expires_at > now,
         )
         .limit(1)
+        .with_for_update()
     )
     if claimed_message is not None:
         raise HTTPException(
@@ -462,6 +465,18 @@ def assign_account_agent(
                 "before reassignment."
             ),
         )
+
+    expired_claimed_messages = db.scalars(
+        select(ChatMessage)
+        .where(
+            ChatMessage.account_id == account.id,
+            ChatMessage.direction == ChatMessageDirection.operator_to_agent.value,
+            ChatMessage.state == ChatMessageState.claimed.value,
+            ChatMessage.claim_expires_at <= now,
+        )
+        .order_by(ChatMessage.created_at.asc(), ChatMessage.id.asc())
+        .with_for_update()
+    ).all()
 
     previous_agent_id = account.agent_id
     if previous_agent_id == body.agent_id:
@@ -480,12 +495,14 @@ def assign_account_agent(
             ChatMessage.state == ChatMessageState.queued.value,
         )
     ).all()
-    now = utcnow()
     for command in pending:
         command.state = CommandState.canceled.value
         command.finished_at = now
-    for message in pending_messages:
+    canceled_messages = [*pending_messages, *expired_claimed_messages]
+    for message in canceled_messages:
         message.state = ChatMessageState.canceled.value
+        message.claim_token_hash = None
+        message.claim_expires_at = None
     account.agent_id = body.agent_id
     add_audit(
         db,
@@ -499,6 +516,7 @@ def assign_account_agent(
             "agent_id": str(body.agent_id) if body.agent_id else None,
             "pending_commands_canceled": len(pending),
             "pending_messages_canceled": len(pending_messages),
+            "expired_claimed_messages_canceled": len(expired_claimed_messages),
         },
     )
     try:

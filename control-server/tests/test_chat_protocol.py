@@ -267,6 +267,61 @@ def test_account_reassignment_and_agent_revocation_preserve_message_ownership(
     )
 
 
+def test_reassignment_cancels_expired_chat_claim_and_invalidates_token(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, admin_token = api_client
+    original_agent, account = _provision_account(client, admin_token, "expired-assignment")
+    admin_headers = _headers(admin_token)
+    replacement_agent = client.post(
+        "/api/v1/agents",
+        headers=admin_headers,
+        json={"name": "chat-agent-expired-replacement"},
+    ).json()
+    queued = client.post(
+        "/api/v1/messages",
+        headers=admin_headers,
+        json={
+            "account_id": account["id"],
+            "client_message_id": "6e35ac75-48f0-49b3-9f0b-20f4da5dc662",
+            "body": "Cancel the expired claim during reassignment",
+        },
+    )
+    claimed = client.get(
+        "/api/v1/agent/messages/next", headers=_headers(original_agent["agent_token"])
+    ).json()["message"]
+
+    with Session(engine) as session:
+        message = session.get(ChatMessage, UUID(queued.json()["id"]))
+        assert message is not None
+        message.claim_expires_at = utcnow() - timedelta(seconds=1)
+        session.commit()
+
+    reassigned = client.patch(
+        f"/api/v1/accounts/{account['id']}/agent",
+        headers=admin_headers,
+        json={"agent_id": replacement_agent["id"]},
+    )
+    assert reassigned.status_code == 200
+    assert reassigned.json()["agent_id"] == replacement_agent["id"]
+
+    history = client.get(f"/api/v1/accounts/{account['id']}/messages", headers=admin_headers).json()
+    assert history[0]["state"] == "canceled"
+    assert history[0]["agent_id"] == original_agent["id"]
+    with Session(engine) as session:
+        message = session.get(ChatMessage, UUID(claimed["id"]))
+        assert message is not None
+        assert message.claim_token_hash is None
+        assert message.claim_expires_at is None
+
+    stale_ack = client.post(
+        f"/api/v1/agent/messages/{claimed['id']}/ack",
+        headers=_headers(original_agent["agent_token"]),
+        json={"claim_token": claimed["claim_token"]},
+    )
+    assert stale_ack.status_code == 409
+
+
 def test_expired_chat_leases_redeliver_and_fail_after_the_retry_limit(
     api_client: tuple[TestClient, object, str],
 ) -> None:
