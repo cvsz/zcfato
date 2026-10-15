@@ -3,8 +3,10 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
-import package  # noqa: E402
+import package
 
 
 def test_sha256_matches_hashlib(tmp_path):
@@ -61,6 +63,18 @@ def test_zip_contains_files_with_relative_paths(tmp_path):
         assert zf.testzip() is None
 
 
+def test_zip_inside_dist_does_not_include_its_temporary_file(tmp_path):
+    dist = tmp_path / "dist"
+    dist.mkdir()
+    (dist / "input.txt").write_text("payload")
+
+    archive = package.make_zip(dist, dist / "bundle.zip")
+
+    with zipfile.ZipFile(archive) as zf:
+        assert zf.namelist() == ["input.txt"]
+        assert zf.testzip() is None
+
+
 def test_zip_overwrites_existing(tmp_path):
     d = tmp_path / "dist"
     d.mkdir()
@@ -71,6 +85,104 @@ def test_zip_overwrites_existing(tmp_path):
     assert zipfile.is_zipfile(z)
 
 
+def test_zip_failure_preserves_existing_archive(tmp_path, monkeypatch):
+    d = tmp_path / "dist"
+    d.mkdir()
+    (d / "a.txt").write_text("new content")
+    target = tmp_path / "archive.zip"
+    target.write_bytes(b"previous archive")
+
+    def fail_write(*args, **kwargs):
+        raise OSError("simulated archive write failure")
+
+    monkeypatch.setattr(package.zipfile.ZipFile, "write", fail_write)
+    with pytest.raises(OSError, match="simulated archive write failure"):
+        package.make_zip(d, target)
+
+    assert target.read_bytes() == b"previous archive"
+    assert list(tmp_path.glob(".archive.zip.*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    "name", ["../outside", "..\\outside", "/absolute", "", "x" * 65]
+)
+def test_write_sums_rejects_unsafe_package_names(tmp_path, name):
+    with pytest.raises(ValueError, match="package name"):
+        package.write_sums(tmp_path, name)
+
+
+def test_main_rejects_traversal_before_touching_artifacts(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "repo"
+    dist = root / "dist"
+    dist.mkdir(parents=True)
+    sentinel = tmp_path / "sentinel-windows.zip"
+    sentinel.write_bytes(b"keep this file")
+    monkeypatch.setattr(package, "ROOT", root)
+    monkeypatch.setattr(package, "DIST", dist)
+
+    with pytest.raises(SystemExit) as exc:
+        package.main(["../sentinel"])
+
+    assert exc.value.code == 2
+    assert "package name" in capsys.readouterr().err
+    assert sentinel.read_bytes() == b"keep this file"
+
+
+def test_write_sums_rejects_symlink_executables(tmp_path, monkeypatch):
+    executable = tmp_path / "app.exe"
+    executable.write_bytes(b"not a symlink on disk")
+    original = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda path: path == executable or original(path))
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        package.write_sums(tmp_path, "app")
+
+
+def test_feature_package_rejects_extra_symlink_executable(tmp_path, monkeypatch):
+    for relative in package.FEATURE_EXECUTABLES:
+        executable = tmp_path / relative
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(relative.encode())
+    extra = tmp_path / "legacy.exe"
+    extra.write_bytes(b"untrusted target")
+    original = Path.is_symlink
+    monkeypatch.setattr(
+        Path,
+        "is_symlink",
+        lambda path: path == extra or original(path),
+    )
+
+    with pytest.raises(ValueError, match="symbolic link.*legacy.exe"):
+        package.write_sums(tmp_path, "camfrog-features")
+
+
+@pytest.mark.parametrize("previous_sums", [None, b"previous checksums\n"])
+def test_main_restores_checksums_when_zip_creation_fails(
+    tmp_path, monkeypatch, capsys, previous_sums
+):
+    root = tmp_path / "repo"
+    dist = root / "dist"
+    dist.mkdir(parents=True)
+    (dist / "app.exe").write_bytes(b"new executable")
+    sums_path = dist / "SHA256SUMS.txt"
+    if previous_sums is not None:
+        sums_path.write_bytes(previous_sums)
+    monkeypatch.setattr(package, "ROOT", root)
+    monkeypatch.setattr(package, "DIST", dist)
+
+    def fail_zip(*args, **kwargs):
+        raise OSError("simulated archive failure")
+
+    monkeypatch.setattr(package, "make_zip", fail_zip)
+
+    assert package.main(["app"]) == 1
+    assert "simulated archive failure" in capsys.readouterr().out
+    if previous_sums is None:
+        assert not sums_path.exists()
+    else:
+        assert sums_path.read_bytes() == previous_sums
+
+
 def test_icon_is_valid_multisize():
     import struct
     d = (Path(__file__).resolve().parent.parent / "app.ico").read_bytes()
@@ -79,10 +191,10 @@ def test_icon_is_valid_multisize():
 
 
 # ---- audit regressions ----
-import json  # noqa: E402
+import json
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import camfrog_auto as ca  # noqa: E402
+import camfrog_auto as ca
 
 
 def test_load_cfg_accepts_utf8_bom(tmp_path):
