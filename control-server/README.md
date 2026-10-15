@@ -109,6 +109,7 @@ The HTTP contract, agent transport helpers, and API tests are implemented. The r
 - Keep request-body logging disabled at the reverse proxy. The application logs method, path, status, request id, and duration only.
 - Keep the agent token local to its assigned Windows machine. The sample's interactive prompt does not provide non-interactive Windows secret-store integration.
 - Use a dedicated PostgreSQL role with access only to this database. Back up and protect audit and account metadata according to your retention policy.
+- Stop the control-server API before applying migration `0006_account_nickname_claims`. The migration takes a PostgreSQL exclusive lock on `accounts` while it backfills nickname claims; keep legacy API writers stopped until the new server version is running.
 - Set aggregate SQLAlchemy pool limits against the database's actual connection budget before increasing worker count.
 - The in-process limiter does not coordinate across multiple API workers or replicas; production multi-instance deployments need a shared limiter such as Redis before scaling out.
 - Gold nickname changes, settings mutations, Store checkout, and Cloud Bot control operations remain disabled. Future sensitive actions must use the official flow, show exact changes/costs, and require fresh explicit confirmation.

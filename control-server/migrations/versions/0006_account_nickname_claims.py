@@ -26,6 +26,13 @@ def _nickname_key(value: str) -> str:
 
 
 def upgrade() -> None:
+    connection = op.get_bind()
+    if connection.dialect.name == "postgresql":
+        # Keep legacy account writers from committing between the backfill scan
+        # and the constraint that requires every account to have a claim key.
+        # The lock is held until Alembic commits this migration transaction.
+        connection.exec_driver_sql("LOCK TABLE accounts IN ACCESS EXCLUSIVE MODE")
+
     op.create_table(
         "account_nickname_claims",
         sa.Column("nickname_key", sa.String(length=64), nullable=False),
@@ -33,7 +40,6 @@ def upgrade() -> None:
     )
 
     op.add_column("accounts", sa.Column("nickname_key", sa.String(length=64), nullable=True))
-    connection = op.get_bind()
     accounts = sa.table(
         "accounts",
         sa.column("id", sa.Uuid()),
