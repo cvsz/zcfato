@@ -211,7 +211,7 @@ rem ============================================================
 echo.
 echo === BUILD ROOM CONTROL ===
 
-"%VENV_PY%" -m PyInstaller ^
+"%VENV_PY%" -W "ignore:invalid escape sequence:SyntaxWarning" -m PyInstaller ^
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\room-control --workpath build\room-control ^
     --name room-control %ICONARG% ^
@@ -223,7 +223,7 @@ if errorlevel 1 goto :fail
 echo.
 echo === BUILD PRIVATE CHAT WINDOW MANAGER ===
 
-"%VENV_PY%" -m PyInstaller ^
+"%VENV_PY%" -W "ignore:invalid escape sequence:SyntaxWarning" -m PyInstaller ^
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\chat-im-private --workpath build\chat-im-private ^
     --name chat-im-private %ICONARG% ^
@@ -235,7 +235,7 @@ if errorlevel 1 goto :fail
 echo.
 echo === BUILD RANDOM STATUS ===
 
-"%VENV_PY%" -m PyInstaller ^
+"%VENV_PY%" -W "ignore:invalid escape sequence:SyntaxWarning" -m PyInstaller ^
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\status-random --workpath build\status-random ^
     --name status-random %ICONARG% ^
@@ -247,7 +247,7 @@ if errorlevel 1 goto :fail
 echo.
 echo === BUILD MARQUEE STATUS ===
 
-"%VENV_PY%" -m PyInstaller ^
+"%VENV_PY%" -W "ignore:invalid escape sequence:SyntaxWarning" -m PyInstaller ^
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\status-marquee --workpath build\status-marquee ^
     --name status-marquee %ICONARG% ^
@@ -259,7 +259,7 @@ if errorlevel 1 goto :fail
 echo.
 echo === BUILD COMBINED STATUS CHANGER ===
 
-"%VENV_PY%" -m PyInstaller ^
+"%VENV_PY%" -W "ignore:invalid escape sequence:SyntaxWarning" -m PyInstaller ^
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\status-changer --workpath build\status-changer ^
     --name status-changer %ICONARG% ^
@@ -271,7 +271,7 @@ if errorlevel 1 goto :fail
 echo.
 echo === BUILD PRIVATE IM AUTO-REPLY ===
 
-"%VENV_PY%" -m PyInstaller ^
+"%VENV_PY%" -W "ignore:invalid escape sequence:SyntaxWarning" -m PyInstaller ^
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\im-autoreply --workpath build\im-autoreply ^
     --name im-autoreply %ICONARG% ^
@@ -294,7 +294,7 @@ if errorlevel 1 goto :fail
 
 echo === BUILD MUSIC DJ ===
 
-"%VENV_PY%" -m PyInstaller ^
+"%VENV_PY%" -W "ignore:invalid escape sequence:SyntaxWarning" -m PyInstaller ^
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\music-dj --workpath build\music-dj ^
     --name music-dj %ICONARG% ^
