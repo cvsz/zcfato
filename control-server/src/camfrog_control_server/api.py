@@ -254,14 +254,26 @@ def revoke_agent(
     now = utcnow()
     agent.revoked_at = now
     agent.runtime_state = AgentRuntimeState.disconnected.value
-    pending = db.scalars(
-        select(ControlCommand).where(
+    outstanding = db.scalars(
+        select(ControlCommand)
+        .where(
             ControlCommand.agent_id == agent.id,
-            ControlCommand.state == CommandState.pending.value,
+            ControlCommand.state.in_(
+                (CommandState.pending.value, CommandState.claimed.value)
+            ),
         )
+        .with_for_update()
     ).all()
-    for command in pending:
+    pending_canceled = 0
+    claimed_canceled = 0
+    for command in outstanding:
+        if command.state == CommandState.pending.value:
+            pending_canceled += 1
+        else:
+            claimed_canceled += 1
         command.state = CommandState.canceled.value
+        command.claim_token_hash = None
+        command.claim_expires_at = None
         command.finished_at = now
 
     add_audit(
@@ -271,7 +283,10 @@ def revoke_agent(
         action="agent.revoked",
         resource_type="agent",
         resource_id=str(agent.id),
-        details={"pending_commands_canceled": len(pending)},
+        details={
+            "pending_commands_canceled": pending_canceled,
+            "claimed_commands_canceled": claimed_canceled,
+        },
     )
     db.commit()
     db.refresh(agent)
@@ -606,6 +621,7 @@ def claim_next_command(
     expired = db.scalars(
         select(ControlCommand)
         .where(
+            ControlCommand.agent_id == agent.id,
             ControlCommand.state == CommandState.claimed.value,
             ControlCommand.claim_expires_at <= now,
             ControlCommand.claim_attempts >= maximum_attempts,
