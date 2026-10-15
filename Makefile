@@ -50,7 +50,8 @@ security:
 	$(PYTHON) -m pip_audit --local --skip-editable
 
 clean:
-	find . \( -name .git -o -name venv -o -name .venv \) -prune -o -type d -name '__pycache__' -exec rm -rf {} + 2>/dev/null || true
-	find . \( -name .git -o -name venv -o -name .venv \) -prune -o -type d -name '.pytest_cache' -exec rm -rf {} + 2>/dev/null || true
+	find . \( -name .git -o -name .pytest_cache -o -name .ruff_cache -o -name .venv -o -name venv -o -name node_modules -o -name build -o -name dist \) -prune -o -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
+	find . \( -name .git -o -name .ruff_cache -o -name .venv -o -name venv -o -name node_modules -o -name build -o -name dist -o -name __pycache__ \) -prune -o -type d -name '.pytest_cache' -prune -exec rm -rf {} + 2>/dev/null || true
+	find . \( -name .git -o -name .pytest_cache -o -name .venv -o -name venv -o -name node_modules -o -name build -o -name dist -o -name __pycache__ \) -prune -o -type d -name '.ruff_cache' -prune -exec rm -rf {} + 2>/dev/null || true
 
 ci: validate-template format lint test security
