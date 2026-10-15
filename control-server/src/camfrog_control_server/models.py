@@ -69,6 +69,14 @@ class Account(Base):
     )
 
 
+class AccountNicknameClaim(Base):
+    """Unique, normalized nickname reservations that preserve legacy account rows."""
+
+    __tablename__ = "account_nickname_claims"
+
+    nickname_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+
+
 class ControlCommand(Base):
     __tablename__ = "commands"
     __table_args__ = (

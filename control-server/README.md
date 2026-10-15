@@ -9,6 +9,7 @@ ZChat Control Server is an independent ZEAZDEV product for operator-managed acco
 - Account-scoped operator/agent chat transport with message-body validation, idempotency keys, paginated history, leased agent polling, and explicit delivery acknowledgements. This is an internal ZChat control-plane protocol, not a Camfrog network chat protocol.
 - Same-origin dashboard for agents, accounts, snapshots, commands, Cloud Bot status, imported Store metadata, and audit history.
 - Account-to-agent one-to-one assignment, heartbeat, leased command queue, command results, retry limit, revocation, and append-only-by-API audit events.
+- Case-insensitive, Unicode-normalized account nickname claims prevent new duplicate account records. Migration `0006_account_nickname_claims` reserves existing names without deleting or rewriting legacy account rows; duplicate legacy rows therefore remain visible until an operator reconciles them.
 - Opt-in Windows provider for launching/stopping its own Camfrog process and opening official `join_room`, `add`, and `im` URI handlers. URI handoff means Windows accepted the URI; it does not prove Camfrog joined a room or completed an action.
 - Account-scoped process and room snapshots are separate from agent, login, and human presence states. Process state only reflects the child process launched by that agent; missing or stale reports become `unknown`.
 - Allowlisted profile projection and auth-state detector using `.nav-user-logged`, `external_data.type`, login-form visibility, and a CSRF-present boolean. Raw `external_data`, cookies, CSRF values, payment data, and CAPTCHA responses are discarded.
@@ -70,7 +71,7 @@ All routes are under `/api/v1` unless shown otherwise.
 | `GET /accounts/{id}/messages` | Admin JWT | Read chronological account history; use the oldest ID in a page as `before` to fetch older messages |
 | `GET /audit` | Admin JWT | Read audit history |
 | `POST /agent/heartbeat`, `GET /agent/commands/next` | Agent token | Heartbeat and claim a leased command |
-| `GET /agent/chat/session` | Agent token | Read the account assignment without refreshing command-agent presence |
+| `GET /agent/chat/session` | Agent token | Read the assigned account nickname and a read-only subscription summary without refreshing command-agent presence |
 | `POST /agent/commands/{id}/result` | Agent token | Complete a command using its one-time claim token |
 | `POST /agent/messages` | Agent token | Submit a message for the agent's assigned account |
 | `GET /agent/messages/next` | Agent token | Claim the next operator message with a bounded lease |
@@ -98,6 +99,8 @@ Operator messages use `POST /api/v1/messages` with an account ID, a client-gener
 Agents claim operator messages from `GET /api/v1/agent/messages/next`. A claim token is returned once, stored only as a hash, and must be supplied to the acknowledgement endpoint. Expired claims become eligible for bounded redelivery; delivery is therefore at least once, and agent-side handlers must deduplicate using the message ID before acknowledging. Exhausted claims become failed. Agents submit messages in the reverse direction through `POST /api/v1/agent/messages`, using a client-generated idempotency ID. Admin history is account-scoped, returned oldest to newest within each page, and paginated by passing the oldest message ID in the current page as `before`.
 
 The HTTP contract, agent transport helpers, and API tests are implemented. The reference polling loop consumes messages only when a provider exposes `receive_chat_message`; the current Windows Camfrog adapter does not implement that method or inject messages into the desktop client. A claim/ack proves that a provider accepted the message only; it does not prove that a Camfrog user saw or sent it. No Camfrog private wire protocol is implemented or claimed.
+
+`GET /agent/chat/session` returns only the requesting agent's enabled account nickname and a sanitized subscription summary (tier, evidence source, record type, and active overlay expiry). Evidence notes and other accounts' subscription records are not exposed. The summary is a control-plane record, not live Camfrog verification and not an entitlement grant.
 
 ## Deployment boundaries
 

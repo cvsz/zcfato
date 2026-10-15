@@ -8,13 +8,18 @@ if not exist "%VENV_PY%" (
     exit /b 1
 )
 
+if not exist "zchat-client\app.ico" (
+    echo ERROR: zchat-client\app.ico is required to build the application icon.
+    exit /b 1
+)
+
 "%VENV_PY%" -m pip install -r zchat-client\requirements-build.txt
 if errorlevel 1 exit /b 1
 
 "%VENV_PY%" -m py_compile zchat-client\main.py zchat-client\src\zchat_client\__init__.py zchat-client\src\zchat_client\session.py zchat-client\src\zchat_client\ui.py control-server\src\camfrog_control_server\transport.py
 if errorlevel 1 exit /b 1
 
-"%VENV_PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --name zchat-client --distpath dist\zchat-client --workpath build\zchat-client --paths zchat-client\src --paths control-server\src zchat-client\main.py
+"%VENV_PY%" -m PyInstaller --noconfirm --clean --onefile --windowed --name zchat-client --icon zchat-client\app.ico --add-data "zchat-client\app.ico;." --distpath dist\zchat-client --workpath build\zchat-client --paths zchat-client\src --paths control-server\src zchat-client\main.py
 if errorlevel 1 exit /b 1
 
 if not exist dist\zchat-client\zchat-client.exe (

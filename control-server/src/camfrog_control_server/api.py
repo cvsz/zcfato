@@ -15,8 +15,10 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .account_identity import account_nickname_key
 from .models import (
     Account,
+    AccountNicknameClaim,
     AccountRuntimeSnapshot,
     Agent,
     AuditEvent,
@@ -25,6 +27,8 @@ from .models import (
     ControlCommand,
     ProfileSnapshot,
     PurchaseIntent,
+    SubscriptionEntitlement,
+    SubscriptionOverlay,
     utcnow,
 )
 from .schemas import (
@@ -64,6 +68,7 @@ from .security import (
     new_agent_token,
     verify_dashboard_token,
 )
+from .subscriptions import effective_subscription
 
 router = APIRouter()
 bearer = HTTPBearer(auto_error=False)
@@ -420,6 +425,22 @@ def create_account(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="Agent is already assigned to another account.",
             )
+
+    nickname_key = account_nickname_key(body.nickname)
+    if db.get(AccountNicknameClaim, nickname_key) is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account nickname is already registered.",
+        )
+    db.add(AccountNicknameClaim(nickname_key=nickname_key))
+    try:
+        db.flush()
+    except IntegrityError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account nickname is already registered.",
+        ) from exc
 
     account = Account(nickname=body.nickname, agent_id=body.agent_id, enabled=body.enabled)
     agent_token = _rotate_agent_token(agent) if agent is not None else None
@@ -935,7 +956,33 @@ def get_agent_chat_session(
     account = db.scalar(
         select(Account).where(Account.agent_id == agent.id, Account.enabled.is_(True))
     )
-    return AgentChatSessionRead(account_id=account.id if account is not None else None)
+    if account is None:
+        return AgentChatSessionRead(account_id=None)
+
+    baseline = db.get(SubscriptionEntitlement, account.id)
+    overlays = list(
+        db.scalars(
+            select(SubscriptionOverlay)
+            .where(SubscriptionOverlay.account_id == account.id)
+            .order_by(SubscriptionOverlay.starts_at)
+        ).all()
+    )
+    tier, source, active_overlay = effective_subscription(baseline, overlays)
+    if source == "overlapping_overlays":
+        evidence_source = "unknown"
+    elif active_overlay is not None:
+        evidence_source = active_overlay.evidence_source
+    else:
+        evidence_source = baseline.evidence_source if baseline is not None else "unknown"
+
+    return AgentChatSessionRead(
+        account_id=account.id,
+        account_nickname=account.nickname,
+        subscription_tier=tier,
+        subscription_source=source,
+        subscription_evidence_source=evidence_source,
+        subscription_expires_at=(active_overlay.expires_at if active_overlay else None),
+    )
 
 
 @router.post(
