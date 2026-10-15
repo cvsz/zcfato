@@ -43,9 +43,37 @@ def test_make_target_runs_only_template_checks_without_pytest_tree_discovery():
     assert "unittest discover -s tests -v" not in target
 
 
+def test_clean_prunes_generated_directories_before_recursive_scans():
+    makefile = validate_repo.ROOT / "Makefile"
+    text = makefile.read_text(encoding="utf-8")
+    clean_target = text.split("clean:\n", 1)[1].split("\n\nci:", 1)[0]
+    commands = [
+        line.strip()
+        for line in clean_target.splitlines()
+        if line.startswith("\tfind .")
+    ]
+
+    assert len(commands) == 3
+    assert "-name .pytest_cache -o" in commands[0]
+    assert "-name .ruff_cache -o" in commands[0]
+    assert (
+        "\\) -prune -o -type d -name '__pycache__' -prune -exec rm -rf"
+        in commands[0]
+    )
+    assert "-type d -name '.pytest_cache' -prune -exec rm -rf" in commands[1]
+    assert "-type d -name '.ruff_cache' -prune -exec rm -rf" in commands[2]
+
+
 def test_build_and_dist_exclusions(tmp_path, monkeypatch):
     _skeleton(tmp_path)
-    for folder in ("build", "dist", ".ruff_cache", ".pytest_cache"):
+    for folder in (
+        "build",
+        "dist",
+        ".pytest_cache",
+        ".ruff_cache",
+        "__pycache__",
+        "node_modules",
+    ):
         d = tmp_path / folder
         d.mkdir(parents=True, exist_ok=True)
         (d / "bad.md").write_text("[broken](missing.md)\n", encoding="utf-8")

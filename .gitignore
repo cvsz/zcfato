@@ -4,6 +4,8 @@ build/
 dist/
 __pycache__/
 .pytest_cache/
+.ruff_cache/
+node_modules/
 *.log
 web_status.log*
 controls.txt
@@ -33,6 +35,7 @@ music-dj-data/
 /web_status_media.json
 *.tmp
 *.egg-info/
+*.py[cod]
 /config.json
 .env
 .env.enc

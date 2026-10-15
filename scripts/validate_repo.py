@@ -49,6 +49,8 @@ EXCLUDED_DIRS = {
     "dist",
     ".ruff_cache",
     ".pytest_cache",
+    "__pycache__",
+    "node_modules",
 }
 
 LINK_RE = re.compile(r"(?<!!)\[[^\]]*\]\(([^)]+)\)")
