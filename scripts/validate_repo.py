@@ -90,7 +90,10 @@ def normalize_link_target(raw: str) -> str:
 
 def find_markdown_files() -> list[Path]:
     md_paths: list[Path] = []
-    for dirpath, dirnames, filenames in os.walk(ROOT):
+    def fail_on_walk_error(error: OSError) -> None:
+        raise error
+
+    for dirpath, dirnames, filenames in os.walk(ROOT, onerror=fail_on_walk_error):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDED_DIRS]
         for filename in filenames:
             if filename.endswith(".md"):
@@ -102,7 +105,11 @@ def find_markdown_files() -> list[Path]:
 
 def validate_markdown_links() -> list[str]:
     errors: list[str] = []
-    for md in find_markdown_files():
+    try:
+        markdown_files = find_markdown_files()
+    except OSError as exc:
+        return [f"repository scan failed: {exc}"]
+    for md in markdown_files:
         if any(part in EXCLUDED_DIRS for part in md.relative_to(ROOT).parts):
             continue
         try:
@@ -136,12 +143,12 @@ def validate_all() -> list[str]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Validate ztemplate structure and local Markdown links.")
     parser.add_argument("--json", action="store_true", help="output errors as JSON array to stdout")
-    parser.add_argument("--fix", action="store_true", help="stub for future auto-fixing")
+    parser.add_argument("--fix", action="store_true", help="request automatic fixes (not implemented)")
     args = parser.parse_args(argv)
 
     if args.fix:
-        print("Auto-fix not yet implemented")
-        return 0
+        print("ERROR: --fix is not implemented; no changes were made.", file=sys.stderr)
+        return 2
 
     errors = validate_all()
     if args.json:

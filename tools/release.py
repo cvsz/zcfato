@@ -56,16 +56,6 @@ def app_version():
     return match.group(1)
 
 
-def release_version(args):
-    """Return the version to use for the release, or None for default."""
-    if not args:
-        return None
-    version = args[0]
-    if version.startswith("v2.") and re.match(r"^v2\\.(\\d+)\\.(\\d+)$", version):
-        return version
-    raise SystemExit(f"Invalid version format: {version}. Use format: v2.xx.x")
-
-
 def flat_sums(assets):
     """SHA256SUMS.txt with flat basenames.
 

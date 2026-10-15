@@ -3,8 +3,10 @@ import sys
 import zipfile
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
-import package  # noqa: E402
+import package
 
 
 def test_sha256_matches_hashlib(tmp_path):
@@ -71,6 +73,59 @@ def test_zip_overwrites_existing(tmp_path):
     assert zipfile.is_zipfile(z)
 
 
+def test_zip_failure_preserves_existing_archive(tmp_path, monkeypatch):
+    d = tmp_path / "dist"
+    d.mkdir()
+    (d / "a.txt").write_text("new content")
+    target = tmp_path / "archive.zip"
+    target.write_bytes(b"previous archive")
+
+    def fail_write(*args, **kwargs):
+        raise OSError("simulated archive write failure")
+
+    monkeypatch.setattr(package.zipfile.ZipFile, "write", fail_write)
+    with pytest.raises(OSError, match="simulated archive write failure"):
+        package.make_zip(d, target)
+
+    assert target.read_bytes() == b"previous archive"
+    assert list(tmp_path.glob(".archive.zip.*.tmp")) == []
+
+
+@pytest.mark.parametrize(
+    "name", ["../outside", "..\\outside", "/absolute", "", "x" * 65]
+)
+def test_write_sums_rejects_unsafe_package_names(tmp_path, name):
+    with pytest.raises(ValueError, match="package name"):
+        package.write_sums(tmp_path, name)
+
+
+def test_main_rejects_traversal_before_touching_artifacts(tmp_path, monkeypatch, capsys):
+    root = tmp_path / "repo"
+    dist = root / "dist"
+    dist.mkdir(parents=True)
+    sentinel = tmp_path / "sentinel-windows.zip"
+    sentinel.write_bytes(b"keep this file")
+    monkeypatch.setattr(package, "ROOT", root)
+    monkeypatch.setattr(package, "DIST", dist)
+
+    with pytest.raises(SystemExit) as exc:
+        package.main(["../sentinel"])
+
+    assert exc.value.code == 2
+    assert "package name" in capsys.readouterr().err
+    assert sentinel.read_bytes() == b"keep this file"
+
+
+def test_write_sums_rejects_symlink_executables(tmp_path, monkeypatch):
+    executable = tmp_path / "app.exe"
+    executable.write_bytes(b"not a symlink on disk")
+    original = Path.is_symlink
+    monkeypatch.setattr(Path, "is_symlink", lambda path: path == executable or original(path))
+
+    with pytest.raises(ValueError, match="symbolic link"):
+        package.write_sums(tmp_path, "app")
+
+
 def test_icon_is_valid_multisize():
     import struct
     d = (Path(__file__).resolve().parent.parent / "app.ico").read_bytes()
@@ -79,10 +134,10 @@ def test_icon_is_valid_multisize():
 
 
 # ---- audit regressions ----
-import json  # noqa: E402
+import json
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-import camfrog_auto as ca  # noqa: E402
+import camfrog_auto as ca
 
 
 def test_load_cfg_accepts_utf8_bom(tmp_path):

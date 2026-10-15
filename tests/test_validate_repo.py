@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-import validate_repo  # noqa: E402
+import validate_repo
 
 
 def _skeleton(root):
@@ -119,9 +119,23 @@ def test_json_flag_output_format(tmp_path, monkeypatch, capsys):
 
 def test_fix_flag_stub(capsys):
     ret = validate_repo.main(["--fix"])
-    assert ret == 0
-    out, _ = capsys.readouterr()
-    assert "Auto-fix not yet implemented" in out
+    assert ret == 2
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "--fix is not implemented" in err
+
+
+def test_markdown_scan_permission_error_fails_closed(tmp_path, monkeypatch):
+    _skeleton(tmp_path)
+
+    def fail_walk(_root, onerror):
+        onerror(PermissionError("simulated access denial"))
+        return iter(())
+
+    monkeypatch.setattr(validate_repo, "ROOT", tmp_path)
+    monkeypatch.setattr(validate_repo.os, "walk", fail_walk)
+    errors = validate_repo.validate_markdown_links()
+    assert errors == ["repository scan failed: simulated access denial"]
 
 
 def test_ci_workflow_required(tmp_path, monkeypatch):
