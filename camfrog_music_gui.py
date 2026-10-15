@@ -1910,7 +1910,6 @@ def publish_dj_control_state(cfg, now=None, base=None, runner=None):
     """Publish a bounded queue snapshot for the local Bot Manager UI."""
     now = time.time() if now is None else float(now)
     dj = cfg.get("dj") or DEFAULTS["dj"]
-    data_dir = Path(base or BASE)
     try:
         queue_path = dj_queue_path_for_config(cfg, base)
     except (OSError, ValueError):

@@ -2178,8 +2178,10 @@ class Runner:
                 continue
 
             for index, line in enumerate(fresh):
-                def mark_consumed():
-                    st["prev"] = cur[:overlap + index + 1]
+                def mark_consumed(
+                    state=st, current_lines=cur, line_overlap=overlap, line_index=index
+                ):
+                    state["prev"] = current_lines[:line_overlap + line_index + 1]
 
                 m = LINE_RE.match(line.strip())
                 if not m:

@@ -550,7 +550,7 @@ def create_operator_chat_message(
     _admin: Annotated[None, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> ChatMessage:
-    account = db.scalar(select(Account).where(Account.id == body.account_id).with_for_update())
+    account = db.get(Account, body.account_id)
     if account is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
     if not account.enabled or account.agent_id is None:
@@ -565,6 +565,17 @@ def create_operator_chat_message(
     if agent is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Assigned agent is unavailable."
+        )
+    account = db.scalar(
+        select(Account)
+        .where(Account.id == body.account_id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
+    if account is None or not account.enabled or account.agent_id != agent.id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Account assignment changed; retry with current state.",
         )
 
     direction = ChatMessageDirection.operator_to_agent
@@ -684,7 +695,12 @@ def create_command(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Assigned agent is unavailable."
         )
-    account = db.scalar(select(Account).where(Account.id == body.account_id).with_for_update())
+    account = db.scalar(
+        select(Account)
+        .where(Account.id == body.account_id)
+        .execution_options(populate_existing=True)
+        .with_for_update()
+    )
     if account is None or not account.enabled or account.agent_id != agent.id:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

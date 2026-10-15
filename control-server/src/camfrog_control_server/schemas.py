@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -352,7 +353,7 @@ class BalanceSummary(BaseModel):
     @field_validator("points", "coins", "rewards", "next_level_remain", "next_level_difference")
     @classmethod
     def finite_balance(cls, value: float | None) -> float | None:
-        if value is not None and (value != value or value in {float("inf"), float("-inf")}):
+        if value is not None and not math.isfinite(value):
             raise ValueError("Balance values must be finite numbers.")
         return value
 

@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import http.client
 import json
+import math
 import os
 import re
 import shutil
@@ -23,7 +24,8 @@ import urllib.parse
 import urllib.error
 import urllib.request
 import uuid
-import xml.etree.ElementTree as ET
+from defusedxml import ElementTree as ET
+from defusedxml.common import DefusedXmlException
 from http.cookiejar import Cookie, CookieJar, MozillaCookieJar
 from pathlib import Path
 from dataclasses import dataclass, field
@@ -301,7 +303,7 @@ def _retry_after_seconds(value):
             delay = (retry_at.astimezone(datetime.timezone.utc) - now).total_seconds()
         except (TypeError, ValueError, OverflowError):
             return None
-    if delay != delay or delay in (float("inf"), float("-inf")):
+    if not math.isfinite(delay):
         return None
     return max(0.0, delay)
 
@@ -685,8 +687,13 @@ class _VmixNoRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 def fetch_vmix_inputs(base_url, timeout=4.0):
     try:
-        root = ET.fromstring(vmix_api_request(base_url, timeout=timeout))
-    except ET.ParseError:
+        root = ET.fromstring(
+            vmix_api_request(base_url, timeout=timeout),
+            forbid_dtd=True,
+            forbid_entities=True,
+            forbid_external=True,
+        )
+    except (ET.ParseError, DefusedXmlException):
         raise RuntimeError("vMix returned invalid XML.") from None
     inputs = []
     container = root.find("inputs")
@@ -1469,7 +1476,7 @@ def parse_rotate_interval(raw):
         value = float(str(raw).strip())
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError("invalid interval: {0!r}".format(raw)) from exc
-    if not (value == value and value not in (float("inf"), float("-inf"))):
+    if not math.isfinite(value):
         raise ValueError("invalid interval: {0!r}".format(raw))
     return min(ROTATE_INTERVAL_MAX, max(ROTATE_INTERVAL_MIN, value))
 
@@ -1480,7 +1487,7 @@ def parse_marquee_step_seconds(raw):
         value = float(str(raw).strip())
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError("invalid marquee frame interval: {0!r}".format(raw)) from exc
-    if not (value == value and value not in (float("inf"), float("-inf"))):
+    if not math.isfinite(value):
         raise ValueError("invalid marquee frame interval: {0!r}".format(raw))
     return min(WEB_MARQUEE_STEP_SECONDS_MAX,
                max(WEB_MARQUEE_STEP_SECONDS_MIN, value))
@@ -1628,7 +1635,7 @@ def parse_timeout(raw):
         value = float(str(raw).strip())
     except (ValueError, TypeError, OverflowError) as exc:
         raise ValueError("invalid timeout: {0!r}".format(raw)) from exc
-    if not (value == value and value not in (float("inf"), float("-inf"))):
+    if not math.isfinite(value):
         raise ValueError("invalid timeout: {0!r}".format(raw))
     return min(TIMEOUT_MAX, max(TIMEOUT_MIN, value))
 
@@ -3310,15 +3317,6 @@ class WebStatusManager:
 
         visit(self.root)
 
-    def switch_language(self):
-        previous_language = self._language
-        self._language = "th" if self._language == "en" else "en"
-        self._apply_language()
-        self._refresh_bot_option_widgets(previous_language)
-        self._refresh_bot_plugin_summary()
-        self._refresh_bot_plugin_title()
-        self._layout_action_bar(self.root.winfo_width())
-
     def _refresh_bot_plugin_summary(self):
         if not hasattr(self, "bot_plugin_summary_var"):
             return
@@ -3953,6 +3951,7 @@ class WebStatusManager:
             self.ttk.LabelFrame(parent, text=self._text(key), **kwargs), key)
 
     def switch_language(self):
+        previous_language = self._language
         self._language = "th" if self._language == "en" else "en"
         for widget, key, notebook_tab in self._language_widgets:
             if notebook_tab:
@@ -3969,6 +3968,10 @@ class WebStatusManager:
                 foreground=self._paste_state_color)
         if hasattr(self, "_log_source_lines"):
             self._show_log_lines(self._log_source_lines)
+        self._refresh_bot_option_widgets(previous_language)
+        self._refresh_bot_plugin_summary()
+        self._refresh_bot_plugin_title()
+        self._layout_action_bar(self.root.winfo_width())
 
     def _set_note(self, text, key=None):
         self._note_source = str(text)

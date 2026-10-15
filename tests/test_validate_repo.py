@@ -71,10 +71,17 @@ def test_clean_returns_failure_when_a_filesystem_scan_fails(tmp_path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     fake_find = fake_bin / "find"
-    fake_find.write_text("#!/bin/sh\nexit 73\n", encoding="utf-8")
+    fake_find.write_text(
+        "#!/bin/sh\nprintf 'simulated-find-failure\\n' >&2\nexit 73\n",
+        encoding="utf-8",
+    )
     fake_find.chmod(0o755)
+    if os.name == "nt":
+        (fake_bin / "find.cmd").write_text(
+            "@echo simulated-find-failure 1>&2\r\n@exit /b 73\r\n", encoding="utf-8"
+        )
     environment = os.environ.copy()
-    environment["PATH"] = f"{fake_bin}:{environment['PATH']}"
+    environment["PATH"] = os.pathsep.join((str(fake_bin), environment["PATH"]))
 
     result = subprocess.run(
         ["make", "-f", str(validate_repo.ROOT / "Makefile"), "clean"],
@@ -86,7 +93,7 @@ def test_clean_returns_failure_when_a_filesystem_scan_fails(tmp_path):
     )
 
     assert result.returncode != 0
-    assert "Error 73" in result.stderr
+    assert "simulated-find-failure" in result.stdout + result.stderr
 
 
 def test_build_and_dist_exclusions(tmp_path, monkeypatch):

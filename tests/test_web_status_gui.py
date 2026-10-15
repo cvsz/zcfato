@@ -838,6 +838,39 @@ def _signed_in_page():
             "<div class=\"nav-user-logged\">var _user_id = '1'; var nick = 'Seaza';")
 
 
+def test_switch_language_refreshes_bot_manager_controls():
+    manager = object.__new__(wsg.WebStatusManager)
+    calls = []
+
+    class Root:
+        def winfo_width(self):
+            return 720
+
+    manager._language = "en"
+    manager._language_widgets = []
+    manager._note_key = None
+    manager._note_source = "Ready"
+    manager.note = _Value()
+    manager._translate_message = lambda value: value
+    manager.root = Root()
+    manager._refresh_bot_option_widgets = lambda previous: calls.append(
+        ("options", previous)
+    )
+    manager._refresh_bot_plugin_summary = lambda: calls.append(("summary",))
+    manager._refresh_bot_plugin_title = lambda: calls.append(("title",))
+    manager._layout_action_bar = lambda width: calls.append(("layout", width))
+
+    manager.switch_language()
+
+    assert manager._language == "th"
+    assert calls == [
+        ("options", "en"),
+        ("summary",),
+        ("title",),
+        ("layout", 720),
+    ]
+
+
 @pytest.mark.skipif(not has_display(), reason="needs tkinter + display")
 def test_login_arms_automation(tmp_path, monkeypatch):
     """The single Login button verifies the session and arms automation."""
