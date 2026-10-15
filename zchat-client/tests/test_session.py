@@ -9,7 +9,9 @@ from camfrog_control_server.transport import AgentTransportError
 from zchat_client.session import AgentChatWorker, WorkerEvent
 
 
-def _wait_for_event(worker: AgentChatWorker, kind: str, timeout: float = 2.0) -> WorkerEvent:
+def _wait_for_event(
+    worker: AgentChatWorker, kind: str, timeout: float = 2.0
+) -> WorkerEvent:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -106,7 +108,9 @@ def test_chat_session_reads_assignment_without_command_heartbeat() -> None:
         def heartbeat(self) -> dict:
             nonlocal heartbeat_calls
             heartbeat_calls += 1
-            raise AssertionError("Chat-only sessions must not refresh command-agent presence")
+            raise AssertionError(
+                "Chat-only sessions must not refresh command-agent presence"
+            )
 
     worker = AgentChatWorker(
         "https://control.example",
@@ -237,7 +241,9 @@ def test_outgoing_retry_reuses_the_same_idempotency_key() -> None:
         def chat_session(self) -> dict:
             return {"account_id": account_id}
 
-        def submit_chat_message(self, account_id: str, message_id: str, _body: str) -> dict:
+        def submit_chat_message(
+            self, account_id: str, message_id: str, _body: str
+        ) -> dict:
             submitted_messages.append((account_id, message_id))
             if not self.failed_once:
                 self.failed_once = True
@@ -263,7 +269,10 @@ def test_outgoing_retry_reuses_the_same_idempotency_key() -> None:
 
     delivered = _wait_for_event(worker, "sent")
     assert delivered.data["message_id"] == message_id
-    assert submitted_messages[:2] == [(account_id, message_id), (account_id, message_id)]
+    assert submitted_messages[:2] == [
+        (account_id, message_id),
+        (account_id, message_id),
+    ]
     worker.stop()
     worker.join(timeout=1)
 
@@ -288,7 +297,9 @@ def test_queued_message_is_canceled_when_account_assignment_changes() -> None:
                 raise AssertionError("Assignment refresh was not released")
             return {"account_id": account_b}
 
-        def submit_chat_message(self, account_id: str, message_id: str, _body: str) -> dict:
+        def submit_chat_message(
+            self, account_id: str, message_id: str, _body: str
+        ) -> dict:
             submitted_messages.append((account_id, message_id))
             return {"id": "ef8a3056-60d8-42f5-b3d9-a11d2a2f62bf"}
 
@@ -352,4 +363,6 @@ def test_outgoing_queue_is_bounded() -> None:
     except ValueError as exc:
         assert "queue is full" in str(exc)
     else:
-        raise AssertionError("The outgoing queue accepted more than its configured limit")
+        raise AssertionError(
+            "The outgoing queue accepted more than its configured limit"
+        )

@@ -219,9 +219,7 @@ def _apply_application_icon(root: tk.Tk) -> None:
 class AgentChatWindow:
     MAX_VISIBLE_ENTRIES = 500
     PALETTE = PALETTE
-    _EDITABLE_CLASSES: ClassVar[frozenset[str]] = frozenset(
-        {"Entry", "TEntry", "Text"}
-    )
+    _EDITABLE_CLASSES: ClassVar[frozenset[str]] = frozenset({"Entry", "TEntry", "Text"})
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -399,7 +397,9 @@ class AgentChatWindow:
 
         self.token_label = ttk.Label(self.connection)
         self.token_label.grid(row=1, column=0, sticky=tk.W, padx=(0, 8))
-        self.token_entry = ttk.Entry(self.connection, textvariable=self.agent_token, show="*")
+        self.token_entry = ttk.Entry(
+            self.connection, textvariable=self.agent_token, show="*"
+        )
         self.token_entry.grid(row=1, column=1, sticky=tk.EW, pady=3)
 
         self.connect_button = ttk.Button(
@@ -430,7 +430,9 @@ class AgentChatWindow:
         self.membership_detail = ttk.Label(
             self.membership_frame, style="MembershipDetail.TLabel"
         )
-        self.membership_detail.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(4, 0))
+        self.membership_detail.grid(
+            row=1, column=0, columnspan=2, sticky=tk.W, pady=(4, 0)
+        )
         self.membership_disclaimer = ttk.Label(
             self.membership_frame, style="MembershipHint.TLabel"
         )
@@ -511,8 +513,12 @@ class AgentChatWindow:
             borderwidth=1,
             relief=tk.SOLID,
         )
-        self.context_menu.add_command(label="Cut", command=lambda: self._context_action("cut"))
-        self.context_menu.add_command(label="Copy", command=lambda: self._context_action("copy"))
+        self.context_menu.add_command(
+            label="Cut", command=lambda: self._context_action("cut")
+        )
+        self.context_menu.add_command(
+            label="Copy", command=lambda: self._context_action("copy")
+        )
         self.context_menu.add_command(
             label="Paste",
             command=lambda: self._context_action("paste"),
@@ -527,7 +533,12 @@ class AgentChatWindow:
         self._set_chat_enabled(False)
 
     def _install_editing_support(self) -> None:
-        for widget in (self.server_entry, self.token_entry, self.message_input, self.transcript):
+        for widget in (
+            self.server_entry,
+            self.token_entry,
+            self.message_input,
+            self.transcript,
+        ):
             widget.bind("<Control-KeyPress>", self._handle_control_key, add="+")
             for key in "acvxACVX":
                 widget.bind(f"<Control-{key}>", self._handle_control_key, add="+")
@@ -549,7 +560,9 @@ class AgentChatWindow:
         self.server_label.configure(text=self._text("server_url"))
         self.token_label.configure(text=self._text("agent_token"))
         self.connect_button.configure(
-            text=self._text("disconnect" if self.worker and self.worker.is_alive else "connect")
+            text=self._text(
+                "disconnect" if self.worker and self.worker.is_alive else "connect"
+            )
         )
         self.message_label.configure(text=self._text("message"))
         self.send_button.configure(text=self._text("send"))
@@ -606,7 +619,9 @@ class AgentChatWindow:
             "baseline_not_recorded": "record_baseline_not_recorded",
             "baseline_unverified": "record_baseline_unverified",
         }
-        tier = self._membership_tier if self._membership_tier in tier_keys else "unknown"
+        tier = (
+            self._membership_tier if self._membership_tier in tier_keys else "unknown"
+        )
         evidence = (
             self._membership_evidence_source
             if self._membership_evidence_source in evidence_keys
@@ -806,7 +821,9 @@ class AgentChatWindow:
                     diagnostic=diagnostic,
                 )
             else:
-                error_type = data.get("error_type") or self._error_type(data.get("message"))
+                error_type = data.get("error_type") or self._error_type(
+                    data.get("message")
+                )
                 message = self._text("session_stopped", error_type=error_type)
             self._set_status("error", message=message)
             self._append_entry(self._text("speaker_status"), message)
@@ -999,7 +1016,9 @@ class AgentChatWindow:
         if self.context_target is not None:
             self._perform_edit_action(self.context_target, action)
 
-    def _place_cursor_for_context(self, widget: tk.Widget, event: tk.Event[Any]) -> None:
+    def _place_cursor_for_context(
+        self, widget: tk.Widget, event: tk.Event[Any]
+    ) -> None:
         selection = self._selection(widget)
         try:
             if self._widget_class(widget) == "Text":
@@ -1039,13 +1058,17 @@ class AgentChatWindow:
         masked = self._is_masked(widget)
         self.context_menu.entryconfigure(
             0,
-            state=tk.NORMAL if selection is not None and editable and not masked else tk.DISABLED,
+            state=tk.NORMAL
+            if selection is not None and editable and not masked
+            else tk.DISABLED,
         )
         self.context_menu.entryconfigure(
             1,
             state=tk.NORMAL if selection is not None and not masked else tk.DISABLED,
         )
-        self.context_menu.entryconfigure(2, state=tk.NORMAL if editable else tk.DISABLED)
+        self.context_menu.entryconfigure(
+            2, state=tk.NORMAL if editable else tk.DISABLED
+        )
         self.context_menu.entryconfigure(4, state=tk.NORMAL)
         try:
             self.context_menu.tk_popup(event.x_root, event.y_root)

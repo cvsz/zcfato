@@ -165,9 +165,7 @@ class AgentChatSessionRead(BaseModel):
 
     account_id: UUID | None
     account_nickname: str | None = Field(default=None, max_length=256)
-    subscription_tier: str = Field(
-        default="unknown", pattern="^(unknown|free|pro|extreme|gold)$"
-    )
+    subscription_tier: str = Field(default="unknown", pattern="^(unknown|free|pro|extreme|gold)$")
     subscription_source: str = Field(
         default="baseline_not_recorded",
         pattern="^(temporary_overlay|durable_baseline|overlapping_overlays|baseline_not_recorded|baseline_unverified)$",

@@ -62,7 +62,8 @@ def test_account_creation_rejects_case_insensitive_duplicates_without_rotating_a
 
 
 def test_nickname_claim_migration_preserves_legacy_duplicate_accounts(
-    tmp_path: Path, monkeypatch,
+    tmp_path: Path,
+    monkeypatch,
 ) -> None:
     repo_root = Path(__file__).resolve().parents[2]
     control_server = repo_root / "control-server"
