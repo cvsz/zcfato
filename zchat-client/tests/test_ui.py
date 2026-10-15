@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from zchat_client import ui
 from zchat_client.ui import AgentChatWindow
 
 
@@ -15,6 +16,27 @@ def test_window_starts_without_server_or_saved_credentials() -> None:
         assert window.token_entry.cget("show") == "*"
         assert str(window.message_input.cget("state")) == tk.DISABLED
         assert str(window.send_button.cget("state")) == tk.DISABLED
+    finally:
+        root.destroy()
+
+
+def test_connect_rejects_blank_server_url_before_using_token(monkeypatch) -> None:
+    root = tk.Tk()
+    errors: list[tuple[str, str]] = []
+    try:
+        window = AgentChatWindow(root)
+        window.agent_token.set("unused-agent-token")
+        monkeypatch.setattr(
+            ui.messagebox,
+            "showerror",
+            lambda title, message, **_kwargs: errors.append((title, message)),
+        )
+
+        window._connect()
+
+        assert window.worker is None
+        assert window.agent_token.get() == "unused-agent-token"
+        assert errors == [("Invalid server URL", "Server URL must be an absolute HTTP(S) URL.")]
     finally:
         root.destroy()
 
