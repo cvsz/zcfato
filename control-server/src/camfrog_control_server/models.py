@@ -16,6 +16,7 @@ from sqlalchemy import (
     Index,
     Integer,
     String,
+    Text,
     UniqueConstraint,
     Uuid,
 )
@@ -59,6 +60,7 @@ class Account(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     nickname: Mapped[str] = mapped_column(String(256), nullable=False)
+    nickname_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     agent_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("agents.id", ondelete="RESTRICT"), nullable=True
     )
@@ -66,6 +68,14 @@ class Account(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
+
+
+class AccountNicknameClaim(Base):
+    """Unique, normalized nickname reservations that preserve legacy account rows."""
+
+    __tablename__ = "account_nickname_claims"
+
+    nickname_key: Mapped[str] = mapped_column(String(64), primary_key=True)
 
 
 class ControlCommand(Base):
@@ -109,6 +119,66 @@ class ControlCommand(Base):
     )
     claimed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ChatMessage(Base):
+    """Durable operator/agent messages; this is not a Camfrog network message."""
+
+    __tablename__ = "chat_messages"
+    __table_args__ = (
+        CheckConstraint(
+            "direction IN ('operator_to_agent', 'agent_to_operator')",
+            name="ck_chat_messages_direction",
+        ),
+        CheckConstraint(
+            "state IN ('queued', 'claimed', 'received', 'delivered', 'failed', 'canceled')",
+            name="ck_chat_messages_state",
+        ),
+        CheckConstraint(
+            "(direction = 'agent_to_operator' AND state = 'received') OR "
+            "(direction = 'operator_to_agent' AND state != 'received')",
+            name="ck_chat_messages_direction_state",
+        ),
+        CheckConstraint(
+            "(state = 'claimed' AND claim_token_hash IS NOT NULL AND claim_expires_at IS NOT NULL) "
+            "OR (state != 'claimed' AND claim_token_hash IS NULL AND claim_expires_at IS NULL)",
+            name="ck_chat_messages_claim_state",
+        ),
+        CheckConstraint(
+            "(direction = 'agent_to_operator' AND delivered_at IS NOT NULL) OR "
+            "(direction = 'operator_to_agent' AND "
+            "((state = 'delivered' AND delivered_at IS NOT NULL) OR "
+            "(state != 'delivered' AND delivered_at IS NULL)))",
+            name="ck_chat_messages_delivery_timestamp",
+        ),
+        CheckConstraint("claim_attempts >= 0", name="ck_chat_messages_claim_attempts"),
+        UniqueConstraint(
+            "account_id", "direction", "client_message_id", name="uq_chat_messages_idempotency"
+        ),
+        Index(
+            "ix_chat_messages_agent_state_created", "agent_id", "direction", "state", "created_at"
+        ),
+        Index("ix_chat_messages_account_created", "account_id", "created_at", "id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
+    account_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("accounts.id", ondelete="RESTRICT"), nullable=False
+    )
+    agent_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("agents.id", ondelete="RESTRICT"), nullable=False
+    )
+    client_message_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    direction: Mapped[str] = mapped_column(String(24), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False)
+    claim_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    claim_token_hash: Mapped[str | None] = mapped_column(String(64))
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, default=utcnow
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AuditEvent(Base):

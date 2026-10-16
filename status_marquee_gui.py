@@ -679,6 +679,27 @@ def is_own_gui_window(win) -> bool:
     return False
 
 
+def _window_process_id(window):
+    """Return a positive process ID for a UIA top-level window, or None."""
+    try:
+        pid = int(window.process_id())
+        return pid if pid > 0 else None
+    except (AttributeError, TypeError, ValueError, OSError):
+        return None
+
+
+def _require_single_window_process(windows):
+    """Fail closed when a title filter spans more than one/unverifiable process."""
+    if len(windows) <= 1:
+        return
+    pids = [_window_process_id(window) for window in windows]
+    if any(pid is None for pid in pids) or len(set(pids)) != 1:
+        raise RuntimeError(
+            "Multiple or unverifiable Camfrog processes match the configured window filter; "
+            "narrow window_title_regex or close extra clients."
+        )
+
+
 def get_window(cfg: dict):
     from pywinauto import Desktop  # lazy: `check` works without pywinauto
     # Allow status control discovery in minimized/hidden Camfrog windows. The
@@ -688,6 +709,7 @@ def get_window(cfg: dict):
     wins = [w for w in wins if not is_own_gui_window(w)]
     if not wins:
         raise RuntimeError(t("no_window"))
+    _require_single_window_process(wins)
 
     # Find the window that actually contains the status edit control.
     # The status edit is in the buddy list window (has CComboBoxTS with auto_id 1436
@@ -1015,8 +1037,24 @@ def _background_enter(ctrl, target="edit"):
         if not handle:
             ctrl.send_keystrokes("{ENTER}")
             return
-    if not handle:
-        raise LookupError("Status combo has no HWND; cannot try combo Enter")
+    saved_sounds = {}
+    if os.name == "nt":
+        try:
+            import winreg
+            base_reg = r"AppEvents\Schemes\Apps\.Default"
+            for sub in (".Default", "SystemAsterisk", "SystemExclamation", "SystemNotification"):
+                try:
+                    k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
+                                       winreg.KEY_READ | winreg.KEY_WRITE)
+                    val, vtype = winreg.QueryValueEx(k, "")
+                    saved_sounds[sub] = (val, vtype)
+                    winreg.SetValueEx(k, "", 0, vtype, "")
+                    winreg.CloseKey(k)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     u = ctypes.windll.user32
     try:
         u.PostMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint,
@@ -1024,10 +1062,29 @@ def _background_enter(ctrl, target="edit"):
         u.PostMessageW.restype = ctypes.c_int
     except (AttributeError, TypeError):
         pass
-    if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
-        raise RuntimeError("Could not post Enter key-down to status control")
-    if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
-        raise RuntimeError("Could not post Enter key-up to status control")
+
+    try:
+        if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
+            raise RuntimeError("Could not post Enter key-down to status control")
+        if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
+            raise RuntimeError("Could not post Enter key-up to status control")
+        if os.name == "nt":
+            time.sleep(0.02)
+    finally:
+        if saved_sounds:
+            try:
+                import winreg
+                base_reg = r"AppEvents\Schemes\Apps\.Default"
+                for sub, (val, vtype) in saved_sounds.items():
+                    try:
+                        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
+                                           winreg.KEY_SET_VALUE)
+                        winreg.SetValueEx(k, "", 0, vtype, val)
+                        winreg.CloseKey(k)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
 
 def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,
@@ -1048,8 +1105,10 @@ def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=N
         background_enter_target == "combo" or not require_fg or
         (background_if_not_foreground and not window_is_foreground))
     submit_target = background_enter_target
-    if (background_if_not_foreground and not window_is_foreground
-            and submit_target == "edit"):
+    if background_submit and submit_target == "edit":
+        # Always upgrade to "combo" for a background submit: posting Enter
+        # directly to the child Edit control triggers a Windows ding on some
+        # Camfrog builds — use the verified CComboBoxTS parent instead.
         submit_target = "combo"
     needs_foreground = require_fg and apply_btn is None and not background_submit
     prev = foreground if restore and needs_foreground else 0
@@ -4575,7 +4634,7 @@ def main(argv=None):
 # packaged app checks the same repo's latest release and downloads only its
 # own executable asset, verified against the release's SHA256SUMS.txt.
 APP_VERSION = "2.19.2"
-GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
+GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zchat")
 UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
 
 

@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
@@ -21,18 +22,26 @@ from .api import router
 from .config import Settings
 from .db import make_engine
 from .domain_api import router as domain_router
-from .observability import log_http_request
+from .observability import StructuredLogger, log_http_request, log_startup_event, redact_db_url
 from .rate_limit import SlidingWindowRateLimiter
 
 
 def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
     settings = settings or Settings.from_env()
+    log_level = getattr(logging, settings.log_level.upper(), logging.INFO)
+    logging.getLogger("camfrog_control_server").setLevel(log_level)
+
     owns_engine = engine is None
     engine = engine or make_engine(settings.database_url)
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
+        log_startup_event(
+            request_logger,
+            version=__version__,
+            db_url_redacted=redact_db_url(app.state.settings.database_url),
+        )
         yield
         if app.state.owns_engine:
             app.state.engine.dispose()
@@ -50,7 +59,24 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
     app.state.session_factory = factory
     app.state.owns_engine = owns_engine
     app.state.rate_limiter = SlidingWindowRateLimiter()
-    request_logger = logging.getLogger("camfrog_control_server.http")
+    request_logger = StructuredLogger(logging.getLogger("camfrog_control_server.http"))
+
+    if settings.cors_origins:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=list(settings.cors_origins),
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
+    if settings.trusted_hosts:
+        from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+        app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=list(settings.trusted_hosts),
+        )
 
     static_dir = Path(__file__).parent / "static"
     app.mount(
@@ -75,33 +101,48 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
         request.state.request_id = request_id
         started = time.monotonic()
 
-        if request.url.path.startswith("/api/v1/"):
-            bucket = (
-                "auth"
-                if request.url.path.endswith("/auth/session")
-                else ("agent" if "/agent/" in request.url.path else "admin")
-            )
-            peer = request.client.host if request.client is not None else "unknown"
-            limit = (
-                settings.auth_rate_limit_requests
-                if bucket == "auth"
-                else settings.api_rate_limit_requests
-            )
-            allowed, retry_after = await app.state.rate_limiter.allow(
-                f"{bucket}:{peer}", limit=limit
-            )
-            if not allowed:
-                response = JSONResponse(
-                    status_code=429,
-                    content={"detail": "Rate limit exceeded."},
-                    headers={"Retry-After": str(retry_after)},
+        try:
+            if request.url.path.startswith("/api/v1/"):
+                bucket = (
+                    "auth"
+                    if request.url.path.endswith("/auth/session")
+                    else ("agent" if "/agent/" in request.url.path else "admin")
                 )
+                peer = request.client.host if request.client is not None else "unknown"
+                limit = (
+                    settings.auth_rate_limit_requests
+                    if bucket == "auth"
+                    else settings.api_rate_limit_requests
+                )
+                allowed, retry_after = await app.state.rate_limiter.allow(
+                    f"{bucket}:{peer}", limit=limit
+                )
+                if not allowed:
+                    response = JSONResponse(
+                        status_code=429,
+                        content={"detail": "Rate limit exceeded."},
+                        headers={"Retry-After": str(retry_after)},
+                    )
+                else:
+                    response = await call_next(request)
             else:
                 response = await call_next(request)
-        else:
-            response = await call_next(request)
+        except Exception as exc:
+            request_logger.error(
+                "request_failed",
+                request_id=request_id,
+                method=request.method,
+                path=request.url.path,
+                error_type=type(exc).__name__,
+            )
+            response = JSONResponse(
+                status_code=500,
+                content={"detail": "Internal server error."},
+            )
 
         response.headers["X-Request-ID"] = request_id
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
         log_http_request(
             request_logger,
             request_id=request_id,
@@ -113,7 +154,6 @@ def create_app(settings: Settings | None = None, *, engine=None) -> FastAPI:
         if request.url.path.startswith("/api/v1/"):
             response.headers["Cache-Control"] = "no-store"
         if request.url.path == "/dashboard" or request.url.path.startswith("/dashboard/assets/"):
-            response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["Content-Security-Policy"] = (
                 "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; "
                 "img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"

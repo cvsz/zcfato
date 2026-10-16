@@ -32,13 +32,13 @@ Same-origin operator dashboard
         ▼
 FastAPI control plane ─── PostgreSQL
         ▲                    │
-        │ scoped agent token │ account / command / audit state
+        │ scoped agent token │ account / command / chat / audit state
         └── Windows agent ───┘
                  │
                  └── optional official client process/URI provider
 ```
 
-An agent is scoped to one account. The database stores account nicknames and internal assignments, but no login password, browser profile, cookie, CSRF value, CAPTCHA answer, payment credential, or room access key. Auth-state snapshots contain only a derived state, page type, and whether a CSRF field was present. Agent and command claim tokens are returned once and stored as hashes; claim tokens are single-use and bounded by a lease.
+An agent token is rotated and bound to the current account assignment; reassignment invalidates the previous and replacement agents' prior tokens. An administrator can rotate an active token without changing its assignment; the replacement is returned once. The database stores account nicknames and internal assignments, plus plaintext internal chat bodies. It does not store login passwords, browser profiles, cookies, CSRF values, CAPTCHA answers, payment credentials, or room access keys. Auth-state snapshots contain only a derived state, page type, and whether a CSRF field was present. Agent and command claim tokens are returned once and stored as hashes; claim tokens are single-use and bounded by a lease. Chat-body retention, backup access, and deletion policy remain deployment gates.
 
 The API rate limiter is bounded and per process. It is suitable for local/single-instance development only; it does not coordinate across multiple workers or replicas. Structured request logs include only method, path, status, request id, and duration. Query strings, headers, and bodies are omitted.
 

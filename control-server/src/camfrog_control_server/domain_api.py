@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from http import HTTPStatus
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete, func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .account_identity import account_nickname_key
 from .adapters import cloud_bot_state
 from .api import add_audit, get_db, require_admin, require_agent
 from .models import (
@@ -95,7 +97,12 @@ def _profile_read(
     )
 
 
-@router.put("/agent/accounts/snapshot", status_code=status.HTTP_204_NO_CONTENT)
+@router.put(
+    "/agent/accounts/snapshot",
+    response_class=Response,
+    response_model=None,
+    status_code=status.HTTP_204_NO_CONTENT,
+)
 def ingest_account_snapshot(
     body: AccountSnapshotInput,
     agent: Annotated[Agent, Depends(require_agent)],
@@ -269,9 +276,18 @@ def read_presence(
     _admin: Annotated[None, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> PresenceRead:
-    account = db.scalar(select(Account).where(func.lower(Account.nickname) == nickname.casefold()))
-    if account is None:
+    nickname_key = account_nickname_key(nickname)
+    accounts = list(
+        db.scalars(select(Account).where(Account.nickname_key == nickname_key).limit(2)).all()
+    )
+    if not accounts:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+    if len(accounts) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Nickname is ambiguous because multiple legacy accounts exist.",
+        )
+    account = accounts[0]
     snapshot = db.get(PresenceSnapshot, account.id)
     if snapshot is None:
         return PresenceRead(
@@ -419,7 +435,7 @@ def create_cloud_bot(
     agent = db.scalar(select(Agent).where(Agent.id == body.agent_id, Agent.revoked_at.is_(None)))
     if agent is None:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Active agent not found."
+            status_code=HTTPStatus.UNPROCESSABLE_ENTITY, detail="Active agent not found."
         )
     bot = CloudBot(name=body.name, agent_id=body.agent_id)
     db.add(bot)

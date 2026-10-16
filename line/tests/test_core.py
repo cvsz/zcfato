@@ -309,6 +309,45 @@ _HAS_TK = importlib.util.find_spec("tkinter") is not None
 
 @unittest.skipUnless(_HAS_TK, "Tkinter is not installed in this Python environment")
 class GuiCloseBehaviorTests(unittest.TestCase):
+    def test_callback_error_is_logged_without_dialog_when_hidden(self):
+        from line_status_gui import build_app
+
+        app_type = build_app()
+        app = object.__new__(app_type)
+        error = RuntimeError("scheduled callback failed")
+        for state in ("iconic", "withdrawn"):
+            with self.subTest(state=state):
+                app.root = SimpleNamespace(state=mock.Mock(return_value=state))
+                app.note = SimpleNamespace(configure=mock.Mock())
+                with (
+                    mock.patch("tkinter.messagebox.showerror") as showerror,
+                    mock.patch("line_status_gui.LOGGER.error") as log_error,
+                ):
+                    app.report_callback_exception(RuntimeError, error, None)
+                log_error.assert_called_once()
+                showerror.assert_not_called()
+                app.note.configure.assert_called_once_with(
+                    text="เกิดข้อผิดพลาดเบื้องหลัง รายละเอียดอยู่ใน app.log"
+                )
+
+    def test_callback_error_shows_dialog_when_window_is_visible(self):
+        from line_status_gui import build_app
+
+        app_type = build_app()
+        app = object.__new__(app_type)
+        app.root = SimpleNamespace(state=mock.Mock(return_value="normal"))
+        error = RuntimeError("foreground callback failed")
+        with (
+            mock.patch("tkinter.messagebox.showerror") as showerror,
+            mock.patch("line_status_gui.LOGGER.error"),
+        ):
+            app.report_callback_exception(RuntimeError, error, None)
+        showerror.assert_called_once_with(
+            "LINE Status Changer",
+            "เกิดข้อผิดพลาดในหน้าต่างโปรแกรม รายละเอียดอยู่ใน app.log",
+            parent=app.root,
+        )
+
     def test_close_hides_in_tray_when_tray_is_available(self):
         from line_status_gui import build_app
 
@@ -446,18 +485,24 @@ class TrayBehaviorTests(unittest.TestCase):
     def test_tray_retry_succeeds_on_second_attempt(self):
         tray = object.__new__(LineTrayIcon)
         tray._add_icon = mock.Mock(side_effect=[RuntimeError("busy"), None])
-        with mock.patch("line_tray.time.sleep") as sleep:
-            tray._add_icon_with_retry(attempts=3, delay=0.5)
+        with self.assertLogs(level="WARNING") as captured:
+            with mock.patch("line_tray.time.sleep") as sleep:
+                tray._add_icon_with_retry(attempts=3, delay=0.5)
         self.assertEqual(tray._add_icon.call_count, 2)
         sleep.assert_called_once_with(0.5)
+        self.assertEqual(len(captured.records), 1)
+        self.assertIn("attempt 1/3 failed: busy", captured.output[0])
 
     def test_tray_retry_raises_after_all_attempts_fail(self):
         tray = object.__new__(LineTrayIcon)
         tray._add_icon = mock.Mock(side_effect=RuntimeError("busy"))
-        with mock.patch("line_tray.time.sleep"):
-            with self.assertRaisesRegex(RuntimeError, "rejected the system tray icon"):
-                tray._add_icon_with_retry(attempts=3, delay=0.1)
+        with self.assertLogs(level="WARNING") as captured:
+            with mock.patch("line_tray.time.sleep"):
+                with self.assertRaisesRegex(RuntimeError, "rejected the system tray icon"):
+                    tray._add_icon_with_retry(attempts=3, delay=0.1)
         self.assertEqual(tray._add_icon.call_count, 3)
+        self.assertEqual(len(captured.records), 3)
+        self.assertTrue(all("failed: busy" in output for output in captured.output))
 
     def test_window_callback_defers_tk_restore_until_message_pump_returns(self):
         tray = object.__new__(LineTrayIcon)

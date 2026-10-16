@@ -688,6 +688,27 @@ def is_own_gui_window(win) -> bool:
     return False
 
 
+def _window_process_id(window):
+    """Return a positive process ID for a UIA top-level window, or None."""
+    try:
+        pid = int(window.process_id())
+        return pid if pid > 0 else None
+    except (AttributeError, TypeError, ValueError, OSError):
+        return None
+
+
+def _require_single_window_process(windows):
+    """Fail closed when a title filter spans more than one/unverifiable process."""
+    if len(windows) <= 1:
+        return
+    pids = [_window_process_id(window) for window in windows]
+    if any(pid is None for pid in pids) or len(set(pids)) != 1:
+        raise RuntimeError(
+            "Multiple or unverifiable Camfrog processes match the configured window filter; "
+            "narrow window_title_regex or close extra clients."
+        )
+
+
 def get_window(cfg: dict):
     from pywinauto import Desktop  # lazy: `check` works without pywinauto
     wins = Desktop(backend="uia").windows(
@@ -695,6 +716,7 @@ def get_window(cfg: dict):
     wins = [w for w in wins if not is_own_gui_window(w)]
     if not wins:
         raise RuntimeError(t("no_window"))
+    _require_single_window_process(wins)
 
     # Find the window that actually contains the status edit control.
     # The status edit is in the buddy list window (has CComboBoxTS with auto_id 1436
@@ -1910,7 +1932,6 @@ def publish_dj_control_state(cfg, now=None, base=None, runner=None):
     """Publish a bounded queue snapshot for the local Bot Manager UI."""
     now = time.time() if now is None else float(now)
     dj = cfg.get("dj") or DEFAULTS["dj"]
-    data_dir = Path(base or BASE)
     try:
         queue_path = dj_queue_path_for_config(cfg, base)
     except (OSError, ValueError):
@@ -5723,7 +5744,7 @@ def main(argv=None):
 # packaged app checks the same repo's latest release and downloads only its
 # own executable asset, verified against the release's SHA256SUMS.txt.
 APP_VERSION = "2.19.2"
-GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zcfato")
+GITHUB_REPO = os.environ.get("CAMFROG_UPDATE_REPO", "cvsz/zchat")
 UPDATE_ASSET_SUMS = "SHA256SUMS.txt"
 
 

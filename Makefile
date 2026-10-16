@@ -1,11 +1,15 @@
-PYTHON ?= python3
+VENV_PYTHON := $(wildcard $(CURDIR)/venv/bin/python $(CURDIR)/venv/Scripts/python.exe)
+PYTHON ?= $(if $(VENV_PYTHON),$(firstword $(VENV_PYTHON)),python3)
 RUFF := $(PYTHON) -m ruff
 PYTEST := $(PYTHON) -m pytest
 
-.PHONY: help setup validate-template format lint test build security ci
+.PHONY: help venv setup validate validate-template format lint test test-zchat-client test-line build security clean ci
 
 help:
-	@printf '%s\n' 'Project tasks:' '  setup             Install the root and control-server development dependencies' '  validate-template Run repository structure and Markdown link validation' '  format            Check control-server formatting' '  lint              Lint the control-server source and tests' '  test              Run root and control-server test suites' '  build             Package desktop apps on Windows' '  security          Audit root and installed Python dependencies' '  ci                Run repository, format, lint, test, and security checks'
+	@printf '%s\n' 'Project tasks:' '  venv              Create virtual environment if it does not exist' '  setup             Install the root and control-server development dependencies' '  validate-template Run repository structure and Markdown link validation' '  format            Check control-server formatting' '  lint              Lint the control-server source and tests' '  test              Run all Python test suites' '  test-zchat-client Run ZChat client tests' '  test-line         Run LINE feature tests' '  build             Package desktop apps on Windows' '  security          Audit root and installed Python dependencies' '  clean             Remove cache directories' '  ci                Run repository, format, lint, test, and security checks'
+
+venv:
+	@test -d $(CURDIR)/venv || python3 -m venv $(CURDIR)/venv
 
 setup:
 	$(PYTHON) -m pip install --upgrade pip
@@ -15,6 +19,8 @@ setup:
 validate-template:
 	python3 scripts/validate_repo.py
 	python3 -m unittest discover -s tests -p 'test_bootstrap.py' -v
+
+validate: validate-template
 
 format:
 	$(RUFF) format --check control-server/src control-server/tests
@@ -29,6 +35,18 @@ else
 	xvfb-run -a $(PYTEST) -q tests
 endif
 	cd control-server && $(PYTEST) -q
+	$(MAKE) test-zchat-client
+	$(MAKE) test-line
+
+test-zchat-client:
+ifeq ($(OS),Windows_NT)
+	set "PYTHONPATH=zchat-client/src;control-server/src" && $(PYTEST) -q zchat-client/tests
+else
+	PYTHONPATH=zchat-client/src:control-server/src xvfb-run -a $(PYTEST) -q zchat-client/tests
+endif
+
+test-line:
+	cd line && $(PYTHON) -m unittest discover -s tests -v
 
 ifeq ($(OS),Windows_NT)
 build:
@@ -42,5 +60,10 @@ endif
 security:
 	$(PYTHON) -m pip_audit -r requirements-dev.txt
 	$(PYTHON) -m pip_audit --local --skip-editable
+
+clean:
+	find . \( -name .git -o -name .pytest_cache -o -name .ruff_cache -o -name .venv -o -name venv -o -name node_modules -o -name build -o -name dist \) -prune -o -type d -name '__pycache__' -prune -exec rm -rf {} +
+	find . \( -name .git -o -name .ruff_cache -o -name .venv -o -name venv -o -name node_modules -o -name build -o -name dist -o -name __pycache__ \) -prune -o -type d -name '.pytest_cache' -prune -exec rm -rf {} +
+	find . \( -name .git -o -name .pytest_cache -o -name .venv -o -name venv -o -name node_modules -o -name build -o -name dist -o -name __pycache__ \) -prune -o -type d -name '.ruff_cache' -prune -exec rm -rf {} +
 
 ci: validate-template format lint test security

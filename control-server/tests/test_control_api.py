@@ -8,7 +8,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from camfrog_control_server.models import Agent, ControlCommand, utcnow
+from camfrog_control_server.models import (
+    Agent,
+    ControlCommand,
+    SubscriptionEntitlement,
+    SubscriptionOverlay,
+    utcnow,
+)
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -30,7 +36,77 @@ def _provision(
         json={"nickname": "test-account", "agent_id": agent["id"]},
     )
     assert account.status_code == 201
-    return client, engine, admin_token, agent["agent_token"], account.json()["id"]
+    return client, engine, admin_token, account.json()["agent_token"], account.json()["id"]
+
+
+def test_account_assignment_rotates_agent_tokens_and_hides_them_from_reads(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, _, admin_token = api_client
+    admin_headers = _headers(admin_token)
+    first_agent = client.post(
+        "/api/v1/agents", headers=admin_headers, json={"name": "bound-agent-first"}
+    ).json()
+    account = client.post(
+        "/api/v1/accounts",
+        headers=admin_headers,
+        json={"nickname": "bound-account", "agent_id": first_agent["id"]},
+    )
+    assert account.status_code == 201
+    first_account = account.json()
+    assert first_account["agent_token"] != first_agent["agent_token"]
+    assert "agent_token" not in client.get("/api/v1/accounts", headers=admin_headers).text
+
+    replacement = client.post(
+        "/api/v1/agents", headers=admin_headers, json={"name": "bound-agent-replacement"}
+    ).json()
+    reassigned = client.patch(
+        f"/api/v1/accounts/{first_account['id']}/agent",
+        headers=admin_headers,
+        json={"agent_id": replacement["id"]},
+    )
+    assert reassigned.status_code == 200
+    replacement_account = reassigned.json()
+    assert replacement_account["agent_token"] != replacement["agent_token"]
+    assert (
+        client.post(
+            "/api/v1/agent/heartbeat",
+            headers=_headers(first_account["agent_token"]),
+            json={"state": "running"},
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/api/v1/agent/heartbeat",
+            headers=_headers(replacement["agent_token"]),
+            json={"state": "running"},
+        ).status_code
+        == 401
+    )
+    accepted = client.post(
+        "/api/v1/agent/heartbeat",
+        headers=_headers(replacement_account["agent_token"]),
+        json={"state": "running"},
+    )
+    assert accepted.status_code == 200
+    assert accepted.json()["account_id"] == first_account["id"]
+
+    unassigned = client.patch(
+        f"/api/v1/accounts/{first_account['id']}/agent",
+        headers=admin_headers,
+        json={"agent_id": None},
+    )
+    assert unassigned.status_code == 200
+    assert "agent_token" not in unassigned.json()
+    assert (
+        client.post(
+            "/api/v1/agent/heartbeat",
+            headers=_headers(replacement_account["agent_token"]),
+            json={"state": "running"},
+        ).status_code
+        == 401
+    )
 
 
 def test_health_docs_and_admin_auth(api_client: tuple[TestClient, object, str]) -> None:
@@ -149,6 +225,113 @@ def test_agent_token_is_one_time_and_commands_are_scoped(
         assert saved_command.state == "failed"
 
 
+def test_agent_token_rotation_returns_one_time_secret_without_changing_assignment(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, _, admin_token, old_token, account_id = _provision(api_client)
+    admin_headers = _headers(admin_token)
+    agent = next(
+        item
+        for item in client.get("/api/v1/agents", headers=admin_headers).json()
+        if item["name"] == "agent-01"
+    )
+
+    rotated = client.post(f"/api/v1/agents/{agent['id']}/rotate-token", headers=admin_headers)
+    assert rotated.status_code == 200
+    new_token = rotated.json()["agent_token"]
+    assert rotated.json()["agent_id"] == agent["id"]
+    assert new_token != old_token
+    assert (
+        client.post(
+            "/api/v1/agent/heartbeat",
+            headers=_headers(old_token),
+            json={"state": "running"},
+        ).status_code
+        == 401
+    )
+    heartbeat = client.post(
+        "/api/v1/agent/heartbeat",
+        headers=_headers(new_token),
+        json={"state": "running"},
+    )
+    assert heartbeat.status_code == 200
+    assert heartbeat.json()["account_id"] == account_id
+    assert new_token not in client.get("/api/v1/agents", headers=admin_headers).text
+    assert new_token not in client.get("/api/v1/audit", headers=admin_headers).text
+
+
+def test_chat_session_reads_assignment_without_refreshing_agent_presence(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, _, agent_token, account_id = _provision(api_client)
+
+    with Session(engine) as session:
+        agent = session.scalar(select(Agent).where(Agent.name == "agent-01"))
+        assert agent is not None
+        assert agent.runtime_state == "unknown"
+        assert agent.last_seen_at is None
+
+    response = client.get("/api/v1/agent/chat/session", headers=_headers(agent_token))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "account_id": account_id,
+        "account_nickname": "test-account",
+        "subscription_tier": "unknown",
+        "subscription_source": "baseline_not_recorded",
+        "subscription_evidence_source": "unknown",
+        "subscription_expires_at": None,
+    }
+    with Session(engine) as session:
+        agent = session.scalar(select(Agent).where(Agent.name == "agent-01"))
+        assert agent is not None
+        assert agent.runtime_state == "unknown"
+        assert agent.last_seen_at is None
+
+
+def test_chat_session_exposes_only_assigned_account_vip_summary(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, _, agent_token, account_id = _provision(api_client)
+    starts_at = utcnow() - timedelta(minutes=1)
+    expires_at = utcnow() + timedelta(days=7)
+    with Session(engine) as session:
+        session.add(
+            SubscriptionEntitlement(
+                account_id=UUID(account_id),
+                base_tier="free",
+                base_term="unknown",
+                evidence_source="official_record",
+                evidence_note="Private operator note must not be sent to an agent.",
+                observed_at=utcnow(),
+            )
+        )
+        session.add(
+            SubscriptionOverlay(
+                account_id=UUID(account_id),
+                tier="gold",
+                starts_at=starts_at,
+                expires_at=expires_at,
+                evidence_source="manual_entry",
+                evidence_note="Private overlay note must not be sent to an agent.",
+            )
+        )
+        session.commit()
+
+    response = client.get("/api/v1/agent/chat/session", headers=_headers(agent_token))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["account_id"] == account_id
+    assert payload["account_nickname"] == "test-account"
+    assert payload["subscription_tier"] == "gold"
+    assert payload["subscription_source"] == "temporary_overlay"
+    assert payload["subscription_evidence_source"] == "manual_entry"
+    assert payload["subscription_expires_at"] is not None
+    assert "evidence_note" not in payload
+    assert "Private" not in response.text
+
+
 def test_expired_lease_cannot_submit_result_and_can_be_reclaimed(
     api_client: tuple[TestClient, object, str],
 ) -> None:
@@ -265,3 +448,105 @@ def test_account_agent_assignment_is_one_to_one_and_cancels_pending_commands(
     commands = client.get("/api/v1/commands", headers=headers).json()
     assert commands[0]["state"] == "canceled"
     assert first_agent_id != second_agent["id"]
+
+
+def test_revoking_agent_cancels_claimed_command_and_invalidates_lease(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, admin_token, agent_token, account_id = _provision(api_client)
+    headers = _headers(admin_token)
+    queued = client.post(
+        "/api/v1/commands",
+        headers=headers,
+        json={"account_id": account_id, "operation": "launch"},
+    )
+    assert queued.status_code == 201
+    command_id = queued.json()["id"]
+
+    claimed = client.get("/api/v1/agent/commands/next", headers=_headers(agent_token))
+    assert claimed.status_code == 200
+    assert claimed.json()["command"]["id"] == command_id
+
+    agent_id = client.get("/api/v1/agents", headers=headers).json()[0]["id"]
+    revoked = client.post(f"/api/v1/agents/{agent_id}/revoke", headers=headers)
+    assert revoked.status_code == 200
+
+    with Session(engine) as session:
+        command = session.get(ControlCommand, UUID(command_id))
+        assert command is not None
+        assert command.state == "canceled"
+        assert command.claim_token_hash is None
+        assert command.claim_expires_at is None
+        assert command.finished_at is not None
+
+
+def test_expired_lease_cleanup_is_scoped_to_polling_agent(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, admin_token, first_token, _ = _provision(api_client)
+    headers = _headers(admin_token)
+
+    created = client.post(
+        "/api/v1/agents",
+        headers=headers,
+        json={"name": "agent-02"},
+    )
+    assert created.status_code == 201
+    second = created.json()
+    account = client.post(
+        "/api/v1/accounts",
+        headers=headers,
+        json={"nickname": "second-account", "agent_id": second["id"]},
+    )
+    assert account.status_code == 201
+    second_token = account.json()["agent_token"]
+
+    queued = client.post(
+        "/api/v1/commands",
+        headers=headers,
+        json={"account_id": account.json()["id"], "operation": "launch"},
+    )
+    assert queued.status_code == 201
+    command_id = queued.json()["id"]
+
+    claimed = client.get(
+        "/api/v1/agent/commands/next",
+        headers=_headers(second_token),
+    )
+    assert claimed.status_code == 200
+    assert claimed.json()["command"]["id"] == command_id
+
+    with Session(engine) as session:
+        command = session.get(ControlCommand, UUID(command_id))
+        assert command is not None
+        command.claim_attempts = 3
+        command.claim_expires_at = utcnow() - timedelta(seconds=1)
+        session.commit()
+
+    unrelated_poll = client.get(
+        "/api/v1/agent/commands/next",
+        headers=_headers(first_token),
+    )
+    assert unrelated_poll.status_code == 200
+    assert unrelated_poll.json()["command"] is None
+
+    with Session(engine) as session:
+        command = session.get(ControlCommand, UUID(command_id))
+        assert command is not None
+        assert command.state == "claimed"
+        assert command.claim_token_hash is not None
+
+    owner_poll = client.get(
+        "/api/v1/agent/commands/next",
+        headers=_headers(second_token),
+    )
+    assert owner_poll.status_code == 200
+    assert owner_poll.json()["command"] is None
+
+    with Session(engine) as session:
+        command = session.get(ControlCommand, UUID(command_id))
+        assert command is not None
+        assert command.state == "failed"
+        assert command.result_code == "lease_expired"
+        assert command.claim_token_hash is None
+        assert command.claim_expires_at is None

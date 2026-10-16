@@ -164,3 +164,14 @@ def test_fetch_vmix_inputs_parses_only_valid_input_records(monkeypatch):
         "type": "VideoCapture",
     }]
     assert requested[0][0] == "http://127.0.0.1:8088/api/"
+
+
+def test_fetch_vmix_inputs_rejects_dtd_and_entities(monkeypatch):
+    response = (
+        b'<!DOCTYPE vmix [<!ENTITY data SYSTEM "file:///etc/passwd">]>'
+        b"<vmix><inputs>&data;</inputs></vmix>"
+    )
+    monkeypatch.setattr(wsg, "vmix_api_request", lambda *args, **kwargs: response)
+
+    with pytest.raises(RuntimeError, match="vMix returned invalid XML"):
+        wsg.fetch_vmix_inputs("http://127.0.0.1:8088")

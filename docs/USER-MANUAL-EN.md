@@ -19,6 +19,7 @@ Apps: `room-control`, `chat-im-private`, `status-random`, `status-marquee`, `sta
 
 1. Open Camfrog and join a room (not tray-minimized).
 2. Open the app and use **Setup → Auto-detect** (room/im apps) or **Discover controls** (status/private-chat/web apps). This fills the control selectors automatically.
+   Keep only the intended Camfrog client process within the configured window-title filter. If matching windows belong to multiple or unverifiable processes, the desktop apps stop instead of guessing which account to control.
 3. Keep `dry_run` ON while checking behavior. Dry-run only logs what *would* be sent.
 4. Turn live mode on only when ready: **LIVE** checkbox / **Send statuses live to Camfrog** / **Send live**.
 

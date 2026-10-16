@@ -9,7 +9,7 @@ Missing keys use built-in defaults. This reference covers the source CLI configu
 | `language` | `auto` | UI/log language: `auto`, `th`, `en` (CLI `--lang` overrides) |
 | `reload_config` | `true` | Hot-reload this file when it changes (invalid edits rejected) |
 | `stats.enabled/file/write_seconds` | `true` / `stats.json` / `60` | Counters shown by `state` |
-| `window_title_regex` | `.*Camfrog.*` | Regex for the Camfrog window title |
+| `window_title_regex` | `.*Camfrog.*` | Regex for Camfrog top-level windows. Multiple windows are allowed only when they belong to one process; matches spanning multiple or unverifiable processes fail closed. |
 | `dry_run` | `true` | `true` = log only, nothing sent. Random/Marquee apps expose this as **Send statuses live to Camfrog**; unchecked keeps dry-run on. |
 | `poll_seconds` | `1.5` | Main loop tick (0.2–60) |
 | `log.level/file/max_bytes/backups` | `INFO` / `camfrog_auto.log` | Rotating log. **Background mode needs `file`** |

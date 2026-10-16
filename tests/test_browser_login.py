@@ -109,9 +109,17 @@ def test_cookies_without_camfrog_raises():
         bl._cookies_to_string([{"name": "_ga", "value": "x", "domain": ".google.com"}])
 
 
-def test_find_browser_returns_none_off_windows():
-    if sys.platform == "win32":
-        pytest.skip("browser present on Windows")
+def test_find_browser_returns_first_available_candidate(monkeypatch):
+    monkeypatch.setattr(bl, "BROWSER_CANDIDATES", ("first.exe", "second.exe"))
+    monkeypatch.setattr(bl.Path, "is_file", lambda path: path.name == "second.exe")
+
+    assert bl.find_browser() == "second.exe"
+
+
+def test_find_browser_returns_none_when_no_candidate_exists(monkeypatch):
+    monkeypatch.setattr(bl, "BROWSER_CANDIDATES", ("first.exe", "second.exe"))
+    monkeypatch.setattr(bl.Path, "is_file", lambda _path: False)
+
     assert bl.find_browser() is None
 
 

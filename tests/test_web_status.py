@@ -571,11 +571,17 @@ def test_dpapi_needs_windows():
     assert "Windows" in str(exc.value)
 
 
-def test_aes_cookie_without_library_is_a_clean_error():
-    import importlib.util
+def test_aes_cookie_without_library_is_a_clean_error(monkeypatch):
+    import builtins
 
-    if importlib.util.find_spec("cryptography") is not None:
-        pytest.skip("cryptography installed; error path not applicable")
+    original_import = builtins.__import__
+
+    def import_without_cryptography(name, *args, **kwargs):
+        if name == "cryptography" or name.startswith("cryptography."):
+            raise ImportError("cryptography intentionally unavailable for this test")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", import_without_cryptography)
     with pytest.raises(ValueError) as exc:
         ws.decrypt_chrome_value(b"v10" + b"\x00" * 30, "")
     assert "cryptography" in str(exc.value)

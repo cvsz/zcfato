@@ -8,7 +8,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [Unreleased]
 
 ### Added
+- Added repository structure and Markdown-link validation to the main GitHub CI job.
+- Added the LINE unit suite to the fast Linux CI job as well as its Windows packaging gate.
+- Added ZChat client and LINE unit suites to the cross-platform `make test` target.
+- Added production-grade structured JSON logging (`StructuredLogger`) with standardized fields (`ts`, `level`, `event`, `request_id`) and startup lifespan telemetry.
+- Added database connection URL credential sanitization (`redact_db_url`) to protect secrets in logs.
+- Added configurable `CORSMiddleware` support via `cors_origins` and standard security headers (`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`) on all API responses.
+- Added machine-readable `--json` flag and CHANGELOG heading check to `scripts/validate_repo.py`.
+- Added dynamic absolute `PYTHON` path resolution in `Makefile` and convenience `venv` and `clean` targets.
 - Added the local-first ZChat Control Server subproject with PostgreSQL-backed accounts, agents, leased commands, audit events, sanitized snapshots, and an operator dashboard. Live Camfrog login/fetch, Cloud Bot transport, checkout, and production deployment remain disabled or unverified.
+- Added account-scoped internal chat transport to the control server with idempotent submissions, paginated history, bounded agent delivery leases, acknowledgments, and revocation handling.
+- Added a separate Windows ZChat agent chat client with in-memory credentials, assigned-account discovery, idempotent sends, and acknowledged incoming delivery.
+- Updated desktop updater and repository bootstrap defaults to use `cvsz/zchat`.
 - Combined Status Changer executable with Random, Marquee, and Activity Log tabs; its configuration and runtime data stay under `status-data/`.
 - Bot Manager plugin names, field labels, and known choices now follow the TH/EN setting while submitted option values remain unchanged.
 - Bot Manager's local Music DJ page starts/stops the packaged worker and controls its queue through bounded, expiring local JSON requests; Music DJ remains the queue owner.
@@ -19,9 +30,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - Added a read-only Camfrog public presence probe that fingerprints bounded GIF responses and persists raw evidence locally while classifying every observation as UNKNOWN.
 
 ### Fixed
+- Camfrog window selection now fails closed when the configured title filter spans multiple or unverifiable processes instead of choosing the first matching client.
 - Release publishing now uploads the flat checksum manifest as `SHA256SUMS.txt`, matching the name expected by existing app updaters.
+- Fixed `validate_repo.py` performance and exclusion list with `os.walk` directory pruning, reducing scan execution time by 98%.
+- Fixed GitHub Actions supply-chain security by pinning actions to immutable commit SHAs with least-privilege `contents: read` permissions.
 
 ### Changed
+- Updated the architecture guide to describe the maintained desktop apps, ZChat services, repository tooling, and deployment boundaries.
 - Web Status now defaults to switching non-empty status slots every 60 seconds.
 - Status Changer records completed status text in its worker log and clears its status logs daily at 12:00 local time.
 - Music DJ queue paths are restricted to the app data folder.

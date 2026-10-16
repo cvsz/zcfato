@@ -183,6 +183,31 @@ def test_module_has_no_project_imports(name):
         assert bad not in src, f"{name}: {bad}"
 
 
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "camfrog_status_gui",
+        "room_control_gui",
+        "im_autoreply_gui",
+        "camfrog_music_gui",
+        "status_random_gui",
+        "status_marquee_gui",
+        "status_changer_gui",
+        "chat_im_private_gui",
+    ],
+)
+def test_standalone_engines_fail_closed_across_multiple_camfrog_processes(name):
+    mod = load(name)
+    windows = [
+        SimpleNamespace(process_id=lambda: 101),
+        SimpleNamespace(process_id=lambda: 202),
+    ]
+
+    with pytest.raises(RuntimeError, match="processes match"):
+        mod._require_single_window_process(windows)
+
 def test_profiles_and_modes_are_pinned():
     assert load("room_control_gui").APP_PROFILE == "room"
     assert load("im_autoreply_gui").APP_PROFILE == "im_reply"
@@ -869,6 +894,7 @@ def test_status_window_discovery_includes_hidden_windows(monkeypatch):
         handle=77,
         class_name=lambda: "#32770",
         window_text=lambda: "Camfrog Video Chat",
+        process_id=lambda: 77,
     )
     calls = []
 
@@ -880,6 +906,9 @@ def test_status_window_discovery_includes_hidden_windows(monkeypatch):
     class UiaWindow:
         def wrapper_object(self):
             return self
+
+        def process_id(self):
+            return 77
 
     class UiaDesktop:
         def window(self, **_kwargs):

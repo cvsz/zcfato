@@ -10,9 +10,9 @@ The tag is pinned to that commit. The release is created with the authenticated
 `gh` CLI (no token is stored in this repo); `gh auth status` must succeed.
 
 Assets: every feature exe (stable names so the apps' self-update can find their
-own file), the line-status-changer exe + generic default config, the
-all-features zip, and SHA256SUMS.txt (the self-update verifies downloads
-against it). Local LINE settings are never included.
+own file), the ZChat agent chat client, line-status-changer exe + generic
+default config, the all-features zip, and SHA256SUMS.txt (the self-update
+verifies downloads against it). Local LINE settings are never included.
 """
 import argparse
 import hashlib
@@ -43,6 +43,7 @@ FEATURE_EXES = {
     "web-status.exe": DIST / "web-status" / "web-status.exe",
 }
 OTHER_ASSETS = {
+    "zchat-client.exe": DIST / "zchat-client" / "zchat-client.exe",
     "line-status-changer.exe": ROOT / "line" / "dist" / "line-status-changer.exe",
     "camfrog-features-windows.zip": ROOT / "camfrog-features-windows.zip",
 }
@@ -54,16 +55,6 @@ def app_version():
     if not match:
         raise SystemExit("APP_VERSION not found in camfrog_auto.py")
     return match.group(1)
-
-
-def release_version(args):
-    """Return the version to use for the release, or None for default."""
-    if not args:
-        return None
-    version = args[0]
-    if version.startswith("v2.") and re.match(r"^v2\\.(\\d+)\\.(\\d+)$", version):
-        return version
-    raise SystemExit(f"Invalid version format: {version}. Use format: v2.xx.x")
 
 
 def flat_sums(assets):
@@ -91,7 +82,9 @@ def release_notes(version):
         body = body.split("\n## [", 1)[0].strip()
         if body:
             return body
-    return "Camfrog feature apps v{0}.\n\nSee CHANGELOG.md for details.".format(version)
+    return "ZChat and Camfrog Windows apps v{0}.\n\nSee CHANGELOG.md for details.".format(
+        version
+    )
 
 
 def check_assets():
@@ -199,6 +192,30 @@ def verify_feature_hashes():
             raise SystemExit("artifact checksum mismatch: " + name)
 
 
+def verify_zchat_hash():
+    """Verify the separate ZChat executable against its build-produced manifest."""
+    executable = DIST / "zchat-client" / "zchat-client.exe"
+    manifest = DIST / "zchat-client" / "SHA256SUMS.txt"
+    if not manifest.is_file():
+        raise SystemExit("missing dist/zchat-client/SHA256SUMS.txt; run a full build first")
+    entries = manifest.read_text(encoding="ascii").splitlines()
+    if len(entries) != 1:
+        raise SystemExit("invalid zchat-client/SHA256SUMS.txt manifest")
+    parts = entries[0].split(maxsplit=1)
+    if (
+        len(parts) != 2
+        or not re.fullmatch(r"[0-9a-fA-F]{64}", parts[0])
+        or parts[1].lstrip("*").replace("\\", "/") != "zchat-client.exe"
+    ):
+        raise SystemExit("invalid zchat-client/SHA256SUMS.txt entry")
+    digest = hashlib.sha256()
+    with executable.open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    if digest.hexdigest() != parts[0].lower():
+        raise SystemExit("artifact checksum mismatch: zchat-client.exe")
+
+
 def gh_ready():
     result = subprocess.run(["gh", "auth", "status"], capture_output=True)
     return result.returncode == 0
@@ -225,6 +242,7 @@ def main(argv=None):
         raise SystemExit("release tag must match APP_VERSION to prevent mismatched releases")
     check_assets()
     verify_feature_hashes()
+    verify_zchat_hash()
     notes = release_notes(version)
     with tempfile.TemporaryDirectory(prefix="camfrog-release-") as temp_dir:
         public_config = Path(temp_dir) / "line_config.json"
@@ -239,7 +257,7 @@ def main(argv=None):
         asset_names = [name for name, _path in pairs]
 
         print("release : {0}".format(tag))
-        print("title   : Camfrog feature apps {0}".format(version))
+        print("title   : ZChat and Camfrog Windows apps {0}".format(version))
         print("notes   : {0} chars from CHANGELOG.md".format(len(notes)))
         for name in asset_names:
             print("  asset : {0}".format(name))
@@ -263,7 +281,7 @@ def main(argv=None):
         try:
             command = (["gh", "release", "create", tag] + assets
                        + ["--target", target,
-                          "--title", "Camfrog feature apps {0}".format(version),
+                          "--title", "ZChat and Camfrog Windows apps {0}".format(version),
                           "--notes-file", notes_path])
             return subprocess.run(command).returncode
         finally:

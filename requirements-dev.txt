@@ -1,6 +1,6 @@
 -r requirements.txt
-pytest>=8
+pytest>=9.1.1
 pip-audit>=2.7,<3
 # Optional at runtime, bundled at build time: decrypts Chrome v10/v11 cookie
 # values for --chrome / the GUI Chrome button (DPAPI alone cannot).
-cryptography>=42
+cryptography>=50.0.2

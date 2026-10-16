@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
@@ -65,6 +66,20 @@ class CommandResultCode(StrEnum):
     lease_expired = "lease_expired"
 
 
+class ChatMessageDirection(StrEnum):
+    operator_to_agent = "operator_to_agent"
+    agent_to_operator = "agent_to_operator"
+
+
+class ChatMessageState(StrEnum):
+    queued = "queued"
+    claimed = "claimed"
+    received = "received"
+    delivered = "delivered"
+    failed = "failed"
+    canceled = "canceled"
+
+
 class AgentCreate(BaseModel):
     name: str = Field(min_length=1, max_length=120)
 
@@ -82,6 +97,11 @@ class AgentCreated(BaseModel):
     name: str
     agent_token: str = Field(repr=False)
     created_at: datetime
+
+
+class AgentTokenRotated(BaseModel):
+    agent_id: UUID
+    agent_token: str = Field(repr=False)
 
 
 class AgentRead(BaseModel):
@@ -123,6 +143,10 @@ class AccountRead(BaseModel):
     created_at: datetime
 
 
+class AccountAgentAssignmentRead(AccountRead):
+    agent_token: str | None = Field(default=None, repr=False)
+
+
 class HeartbeatRequest(BaseModel):
     state: AgentRuntimeState = AgentRuntimeState.running
     client_process_state: ClientProcessState | None = None
@@ -134,6 +158,30 @@ class HeartbeatResponse(BaseModel):
     account_id: UUID | None
     client_process_state: ClientProcessState | None
     last_seen_at: datetime
+
+
+class AgentChatSessionRead(BaseModel):
+    """Read the current assignment without changing command-agent presence."""
+
+    account_id: UUID | None
+    account_nickname: str | None = Field(default=None, max_length=256)
+    subscription_tier: str = Field(default="unknown", pattern="^(unknown|free|pro|extreme|gold)$")
+    subscription_source: str = Field(
+        default="baseline_not_recorded",
+        pattern="^(temporary_overlay|durable_baseline|overlapping_overlays|baseline_not_recorded|baseline_unverified)$",
+    )
+    subscription_evidence_source: str = Field(
+        default="unknown", pattern="^(unknown|operator_report|official_record|manual_entry)$"
+    )
+    subscription_expires_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_assignment_summary(self) -> AgentChatSessionRead:
+        if self.account_id is None and self.account_nickname is not None:
+            raise ValueError("An unassigned agent cannot have an account nickname.")
+        if self.account_id is None and self.subscription_tier != "unknown":
+            raise ValueError("An unassigned agent cannot have a subscription tier.")
+        return self
 
 
 class AccountRuntimeRead(BaseModel):
@@ -201,6 +249,81 @@ class AgentCommand(BaseModel):
 
 class CommandPollResponse(BaseModel):
     command: AgentCommand | None
+
+
+class ChatMessageCreate(BaseModel):
+    account_id: UUID
+    client_message_id: UUID
+    body: str = Field(min_length=1, max_length=4000, repr=False)
+
+    @field_validator("body")
+    @classmethod
+    def clean_body(cls, value: str) -> str:
+        return clean_chat_body(value)
+
+
+def clean_chat_body(value: str) -> str:
+    """Normalize and validate the text body shared by both chat directions."""
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    if not value.strip():
+        raise ValueError("Message body cannot be empty or whitespace only.")
+    if any((ord(char) < 32 and char not in "\n\t") or ord(char) == 127 for char in value):
+        raise ValueError("Message body cannot contain control characters.")
+    if len(value) > 4000:
+        raise ValueError("Message body must contain at most 4000 characters.")
+    return value
+
+
+class AgentChatMessageCreate(ChatMessageCreate):
+    pass
+
+
+class OperatorChatMessageCreate(ChatMessageCreate):
+    pass
+
+
+class ChatMessageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    account_id: UUID
+    agent_id: UUID
+    client_message_id: UUID
+    direction: ChatMessageDirection
+    body: str = Field(repr=False)
+    state: ChatMessageState
+    claim_attempts: int
+    created_at: datetime
+    delivered_at: datetime | None
+
+
+class AgentChatMessage(BaseModel):
+    id: UUID
+    account_id: UUID
+    client_message_id: UUID
+    body: str = Field(min_length=1, max_length=4000, repr=False)
+    claim_token: str = Field(min_length=32, max_length=128, repr=False)
+    claim_expires_at: datetime
+
+    @field_validator("body")
+    @classmethod
+    def clean_body(cls, value: str) -> str:
+        return clean_chat_body(value)
+
+    @field_validator("claim_expires_at")
+    @classmethod
+    def require_timezone(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("Claim expiry must include a timezone.")
+        return value
+
+
+class ChatMessagePollResponse(BaseModel):
+    message: AgentChatMessage | None
+
+
+class ChatMessageAckRequest(BaseModel):
+    claim_token: str = Field(min_length=32, max_length=128, repr=False)
 
 
 class CommandResultRequest(BaseModel):
@@ -280,7 +403,7 @@ class BalanceSummary(BaseModel):
     @field_validator("points", "coins", "rewards", "next_level_remain", "next_level_difference")
     @classmethod
     def finite_balance(cls, value: float | None) -> float | None:
-        if value is not None and (value != value or value in {float("inf"), float("-inf")}):
+        if value is not None and not math.isfinite(value):
             raise ValueError("Balance values must be finite numbers.")
         return value
 
