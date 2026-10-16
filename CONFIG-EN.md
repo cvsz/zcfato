@@ -18,6 +18,7 @@ Missing keys use built-in defaults. This reference covers the source CLI configu
 | `safety.stop_file` | `STOP` | Create this file to stop (cleared on next start) |
 | `safety.pid_file` | `camfrog_auto.pid` | PID file for background mode / single instance |
 | `safety.require_foreground` | `true` | Refuse to press Enter unless Camfrog is foreground |
+| `safety.discovery_mode` | `legacy` | `legacy` finds the Camfrog window by title regex; `verified` resolves it by executable identity, Authenticode signature, PID plus creation time, and structural window role, failing closed on ambiguity |
 | `safety.restore_previous_window` | `true` | After sending, return focus to the window you were using. Set `false` to leave Camfrog's chat window in front; IM auto-reply scrolls its local reply echo into the chat viewport either way |
 | `safety.max_consecutive_failures` | `5` | Stop after N failed ticks in a row (backoff + re-attach) |
 | `status.enabled` | `true` | Rotate status |

@@ -18,6 +18,7 @@ key ที่ไม่ใส่จะใช้ค่าเริ่มต้น 
 | `safety.stop_file` | `STOP` | สร้างไฟล์นี้เพื่อหยุด (ลบเองตอนเริ่มรอบใหม่) |
 | `safety.pid_file` | `camfrog_auto.pid` | ไฟล์ PID สำหรับโหมดเบื้องหลัง/กันรันซ้ำ |
 | `safety.require_foreground` | `true` | ไม่กด Enter ถ้า Camfrog ไม่อยู่หน้าสุด |
+| `safety.discovery_mode` | `legacy` | `legacy` หาหน้าต่าง Camfrog ด้วย title regex; `verified` ระบุตัวตนด้วย executable identity, ลายเซ็น Authenticode, PID+creation time และ window role เชิงโครงสร้าง ถ้ากำกวมจะหยุดแบบ fail-closed |
 | `safety.restore_previous_window` | `true` | ส่งเสร็จแล้วคืนโฟกัสให้หน้าต่างเดิม ตั้ง `false` เพื่อค้างหน้าต่างแชต Camfrog ไว้ด้านหน้า IM auto-reply จะเลื่อนข้อความ echo ฝั่งเครื่องเข้าพื้นที่แชตไม่ว่าค่านี้จะเป็นอะไร |
 | `safety.max_consecutive_failures` | `5` | หยุดเมื่อล้มเหลวติดกัน N ครั้ง |
 | `status.enabled` | `true` | หมุน status |
