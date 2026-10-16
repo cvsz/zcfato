@@ -50,3 +50,32 @@ Related historical artifact: [static reverse-engineering notes for Camfrog Statu
   and aborts if the room is not the foreground window at any step.
 - Still unverified: whether UIA exposes element **names** for the web text (the dumps redact names). Run `python camfrog_auto.py chat-probe`:
   it prints the last parsed lines; lines marked `OK` are ones the bot could answer.
+
+## Verified Live Windows 11 UI Runtime Integration (Camfrog 8.5.0.51219)
+
+Verified on a live Windows 11 system with Python 3.14, psutil 7.2.2, pywinauto 0.6.9, and the genuine installed Camfrog 8.5 client:
+
+1. **Process Discovery (`WindowsCamfrogProcessDiscovery`):**
+   - Main client process: `Camfrog Video Chat.exe` (PID matched, creation time matched, PE `FileVersion` 8.5.0.51219).
+   - Authenticode signature: verified valid with `WinVerifyTrust` (`wintrust.dll`), Signer Subject confirmed as `Camfrog LLC` via `CryptQueryObject` / `CertGetNameStringW` (`crypt32.dll`).
+   - Exclusion: CEF helper subprocesses (`camfrog_cef.exe` with `--type=renderer`, `--type=gpu-process`, `--type=utility`) and ZChat's own automation processes (`os.getpid()`, GUI titles) are strictly filtered out.
+   - Anti-targeting: fail-closed if multiple Camfrog processes exist and no explicit PID is provided.
+
+2. **Structural Window Classification (`WindowsCamfrogWindowClassifier`):**
+   - **IM history window:** identified by embedded `Internet Explorer_Server` pane `camfrog://wb-log-im-data.inside/` and native edit input (`CEditTS`/`Edit`), without `VideoViewport`.
+   - **Room window:** identified by `VideoViewport` control and `Internet Explorer_Server` pane `camfrog://wb-log-room-data.inside/`.
+   - **Main client / directory:** identified by `CTreeViewTS` (buddy list / contact directory) and `CComboBoxTS` (status selector, id 1436).
+   - Ambiguous or unrecognized windows fail-closed to `UNKNOWN` role.
+
+3. **Read-Only Attachment & Ownership Rules:**
+   - Safe read-only attachment to an existing running client via `attach_to_camfrog_client()`.
+   - Process and window identity revalidated before any interaction (`revalidate_process_identity`, `revalidate_window_identity`).
+   - Strict ownership protection: client processes not launched by the agent are never terminated (`terminate_client_process` raises `PermissionError`).
+
+4. **Evidence Boundary State Separation (`ClientRuntimeState`):**
+   - `process_running`: verified executable, PID, creation timestamp, and valid `Camfrog LLC` signature.
+   - `ui_visible`: confirmed visible top-level windows of the verified process.
+   - `account_authenticated`: confirmed main directory window active with `CTreeViewTS` and status `CComboBoxTS`. Process running alone does not establish authentication.
+   - `room_member`: room window presence alone does not establish membership. Live testing verified that a user kicked due to inactivity still has a visible room window, but `room_member` evaluates to `False`.
+   - Privacy guarantee: no message bodies or sensitive credentials are collected or persisted during window discovery or diagnostic generation.
+
