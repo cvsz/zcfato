@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
@@ -17,9 +18,16 @@ from .schemas import AgentChatMessage, AgentChatSessionRead, ChatMessageRead, He
 class AgentTransportError(RuntimeError):
     """A sanitized error from the control-plane transport."""
 
-    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        cf_ray_id: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.status_code = status_code
+        self.cf_ray_id = cf_ray_id
 
 
 class _RejectRedirects(HTTPRedirectHandler):
@@ -41,10 +49,38 @@ def validate_server_url(server_url: str) -> str:
         raise ValueError("Server URL must be an absolute HTTP(S) URL.")
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise ValueError("Server URL cannot include credentials, query, or fragment.")
+    if parsed.path not in {"", "/"}:
+        raise ValueError("Enter the control server origin only; remove the URL path.")
     local_hosts = {"localhost", "127.0.0.1", "::1"}
     if parsed.scheme != "https" and hostname.lower() not in local_hosts:
         raise ValueError("HTTPS is required except for loopback development URLs.")
     return server_url.strip().rstrip("/")
+
+
+def normalize_agent_token(agent_token: str) -> str:
+    """Trim accidental boundary whitespace and validate a raw issued agent token."""
+    if not isinstance(agent_token, str):
+        raise ValueError("Paste the raw one-time-issued agent token without a Bearer prefix.")
+    normalized = agent_token.strip()
+    if (
+        not normalized
+        or len(normalized) > 256
+        or not normalized.isascii()
+        or not all(char.isalnum() or char in "-_" for char in normalized)
+    ):
+        raise ValueError("Paste the raw one-time-issued agent token without a Bearer prefix.")
+    return normalized
+
+
+def _cloudflare_ray_id(headers: Any) -> str | None:
+    """Return only a bounded, plain-text Cloudflare Ray ID from an error header."""
+    try:
+        value = headers.get("CF-Ray")
+    except (AttributeError, TypeError):
+        return None
+    if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9-]{1,80}", value):
+        return value
+    return None
 
 
 class ControlPlaneClient:
@@ -52,17 +88,9 @@ class ControlPlaneClient:
 
     def __init__(self, server_url: str, agent_token: str, *, timeout: float = 10.0) -> None:
         self.base_url = validate_server_url(server_url) + "/api/v1"
-        if (
-            not isinstance(agent_token, str)
-            or not agent_token
-            or len(agent_token) > 256
-            or not agent_token.isascii()
-            or not all(char.isalnum() or char in "-_" for char in agent_token)
-        ):
-            raise ValueError("A valid one-time-issued agent token is required.")
+        self._agent_token = normalize_agent_token(agent_token)
         if not 0 < timeout <= 120:
             raise ValueError("Request timeout must be between 0 and 120 seconds.")
-        self._agent_token = agent_token
         self._timeout = timeout
         self._opener = build_opener(_RejectRedirects())
 
@@ -75,6 +103,7 @@ class ControlPlaneClient:
             headers={
                 "Authorization": f"Bearer {self._agent_token}",
                 "Accept": "application/json",
+                "User-Agent": "ZChat-Agent/1.0",
                 **({"Content-Type": "application/json"} if encoded is not None else {}),
             },
         )
@@ -88,8 +117,12 @@ class ControlPlaneClient:
                 return json.loads(raw.decode("utf-8"))
         except HTTPError as exc:
             # Response bodies may contain server diagnostics or echoed input.
+            ray_id = _cloudflare_ray_id(exc.headers)
+            diagnostic = f" (Cloudflare Ray ID: {ray_id})" if ray_id else ""
             raise AgentTransportError(
-                f"Control plane returned HTTP {exc.code}.", status_code=exc.code
+                f"Control plane returned HTTP {exc.code}{diagnostic}.",
+                status_code=exc.code,
+                cf_ray_id=ray_id,
             ) from None
         except (URLError, TimeoutError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise AgentTransportError(
