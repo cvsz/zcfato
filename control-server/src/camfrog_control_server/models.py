@@ -60,6 +60,7 @@ class Account(Base):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid4)
     nickname: Mapped[str] = mapped_column(String(256), nullable=False)
+    nickname_key: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     agent_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("agents.id", ondelete="RESTRICT"), nullable=True
     )
@@ -67,6 +68,14 @@ class Account(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )
+
+
+class AccountNicknameClaim(Base):
+    """Unique, normalized nickname reservations that preserve legacy account rows."""
+
+    __tablename__ = "account_nickname_claims"
+
+    nickname_key: Mapped[str] = mapped_column(String(64), primary_key=True)
 
 
 class ControlCommand(Base):

@@ -56,7 +56,7 @@ class AgentChatWorker:
         self._retry_base = retry_base
         self._retry_max = retry_max
         self.events: queue.SimpleQueue[WorkerEvent] = queue.SimpleQueue()
-        self._commands: queue.SimpleQueue[tuple[str, str, str]] = queue.SimpleQueue()
+        self._commands: queue.SimpleQueue[tuple[str, str, str, str | None]] = queue.SimpleQueue()
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._accepted_lock = threading.Lock()
@@ -90,17 +90,21 @@ class AgentChatWorker:
         if thread is not None:
             thread.join(timeout)
 
-    def submit_message(self, body: str) -> str:
-        """Queue a validated message with an idempotency key stable across retries."""
+    def submit_message(self, body: str, account_id: str | None) -> str:
+        """Queue a validated message for the account selected at submission time."""
         if not isinstance(body, str):
             raise TypeError("Message body must be text.")
+        try:
+            normalized_account_id = str(UUID(account_id))
+        except (TypeError, ValueError, AttributeError) as exc:
+            raise ValueError("An assigned account is required to send a message.") from exc
         normalized = clean_chat_body(body)
         client_message_id = str(uuid4())
         with self._pending_send_lock:
             if self._pending_send_count >= MAX_PENDING_SENDS:
                 raise ValueError("The outgoing queue is full. Wait for pending messages to send.")
             self._pending_send_count += 1
-        self._commands.put(("send", client_message_id, normalized))
+        self._commands.put(("send", client_message_id, normalized, normalized_account_id))
         self._wake.set()
         return client_message_id
 
@@ -118,7 +122,7 @@ class AgentChatWorker:
                 self._accepted_order.append(normalized_id)
                 if len(self._accepted_order) > MAX_REMEMBERED_MESSAGE_IDS:
                     self._accepted_ids.discard(self._accepted_order.popleft())
-        self._commands.put(("ack", normalized_id, claim_token))
+        self._commands.put(("ack", normalized_id, claim_token, None))
         self._wake.set()
 
     def _emit(self, kind: str, **data: Any) -> None:
@@ -155,7 +159,7 @@ class AgentChatWorker:
 
     def _run_session(self) -> None:
         client = self._client_factory(self._server_url, self._agent_token)
-        pending_sends: deque[tuple[str, str]] = deque()
+        pending_sends: deque[tuple[str, str, str]] = deque()
         pending_acks: deque[tuple[str, str]] = deque()
         queued_ack_ids: set[str] = set()
         delivered_ids: OrderedDict[str, None] = OrderedDict()
@@ -168,11 +172,15 @@ class AgentChatWorker:
         while not self._stop.is_set():
             while True:
                 try:
-                    kind, item_id, value = self._commands.get_nowait()
+                    kind, item_id, value, target_account_id = self._commands.get_nowait()
                 except queue.Empty:
                     break
                 if kind == "send":
-                    pending_sends.append((item_id, value))
+                    if target_account_id is None:
+                        self._complete_send()
+                        self._emit("send_canceled", message_id=item_id)
+                    else:
+                        pending_sends.append((item_id, target_account_id, value))
                 elif item_id not in queued_ack_ids:
                     pending_acks.append((item_id, value))
                     queued_ack_ids.add(item_id)
@@ -183,7 +191,19 @@ class AgentChatWorker:
                     session = client.chat_session()
                     assigned = session.get("account_id")
                     account_id = str(assigned) if assigned is not None else None
-                    self._emit("assignment", account_id=account_id)
+                    self._emit(
+                        "assignment",
+                        account_id=account_id,
+                        account_nickname=session.get("account_nickname"),
+                        subscription_tier=session.get("subscription_tier", "unknown"),
+                        subscription_source=session.get(
+                            "subscription_source", "baseline_not_recorded"
+                        ),
+                        subscription_evidence_source=session.get(
+                            "subscription_evidence_source", "unknown"
+                        ),
+                        subscription_expires_at=session.get("subscription_expires_at"),
+                    )
                     next_assignment_refresh = now + self._assignment_refresh_interval
 
                 if pending_acks:
@@ -210,31 +230,35 @@ class AgentChatWorker:
                     else:
                         self._emit("acknowledged", message_id=message_id)
 
-                if account_id is not None and pending_sends:
-                    message_id, body = pending_sends.popleft()
-                    try:
-                        result = client.submit_chat_message(account_id, message_id, body)
-                    except AgentTransportError as exc:
-                        if exc.status_code == 401:
-                            self._emit("auth_required")
-                            return
-                        if self._is_terminal_client_error(exc):
+                if pending_sends:
+                    message_id, target_account_id, body = pending_sends.popleft()
+                    if target_account_id != account_id:
+                        self._complete_send()
+                        self._emit("send_canceled", message_id=message_id)
+                    elif account_id is not None:
+                        try:
+                            result = client.submit_chat_message(target_account_id, message_id, body)
+                        except AgentTransportError as exc:
+                            if exc.status_code == 401:
+                                self._emit("auth_required")
+                                return
+                            if self._is_terminal_client_error(exc):
+                                self._complete_send()
+                                self._emit(
+                                    "send_failed",
+                                    message_id=message_id,
+                                    status_code=exc.status_code,
+                                )
+                            else:
+                                pending_sends.appendleft((message_id, target_account_id, body))
+                                raise
+                        else:
                             self._complete_send()
                             self._emit(
-                                "send_failed",
+                                "sent",
                                 message_id=message_id,
-                                status_code=exc.status_code,
+                                server_message_id=result["id"],
                             )
-                        else:
-                            pending_sends.appendleft((message_id, body))
-                            raise
-                    else:
-                        self._complete_send()
-                        self._emit(
-                            "sent",
-                            message_id=message_id,
-                            server_message_id=result["id"],
-                        )
 
                 now = time.monotonic()
                 if account_id is not None and now >= next_poll:
@@ -279,9 +303,15 @@ class AgentChatWorker:
                     self._emit("auth_required")
                     return
                 if self._is_terminal_client_error(exc):
+                    diagnostic = f"; Cloudflare Ray ID: {exc.cf_ray_id}" if exc.cf_ray_id else ""
                     self._emit(
                         "error",
-                        message=f"Control server rejected the request (HTTP {exc.status_code}).",
+                        message=(
+                            f"Control server rejected the request "
+                            f"(HTTP {exc.status_code}{diagnostic})."
+                        ),
+                        status_code=exc.status_code,
+                        cf_ray_id=exc.cf_ray_id,
                     )
                     return
                 failures += 1
