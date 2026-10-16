@@ -170,7 +170,13 @@ def test_duplicate_start_terminates_unregistered_child(name, tmp_path, monkeypat
 
 @pytest.mark.parametrize("name", sorted(MODULES))
 def test_module_has_no_project_imports(name):
-    src = (ROOT / f"{name}.py").read_text(encoding="utf-8")
+    for location in ("src/features", "src/camfrog"):
+        candidate = ROOT / location / f"{name}.py"
+        if candidate.is_file():
+            src = candidate.read_text(encoding="utf-8")
+            break
+    else:
+        raise AssertionError(f"{name}: module file not found under src/")
     banned = ("import camfrog_auto", "import camfrog_gui", "import camfrog_status_gui",
               "import camfrog_private_chat_gui", "import room_control_gui",
               "import im_autoreply_gui", "import camfrog_music_gui",
@@ -441,10 +447,16 @@ def test_engine_data_directory_override_is_profile_scoped(profile, selected_over
     app_data = tmp_path / "app-data"
     status_data = tmp_path / "status-data"
     env = os.environ.copy()
+    pythonpath = os.pathsep.join([
+        str(ROOT / "src" / "camfrog"),
+        str(ROOT / "src" / "features"),
+        env.get("PYTHONPATH", ""),
+    ])
     env.update({
         "CAMFROG_APP_PROFILE": profile,
         "CAMFROG_APP_DATA_DIR": str(app_data),
         "ZCFATO_DATA_DIR": str(status_data),
+        "PYTHONPATH": pythonpath,
     })
     result = subprocess.run(
         [sys.executable, "-c", "import camfrog_auto; print(camfrog_auto.BASE)"],
@@ -462,6 +474,11 @@ def test_im_entry_clears_status_data_override(tmp_path):
 
     env = os.environ.copy()
     env["ZCFATO_DATA_DIR"] = str(tmp_path / "status-data")
+    env["PYTHONPATH"] = os.pathsep.join([
+        str(ROOT / "src" / "camfrog"),
+        str(ROOT / "src" / "features"),
+        env.get("PYTHONPATH", ""),
+    ])
     result = subprocess.run(
         [sys.executable, "-c",
          "import os, im_autoreply_entry; print('ZCFATO_DATA_DIR' in os.environ)"],

@@ -13,17 +13,17 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 GUI_FILES = (
-    "camfrog_gui.py",
-    "camfrog_private_chat_gui.py",
-    "camfrog_status_gui.py",
-    "camfrog_music_gui.py",
-    "chat_im_private_gui.py",
-    "room_control_gui.py",
-    "im_autoreply_gui.py",
-    "status_random_gui.py",
-    "status_marquee_gui.py",
-    "status_changer_gui.py",
-    "web_status_gui.py",
+    "src/camfrog/camfrog_gui.py",
+    "src/features/camfrog_private_chat_gui.py",
+    "src/features/camfrog_status_gui.py",
+    "src/features/camfrog_music_gui.py",
+    "src/features/chat_im_private_gui.py",
+    "src/features/room_control_gui.py",
+    "src/features/im_autoreply_gui.py",
+    "src/features/status_random_gui.py",
+    "src/features/status_marquee_gui.py",
+    "src/features/status_changer_gui.py",
+    "src/features/web_status_gui.py",
     "line/line_status_gui.py",
 )
 
@@ -234,7 +234,7 @@ def test_all_gui_files_use_web_status_light_palette():
     old_palette = ("#edf2f5", "#233548", "#087b83", "#d9e8f0", "#f4f7f7",
                    "#a52834", "#138a55", "#1769c2", "#006d78", "#d72d32")
     for relative in GUI_FILES:
-        source = (ROOT / relative).read_text(encoding="utf-8").lower()
+        source = (ROOT / relative).read_text(encoding="utf-8").lower() if not relative.startswith("src/") else (ROOT / relative).read_text(encoding="utf-8").lower()
         assert "#f4f1e8" in source, relative
         assert "#8b672b" in source, relative
         for color in old_palette:

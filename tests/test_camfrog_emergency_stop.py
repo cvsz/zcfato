@@ -24,6 +24,14 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _resolve_src(name: str) -> Path:
+    for location in ("src/features", "src/camfrog"):
+        candidate = ROOT / location / name
+        if candidate.is_file():
+            return candidate
+    raise AssertionError(f"module file not found: {name}")
 sys.path.insert(0, str(ROOT))
 
 import camfrog_emergency_stop as es
@@ -295,7 +303,7 @@ def test_concurrent_activate_and_check_is_consistent():
 # ---------- Static safety: no destructive primitives in code ----------
 
 def _code_nodes():
-    source = (ROOT / "camfrog_emergency_stop.py").read_text(encoding="utf-8")
+    source = _resolve_src("camfrog_emergency_stop.py").read_text(encoding="utf-8")
     return ast.parse(source)
 
 

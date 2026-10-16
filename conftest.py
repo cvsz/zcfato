@@ -10,6 +10,7 @@ from the repo root (e.g. during local development) would otherwise crash.
 """
 
 import sys
+from pathlib import Path
 
 # Always exclude these directory globs from collection.
 # pytest reads this list before importing any collected module.
@@ -20,3 +21,12 @@ if sys.platform != "win32":
         "tools/*.py",
         "windows_tests/*.py",
     ]
+
+# Make the reorganized source layout importable: shared runtime modules in
+# src/camfrog and standalone feature modules in src/features keep their
+# flat top-level import names (no packages), resolved via these paths.
+_REPO_ROOT = Path(__file__).resolve().parent
+for _dirname in ("src/camfrog", "src/features"):
+    _candidate = str(_REPO_ROOT / _dirname)
+    if _candidate not in sys.path:
+        sys.path.insert(0, _candidate)

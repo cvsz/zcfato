@@ -52,8 +52,22 @@ for _n in ("stdout", "stderr"):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
 # Frozen (PyInstaller) -> files live next to the exe, not the temp unpack dir.
+def _source_base() -> Path:
+    """Repository root when running from a source checkout.
+
+    Source modules live under src/<area>/ while runtime data and example
+    configs live at the repository root (their pre-reorganization home).
+    Frozen executables and explicit *_DATA_DIR overrides are unaffected.
+    """
+    here = Path(__file__).resolve().parent
+    root = here.parent.parent
+    if here.parent.name == "src" and (root / "config.example.json").is_file():
+        return root
+    return here
+
+
 BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
-    else Path(__file__).resolve().parent
+    else _source_base()
 
 APP_PROFILE = "chat_im_private"
 APP_PROFILES = {"full", "room", "im_reply", "status", "music"}
