@@ -16,6 +16,7 @@ if not exist "%PY%" (
 )
 
 "%PY%" -c "import sys; assert sys.version_info[:2] == (3, 12), 'LINE build requires Python 3.12'" || goto :fail
+"%PY%" "%~dp0..\tools\require_non_admin.py" || goto :fail
 "%PY%" -m pip install --disable-pip-version-check -r requirements-build.txt || goto :fail
 "%PY%" -m unittest discover -s tests -v || goto :fail
 "%PY%" -m py_compile config_store.py clipboard_support.py line_automation.py line_status_gui.py line_tray.py tests\test_core.py || goto :fail

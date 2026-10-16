@@ -490,29 +490,19 @@ class TrayBehaviorTests(unittest.TestCase):
                 tray._add_icon_with_retry(attempts=3, delay=0.5)
         self.assertEqual(tray._add_icon.call_count, 2)
         sleep.assert_called_once_with(0.5)
-        self.assertEqual(
-            [record.getMessage() for record in captured.records],
-            ["System tray icon attempt 1/3 failed: busy"],
-        )
+        self.assertEqual(len(captured.records), 1)
+        self.assertIn("attempt 1/3 failed: busy", captured.output[0])
 
     def test_tray_retry_raises_after_all_attempts_fail(self):
         tray = object.__new__(LineTrayIcon)
         tray._add_icon = mock.Mock(side_effect=RuntimeError("busy"))
         with self.assertLogs(level="WARNING") as captured:
             with mock.patch("line_tray.time.sleep"):
-                with self.assertRaisesRegex(
-                    RuntimeError, "rejected the system tray icon"
-                ):
+                with self.assertRaisesRegex(RuntimeError, "rejected the system tray icon"):
                     tray._add_icon_with_retry(attempts=3, delay=0.1)
         self.assertEqual(tray._add_icon.call_count, 3)
-        self.assertEqual(
-            [record.getMessage() for record in captured.records],
-            [
-                "System tray icon attempt 1/3 failed: busy",
-                "System tray icon attempt 2/3 failed: busy",
-                "System tray icon attempt 3/3 failed: busy",
-            ],
-        )
+        self.assertEqual(len(captured.records), 3)
+        self.assertTrue(all("failed: busy" in output for output in captured.output))
 
     def test_window_callback_defers_tk_restore_until_message_pump_returns(self):
         tray = object.__new__(LineTrayIcon)

@@ -164,6 +164,24 @@ class AgentChatSessionRead(BaseModel):
     """Read the current assignment without changing command-agent presence."""
 
     account_id: UUID | None
+    account_nickname: str | None = Field(default=None, max_length=256)
+    subscription_tier: str = Field(default="unknown", pattern="^(unknown|free|pro|extreme|gold)$")
+    subscription_source: str = Field(
+        default="baseline_not_recorded",
+        pattern="^(temporary_overlay|durable_baseline|overlapping_overlays|baseline_not_recorded|baseline_unverified)$",
+    )
+    subscription_evidence_source: str = Field(
+        default="unknown", pattern="^(unknown|operator_report|official_record|manual_entry)$"
+    )
+    subscription_expires_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def validate_assignment_summary(self) -> AgentChatSessionRead:
+        if self.account_id is None and self.account_nickname is not None:
+            raise ValueError("An unassigned agent cannot have an account nickname.")
+        if self.account_id is None and self.subscription_tier != "unknown":
+            raise ValueError("An unassigned agent cannot have a subscription tier.")
+        return self
 
 
 class AccountRuntimeRead(BaseModel):

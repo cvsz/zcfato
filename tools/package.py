@@ -4,8 +4,11 @@
   python tools/package.py NAME --hash-only
   python tools/package.py NAME --executables-only  excludes local app data from the zip
 
-Package names must be simple path-safe names. Archives are written atomically,
-so a failed archive write preserves any existing output.
+The Camfrog feature package contains only its eight listed apps. The separately
+released ZChat client and its retained verified build may coexist in ``dist/``
+but are never included in that package. Package names must be simple path-safe
+names. Archives are written atomically, so a failed archive write preserves any
+existing output.
 
 Replaces PowerShell's Get-FileHash / Compress-Archive, which are missing on
 Windows 7 / PowerShell < 4-5 or when PSModulePath is broken.
@@ -32,6 +35,12 @@ FEATURE_EXECUTABLES = (
     "status-random/status-random.exe",
     "status-changer/status-changer.exe",
     "web-status/web-status.exe",
+)
+COMPANION_EXECUTABLES = frozenset(
+    {
+        "zchat-client/zchat-client.exe",
+        "zchat-client-verified/zchat-client.exe",
+    }
 )
 
 
@@ -64,11 +73,12 @@ def write_sums(dist: Path | str, name: str) -> Path:
     if name == "camfrog-features":
         expected = set(FEATURE_EXECUTABLES)
         actual = {p.relative_to(dist).as_posix() for p in executables if p.is_file()}
-        if actual != expected:
-            missing = sorted(expected - actual)
-            unexpected = sorted(actual - expected)
+        unexpected = actual - expected - COMPANION_EXECUTABLES
+        missing = expected - actual
+        if missing or unexpected:
             raise ValueError(
-                f"Unexpected Camfrog executable set; missing={missing}, extra={unexpected}"
+                "Unexpected Camfrog executable set; "
+                f"missing={sorted(missing)}, extra={sorted(unexpected)}"
             )
         exes = [dist / relative for relative in FEATURE_EXECUTABLES]
     else:
@@ -106,7 +116,10 @@ def write_sums(dist: Path | str, name: str) -> Path:
 
 
 def make_zip(
-    dist: Path | str, zip_path: Path | str, executables_only: bool = False
+    dist: Path | str,
+    zip_path: Path | str,
+    executables_only: bool = False,
+    included_executables: set[str] | frozenset[str] | None = None,
 ) -> Path:
     dist, zip_path = Path(dist), Path(zip_path)
     dist_root = dist.resolve()
@@ -122,12 +135,29 @@ def make_zip(
         ) as handle:
             temporary_path = Path(handle.name)
         temporary_archive_path = temporary_path.resolve()
+        included_directories = (
+            {Path(executable).parent.as_posix() for executable in included_executables}
+            if included_executables is not None
+            else None
+        )
         with zipfile.ZipFile(temporary_path, "w", zipfile.ZIP_DEFLATED) as z:
             for p in sorted(dist.rglob("*")):
-                include = p.suffix.lower() == ".exe" or p.name in (
-                    "SHA256SUMS.txt",
-                    "app.ico",
-                )
+                if included_executables is None:
+                    include = p.suffix.lower() == ".exe" or p.name in (
+                        "SHA256SUMS.txt",
+                        "app.ico",
+                    )
+                else:
+                    relative = p.relative_to(dist).as_posix()
+                    include = (
+                        relative in included_executables
+                        or relative == "SHA256SUMS.txt"
+                        or (
+                            p.name == "app.ico"
+                            and p.parent.relative_to(dist).as_posix()
+                            in included_directories
+                        )
+                    )
                 if not p.is_file():
                     continue
                 if p.is_symlink():
@@ -211,10 +241,16 @@ def main(argv: list[str] | None = None) -> int:
                 args.executables_only or not (DIST / f"{name}.exe").is_file()
             )
             try:
+                included_executables = (
+                    frozenset(FEATURE_EXECUTABLES)
+                    if name == "camfrog-features"
+                    else None
+                )
                 z = make_zip(
                     DIST,
                     ROOT / f"{name}-windows.zip",
                     executables_only=executables_only,
+                    included_executables=included_executables,
                 )
             except BaseException as package_error:
                 try:
