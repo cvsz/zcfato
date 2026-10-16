@@ -8,10 +8,11 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .account_identity import account_nickname_key
 from .adapters import cloud_bot_state
 from .api import add_audit, get_db, require_admin, require_agent
 from .models import (
@@ -275,9 +276,18 @@ def read_presence(
     _admin: Annotated[None, Depends(require_admin)],
     db: Annotated[Session, Depends(get_db)],
 ) -> PresenceRead:
-    account = db.scalar(select(Account).where(func.lower(Account.nickname) == nickname.casefold()))
-    if account is None:
+    nickname_key = account_nickname_key(nickname)
+    accounts = list(
+        db.scalars(select(Account).where(Account.nickname_key == nickname_key).limit(2)).all()
+    )
+    if not accounts:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Account not found.")
+    if len(accounts) > 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Nickname is ambiguous because multiple legacy accounts exist.",
+        )
+    account = accounts[0]
     snapshot = db.get(PresenceSnapshot, account.id)
     if snapshot is None:
         return PresenceRead(

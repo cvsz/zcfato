@@ -52,6 +52,36 @@ def test_feature_package_requires_only_the_standalone_executables(tmp_path):
         raise AssertionError("expected an unexpected executable to stop packaging")
 
 
+def test_feature_package_excludes_the_separate_zchat_client(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    dist = root / "dist"
+    dist.mkdir(parents=True)
+    monkeypatch.setattr(package, "ROOT", root)
+    monkeypatch.setattr(package, "DIST", dist)
+
+    for relative in package.FEATURE_EXECUTABLES:
+        executable = dist / relative
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(relative.encode())
+
+    for relative in package.COMPANION_EXECUTABLES:
+        executable = dist / relative
+        executable.parent.mkdir(parents=True, exist_ok=True)
+        executable.write_bytes(b"separate zchat client")
+
+    assert package.main(["camfrog-features", "--executables-only"]) == 0
+
+    sums = dist / "SHA256SUMS.txt"
+    assert [line.split("  ", 1)[1] for line in sums.read_text().splitlines()] == list(
+        package.FEATURE_EXECUTABLES
+    )
+
+    with zipfile.ZipFile(root / "camfrog-features-windows.zip") as archive:
+        assert set(archive.namelist()) == set(package.FEATURE_EXECUTABLES) | {
+            "SHA256SUMS.txt"
+        }
+
+
 def test_zip_contains_files_with_relative_paths(tmp_path):
     d = tmp_path / "dist"
     (d / "sub").mkdir(parents=True)
