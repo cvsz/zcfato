@@ -93,6 +93,11 @@ def test_publisher_verification():
     assert discovery.verify_publisher("Fake Publisher Corp") is False
     assert discovery.verify_publisher("") is False
     assert discovery.verify_publisher("Untrusted LLC") is False
+    # Substring spoofs must not pass exact-identity matching
+    assert discovery.verify_publisher("Fake Camfrog LLC Corp") is False
+    assert discovery.verify_publisher("Camfrog LLC Malware Publisher") is False
+    assert discovery.verify_publisher("CN=Fake, O=Camfrog LLC") is False
+    assert discovery.verify_publisher("Camfrog LLC ") is True  # padding tolerated
 
 
 def test_process_discovery_filters_and_fail_closed(monkeypatch):

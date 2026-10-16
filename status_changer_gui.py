@@ -1237,11 +1237,18 @@ def commit_background(text: str, dry: bool = False, pid: Optional[int] = None) -
     executor = BackgroundStatusExecutor(
         default_mode=ExecutionMode.STRICT_BACKGROUND,
     )
-    evidence = executor.execute_status_change(
-        status_text=text,
-        pid=pid,
-        execution_mode=ExecutionMode.STRICT_BACKGROUND,
-    )
+    try:
+        evidence = executor.execute_status_change(
+            status_text=text,
+            pid=pid,
+            execution_mode=ExecutionMode.STRICT_BACKGROUND,
+        )
+    except Exception as exc:
+        # Fail closed: ambiguous identity, emergency stop, or any other
+        # execution-boundary failure must never propagate into GUI workers
+        # (StopIteration in particular must not silently end a loop).
+        log.error(t("bg_status_failed", state="EXECUTION_ERROR", code=str(exc)[:120]))
+        return False
 
     if evidence.result_state == StatusResultState.VERIFIED_APPLIED.value:
         log.info(t("bg_status_applied", text=shown(text)))
@@ -2926,11 +2933,17 @@ def cmd_im_probe(cfg):
 
 
 def cmd_status(cfg, text):
-    win = get_window(cfg)
     st, sf = cfg["status"], cfg["safety"]
+    text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
+    if st.get("execution_mode", "interactive") == "strict_background":
+        # Strict path discovers and verifies process/controls itself;
+        # never resolve legacy visible controls first.
+        ok = commit_background(text, dry=cfg["dry_run"])
+        print(t("ok") if ok else t("failed"))
+        return 0 if ok else 1
+    win = get_window(cfg)
     ctrl = find(win, st["edit"])
     btn = find(win, st["apply_button"]) if st["apply_button"] else None
-    text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
     ok = commit(win, ctrl, text, cfg["dry_run"], sf["require_foreground"], btn,
                 sf["restore_previous_window"], st.get("background_enter_target", "edit"),
                 background_if_not_foreground=True,
@@ -3840,20 +3853,29 @@ def _commit_frames(config, frames, cancel_event=None):
     """Send prebuilt frames one by one, stopping between frames on request."""
     st, sf = config["status"], config["safety"]
     mq = st["marquee"]
+    strict = st.get("execution_mode", "interactive") == "strict_background"
     _raise_if_status_cancelled(cancel_event)
-    win = get_window(config)
-    ctrl = find(win, st["edit"])
-    btn = find(win, st["apply_button"]) if st["apply_button"] else None
+    if strict:
+        # Strict path discovers and verifies process/controls itself per
+        # frame; never resolve legacy visible controls first.
+        win = ctrl = btn = None
+    else:
+        win = get_window(config)
+        ctrl = find(win, st["edit"])
+        btn = find(win, st["apply_button"]) if st["apply_button"] else None
     try:
         step = max(0.3, float(mq.get("step_seconds", 0.3)))
     except (TypeError, ValueError):
         step = 0.3
     for i, frame in enumerate(frames):
         _raise_if_status_cancelled(cancel_event)
-        ok = commit(win, ctrl, frame, config["dry_run"], sf["require_foreground"], btn,
-                    sf["restore_previous_window"], st.get("background_enter_target", "edit"),
-                    background_if_not_foreground=True,
-                    execution_mode=st.get("execution_mode", "interactive"))
+        if strict:
+            ok = commit_background(frame, dry=config["dry_run"])
+        else:
+            ok = commit(win, ctrl, frame, config["dry_run"], sf["require_foreground"], btn,
+                        sf["restore_previous_window"], st.get("background_enter_target", "edit"),
+                        background_if_not_foreground=True,
+                        execution_mode=st.get("execution_mode", "interactive"))
         if not ok:
             print(t("failed"))
             return 1

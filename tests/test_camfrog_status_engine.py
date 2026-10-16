@@ -310,3 +310,38 @@ def test_validate_status_config_invalid_mode_and_target():
     assert valid is False
     assert any("execution_mode" in e for e in errors)
     assert any("background_enter_target" in e for e in errors)
+
+
+def test_executor_ambiguous_identity_returns_evidence_not_raise():
+    resolver = MagicMock()
+    resolver.resolve_status_controls.side_effect = RuntimeError(
+        "Multiple verified Camfrog processes detected ([1111, 2222])."
+    )
+
+    executor = BackgroundStatusExecutor(resolver=resolver)
+    evidence = executor.execute_status_change("Test Status")
+
+    assert evidence.result_state == StatusResultState.FAILED.value
+    assert evidence.error_code == "AMBIGUOUS_PROCESS_IDENTITY"
+    assert evidence.verification_source == "process_discovery"
+
+
+def test_executor_refuses_new_work_during_emergency_stop():
+    from camfrog_emergency_stop import EmergencyStopRegistry, EmergencyStopScope
+
+    registry = EmergencyStopRegistry()
+    registry._reset_for_testing()
+    try:
+        resolver, _, _, _ = _make_mock_resolver(
+            current_applied="Old Status", target_readback="New Status"
+        )
+        executor = BackgroundStatusExecutor(resolver=resolver)
+        registry.activate(EmergencyStopScope.GLOBAL, "OPERATOR_HALT", "op-test")
+
+        evidence = executor.execute_status_change("New Status")
+
+        assert evidence.result_state == StatusResultState.FAILED.value
+        assert evidence.error_code == "EMERGENCY_STOP"
+        assert evidence.verification_source == "emergency_stop"
+    finally:
+        registry._reset_for_testing()

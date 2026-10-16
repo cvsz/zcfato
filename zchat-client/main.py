@@ -22,14 +22,14 @@ def _configure_source_paths() -> None:
 
 def main() -> None:
     _configure_source_paths()
-    if "--unified" in sys.argv:
-        from zchat_client.ui import main_unified as launch_unified
+    if "--classic" in sys.argv:
+        from zchat_client.ui import main as launch_ui
 
-        launch_unified()
+        launch_ui()
         return
-    from zchat_client.ui import main as launch_ui
+    from zchat_client.ui import main_unified as launch_unified
 
-    launch_ui()
+    launch_unified()
 
 
 if __name__ == "__main__":

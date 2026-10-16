@@ -1,7 +1,7 @@
 {
   "PID": 21992,
   "ParentPID": 9880,
-  "Path": "C:\\Users\\cvsz.ZEAZ\\AppData\\Local\\Programs\\Camfrog Video Chat\\Camfrog Video Chat.exe",
+  "Path": "C:\\Users\\REPLACE_ME\\AppData\\Local\\Programs\\Camfrog Video Chat\\Camfrog Video Chat.exe",
   "FileVersion": "8.5.0.51219",
   "ProductVersion": "8.5.0.51219",
   "Company": "Camfrog LLC",
@@ -9,6 +9,7 @@
   "Signer": "CN=Camfrog LLC, O=Camfrog LLC, L=Las Vegas, S=Nevada, C=US, SERIALNUMBER=10033625, OID.2.5.4.15=Private Organization, OID.1.3.6.1.4.1.311.60.2.1.2=Delaware, OID.1.3.6.1.4.1.311.60.2.1.3=US",
   "SHA256": "0B744602C004536DCF81E9965E8CB17358EB276B3876A1E70C50F72777C27E06",
   "MainWindowHandle": 5177812,
-  "MainWindowTitle": "zdevz (ไม่อยู่)",
-  "StartTime": "2026-10-16T21:21:56.6723657+07:00"
+  "MainWindowTitle": "REPLACE_ME_ACCOUNT (status)",
+  "StartTime": "2026-10-16T21:21:56.6723657+07:00",
+  "_sanitized_note": "Real Windows username and live account/window title replaced with placeholders per repository secret/PII policy. Version, signature, and binary hash are retained as verification evidence."
 }

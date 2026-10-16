@@ -219,6 +219,8 @@ def verify_windows_authenticode(exe_path: str) -> Tuple[bool, str]:
         ]
         crypt32.CertCloseStore.restype = wintypes.BOOL
         crypt32.CertCloseStore.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+        crypt32.CryptMsgClose.restype = wintypes.BOOL
+        crypt32.CryptMsgClose.argtypes = [ctypes.c_void_p]
 
         CERT_QUERY_OBJECT_FILE = 0x00000001
         CERT_QUERY_CONTENT_FLAG_PKCS7_SIGNED_EMBED = 1 << 10
@@ -246,24 +248,37 @@ def verify_windows_authenticode(exe_path: str) -> Tuple[bool, str]:
             None
         )
 
-        if res and hStore.value:
-            pCert = crypt32.CertEnumCertificatesInStore(hStore, None)
-            while pCert:
-                buf = ctypes.create_unicode_buffer(512)
-                chars = crypt32.CertGetNameStringW(
-                    pCert,
-                    CERT_NAME_SIMPLE_DISPLAY_TYPE,
-                    0,
-                    None,
-                    buf,
-                    len(buf)
-                )
-                if chars > 1:
-                    name = buf.value
-                    if "camfrog" in name.lower() or not publisher:
-                        publisher = name
-                pCert = crypt32.CertEnumCertificatesInStore(hStore, pCert)
-            crypt32.CertCloseStore(hStore, 0)
+        try:
+            if res and hStore.value:
+                pCert = crypt32.CertEnumCertificatesInStore(hStore, None)
+                while pCert:
+                    buf = ctypes.create_unicode_buffer(512)
+                    chars = crypt32.CertGetNameStringW(
+                        pCert,
+                        CERT_NAME_SIMPLE_DISPLAY_TYPE,
+                        0,
+                        None,
+                        buf,
+                        len(buf)
+                    )
+                    if chars > 1:
+                        name = buf.value
+                        if "camfrog" in name.lower() or not publisher:
+                            publisher = name
+                    pCert = crypt32.CertEnumCertificatesInStore(hStore, pCert)
+        finally:
+            # Release both native handles; the message handle is unused
+            # afterward and must not leak on repeated verification.
+            if hMsg.value:
+                try:
+                    crypt32.CryptMsgClose(hMsg)
+                except Exception:
+                    pass
+            if hStore.value:
+                try:
+                    crypt32.CertCloseStore(hStore, 0)
+                except Exception:
+                    pass
 
         return is_valid, publisher
     except Exception:
@@ -341,9 +356,27 @@ class WindowsCamfrogProcessDiscovery:
         return False
 
     def verify_publisher(self, publisher: str) -> bool:
-        """Verify whether publisher matches authorized Camfrog entities."""
-        pub_lower = (publisher or "").strip().lower()
-        return any(t.lower() in pub_lower for t in self.trusted_publishers)
+        """Verify whether publisher matches authorized Camfrog entities.
+
+        Uses exact identity matching, not substring matching: a certificate
+        name merely *containing* a trusted string (e.g. "Fake Camfrog LLC")
+        must not pass. Full DN forms are accepted only via an exact CN
+        component (e.g. "CN=Camfrog LLC, O=Camfrog LLC").
+        """
+        pub = (publisher or "").strip()
+        if not pub:
+            return False
+        pub_lower = pub.lower()
+        for trusted in self.trusted_publishers:
+            tnorm = trusted.strip().lower()
+            if not tnorm:
+                continue
+            if pub_lower == tnorm:
+                return True
+            for part in (p.strip() for p in pub.split(",")):
+                if part.lower() == f"cn={tnorm}":
+                    return True
+        return False
 
     def discover_processes(self) -> List[ProcessIdentity]:
         """Scan running processes and return verified Camfrog client identities."""
@@ -856,6 +889,10 @@ def evaluate_client_runtime_state(
     # 4. Room member state
     # Rule: A room window existing does NOT establish current room membership!
     # Room window may remain open after being kicked, disconnected, or left.
+    # Limitation: without a verified provider-side membership signal, a
+    # visible room window with no kick/disconnect indicator is treated as
+    # current membership (best available UI evidence). Affirmative
+    # server-side membership verification is NOT_IMPLEMENTED.
     room_wins = [w for w in classified_windows if w.role == WindowRole.ROOM_WINDOW and w.is_visible]
     room_member = False
     if not room_wins:

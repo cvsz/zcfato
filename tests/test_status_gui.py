@@ -361,3 +361,22 @@ def test_pid_and_stats_paths_match_between_gui_and_worker(module_name, tmp_path,
     monkeypatch.setattr(module, "BASE", data_dir)
     assert module.pid_path(cfg) == gui_pid == data_dir / "w.pid"
     assert module.stats_path(cfg) == gui_stats == data_dir / "s.json"
+
+
+def test_cmd_status_strict_mode_skips_legacy_window_resolution(monkeypatch):
+    import copy
+
+    cfg = copy.deepcopy(gui.DEFAULTS)
+    cfg["dry_run"] = True
+    cfg["status"]["execution_mode"] = "strict_background"
+
+    def _fail_window(_cfg):
+        raise AssertionError("legacy get_window must not run in strict mode")
+
+    def _fail_find(_win, _spec):
+        raise AssertionError("legacy find must not run in strict mode")
+
+    monkeypatch.setattr(gui, "get_window", _fail_window)
+    monkeypatch.setattr(gui, "find", _fail_find)
+
+    assert gui.cmd_status(cfg, "hello strict") == 0

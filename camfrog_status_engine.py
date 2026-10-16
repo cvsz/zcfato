@@ -30,6 +30,7 @@ from camfrog_windows_runtime import (
     revalidate_process_identity,
     revalidate_window_identity,
 )
+from camfrog_emergency_stop import EmergencyStopHook
 
 
 class StatusResultState(str, Enum):
@@ -193,23 +194,38 @@ class CamfrogWindowResolver:
         if not revalidate_window_identity(main_win, proc):
             raise LookupError(f"Main directory window hwnd={main_win.hwnd} failed identity revalidation.")
 
-        # Discover CComboBoxTS (1436) and Edit (1001)
+        # Discover CComboBoxTS (automation ID 1436) and its child Edit (ID 1001).
+        # Control IDs take precedence over class names: on windows with
+        # several native edits, class-only matching could bind the wrong
+        # pair and write status text into an unrelated field.
         combo_hwnd = 0
         edit_hwnd = 0
+        combo_by_id = 0
+        edit_by_id = 0
 
         if sys.platform == "win32":
             try:
                 import win32gui
                 def _cb(ch, _):
-                    nonlocal combo_hwnd, edit_hwnd
+                    nonlocal combo_hwnd, edit_hwnd, combo_by_id, edit_by_id
                     cid = win32gui.GetDlgCtrlID(ch)
                     cls = win32gui.GetClassName(ch)
                     if cls == "CComboBoxTS" or cid == 1436:
                         combo_hwnd = ch
                     elif cls in ("Edit", "CEditTS") or cid == 1001:
                         edit_hwnd = ch
+                    if cid == 1436:
+                        combo_by_id = ch
+                    elif cid == 1001:
+                        edit_by_id = ch
                     return True
                 win32gui.EnumChildWindows(main_win.hwnd, _cb, None)
+                if combo_by_id and edit_by_id:
+                    try:
+                        if win32gui.GetParent(edit_by_id) == combo_by_id:
+                            combo_hwnd, edit_hwnd = combo_by_id, edit_by_id
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -329,7 +345,7 @@ class StatusResourceLock:
 
 # ---------- Background Status Executor ----------
 
-class BackgroundStatusExecutor:
+class BackgroundStatusExecutor(EmergencyStopHook):
     """Executes status changes strictly without desktop interference.
 
     Execution sequence:
@@ -349,6 +365,7 @@ class BackgroundStatusExecutor:
         resolver: Optional[CamfrogWindowResolver] = None,
         default_mode: ExecutionMode = ExecutionMode.STRICT_BACKGROUND,
     ):
+        EmergencyStopHook.__init__(self)
         self.resolver = resolver or CamfrogWindowResolver()
         self.default_mode = default_mode
         self._lock = threading.Lock()
@@ -382,6 +399,22 @@ class BackgroundStatusExecutor:
             )
 
         with self._lock:
+            # 0. EMERGENCY STOP GATE — refuse new work while stopped.
+            try:
+                self.check_emergency_stop()
+            except StopIteration:
+                return StatusExecutionEvidence(
+                    request_id=req_id,
+                    operation_id=op_id,
+                    client_version="",
+                    process_identity={},
+                    window_role="",
+                    execution_mode=mode.value,
+                    result_state=StatusResultState.FAILED.value,
+                    duration_ms=(time.monotonic() - start_time) * 1000,
+                    verification_source="emergency_stop",
+                    error_code="EMERGENCY_STOP",
+                )
             # 1 & 2. DISCOVER_PROCESS & VERIFY_PROCESS
             try:
                 proc, main_win, adapter = self.resolver.resolve_status_controls(pid=pid)
@@ -410,6 +443,21 @@ class BackgroundStatusExecutor:
                     duration_ms=(time.monotonic() - start_time) * 1000,
                     verification_source="window_resolver",
                     error_code="CONTROLS_NOT_FOUND",
+                )
+            except RuntimeError as e:
+                # Ambiguous process/window identity (e.g. multiple verified
+                # clients): report evidence, never choose a target.
+                return StatusExecutionEvidence(
+                    request_id=req_id,
+                    operation_id=op_id,
+                    client_version="",
+                    process_identity={},
+                    window_role="",
+                    execution_mode=mode.value,
+                    result_state=StatusResultState.FAILED.value,
+                    duration_ms=(time.monotonic() - start_time) * 1000,
+                    verification_source="process_discovery",
+                    error_code="AMBIGUOUS_PROCESS_IDENTITY",
                 )
 
             # Resource-scoped synchronization across processes targeting this Camfrog client

@@ -1018,11 +1018,18 @@ def commit_background(text: str, dry: bool = False, pid: Optional[int] = None) -
     executor = BackgroundStatusExecutor(
         default_mode=ExecutionMode.STRICT_BACKGROUND,
     )
-    evidence = executor.execute_status_change(
-        status_text=text,
-        pid=pid,
-        execution_mode=ExecutionMode.STRICT_BACKGROUND,
-    )
+    try:
+        evidence = executor.execute_status_change(
+            status_text=text,
+            pid=pid,
+            execution_mode=ExecutionMode.STRICT_BACKGROUND,
+        )
+    except Exception as exc:
+        # Fail closed: ambiguous identity, emergency stop, or any other
+        # execution-boundary failure must never propagate into GUI workers
+        # (StopIteration in particular must not silently end a loop).
+        log.error(t("bg_status_failed", state="EXECUTION_ERROR", code=str(exc)[:120]))
+        return False
 
     if evidence.result_state == StatusResultState.VERIFIED_APPLIED.value:
         log.info(t("bg_status_applied", text=shown(text)))
@@ -1453,11 +1460,17 @@ def cmd_detect(cfg, cfg_path=None, apply=False, as_json=False):
     return 0
 
 def cmd_status(cfg, text):
-    win = get_window(cfg)
     st, sf = cfg["status"], cfg["safety"]
+    text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
+    if st.get("execution_mode", "interactive") == "strict_background":
+        # Strict path discovers and verifies process/controls itself;
+        # never resolve legacy visible controls first.
+        ok = commit_background(text, dry=cfg["dry_run"])
+        print(t("ok") if ok else t("failed"))
+        return 0 if ok else 1
+    win = get_window(cfg)
     ctrl = find(win, st["edit"])
     btn = find(win, st["apply_button"]) if st["apply_button"] else None
-    text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
     ok = commit(win, ctrl, text, cfg["dry_run"], sf["require_foreground"], btn,
                 sf["restore_previous_window"], st.get("background_enter_target", "edit"),
                 execution_mode=st.get("execution_mode", "interactive"))
