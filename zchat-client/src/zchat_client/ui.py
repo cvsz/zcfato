@@ -14,6 +14,7 @@ from typing import Any, ClassVar
 
 from camfrog_control_server.transport import normalize_agent_token, validate_server_url
 
+from .process_monitor import PM_TEXT, ProcessMonitorPage
 from .session import AgentChatWorker, WorkerEvent
 
 DEFAULT_SERVER_URL = ""
@@ -219,13 +220,16 @@ class AgentChatWindow:
     PALETTE = PALETTE
     _EDITABLE_CLASSES: ClassVar[frozenset[str]] = frozenset({"Entry", "TEntry", "Text"})
 
-    def __init__(self, root: tk.Tk) -> None:
+    def __init__(self, root: tk.Widget, language: tk.StringVar | None = None) -> None:
         self.root = root
         _apply_application_icon(root)
-        self.language = tk.StringVar(value="en")
-        self.root.title(TEXT["en"]["title"])
-        self.root.geometry("760x600")
-        self.root.minsize(560, 420)
+        self.language = language if language is not None else tk.StringVar(value="en")
+        self._set_window_title(TEXT["en"]["title"])
+        try:
+            self.root.geometry("760x600")  # type: ignore[attr-defined]
+            self.root.minsize(560, 420)  # type: ignore[attr-defined]
+        except (AttributeError, tk.TclError):
+            pass  # embedded as a page: toplevel sizing does not apply
         self.worker: AgentChatWorker | None = None
         self._entries: deque[str] = deque(maxlen=self.MAX_VISIBLE_ENTRIES)
         self._closing = False
@@ -248,11 +252,25 @@ class AgentChatWindow:
         self._configure_theme()
         self._build_widgets()
         self._install_editing_support()
-        self.root.protocol("WM_DELETE_WINDOW", self._close)
+        try:
+            self.root.protocol("WM_DELETE_WINDOW", self._close)  # type: ignore[attr-defined]
+        except (AttributeError, tk.TclError):
+            pass  # embedded as a page: close is owned by the shell
         self.root.after(100, self._drain_events)
 
+    def _set_window_title(self, title: str) -> None:
+        setter = getattr(self.root, "title", None)
+        if callable(setter):
+            try:
+                setter(title)
+            except (AttributeError, tk.TclError):
+                pass  # embedded as a page: no toplevel title
+
     def _configure_theme(self) -> None:
-        self.root.configure(background=PALETTE["background"])
+        try:
+            self.root.configure(background=PALETTE["background"])
+        except (AttributeError, tk.TclError):
+            pass  # embedded as a page: ttk containers have no -background option
         style = ttk.Style(self.root)
         try:
             style.theme_use("clam")
@@ -533,7 +551,7 @@ class AgentChatWindow:
         self._apply_language()
 
     def _apply_language(self) -> None:
-        self.root.title(self._text("title"))
+        self._set_window_title(self._text("title"))
         self.title_label.configure(text=self._text("title"))
         self.language_button.configure(text=self._text("language"))
         self.connection.configure(text=self._text("control_server"))
@@ -1055,6 +1073,110 @@ class AgentChatWindow:
             self.worker.stop()
         self._closing = True
         self.root.destroy()
+
+
+SHELL_TEXT = {
+    "en": {
+        "title": "ZChat Client (Unified)",
+        "nav_agent": "Agent Chat",
+        "nav_monitor": "Process Monitor",
+    },
+    "th": {
+        "title": "ZChat Client (Unified)",
+        "nav_agent": "แชตเอเจนต์",
+        "nav_monitor": "Process Monitor",
+    },
+}
+
+
+class UnifiedClientWindow:
+    """Single-window shell hosting every feature page 1:1 from shared modules.
+
+    Pages reuse the same implementations as the standalone executables
+    (e.g. :class:`ProcessMonitorPage` uses ``camfrog_windows_runtime``
+    directly). No standalone feature executable is launched or required.
+    """
+
+    PAGES = ("agent", "monitor")
+
+    def __init__(self, root: tk.Tk) -> None:
+        self.root = root
+        self.language = tk.StringVar(value="en")
+        self._set_window_title(SHELL_TEXT["en"]["title"])
+        try:
+            self.root.geometry("1100x700")
+            self.root.minsize(900, 560)
+        except (AttributeError, tk.TclError):
+            pass
+
+        self.sidebar = ttk.Frame(self.root, padding=8)
+        self.sidebar.pack(side=tk.LEFT, fill=tk.Y)
+        self.container = ttk.Frame(self.root, padding=(4, 8, 8, 8))
+        self.container.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        self.nav_buttons: dict[str, ttk.Button] = {}
+        for page in self.PAGES:
+            btn = ttk.Button(
+                self.sidebar, command=lambda p=page: self.show_page(p)
+            )
+            btn.pack(fill=tk.X, pady=2)
+            self.nav_buttons[page] = btn
+
+        self.pages: dict[str, ttk.Frame] = {}
+        agent_host = ttk.Frame(self.container)
+        self.agent_page = AgentChatWindow(agent_host, language=self.language)
+        self.pages["agent"] = agent_host
+        self.monitor_page = ProcessMonitorPage(
+            self.container, get_language=self.language.get
+        )
+        self.pages["monitor"] = self.monitor_page
+
+        self.language.trace_add("write", lambda *_: self._apply_shell_language())
+        self._current: str | None = None
+        self._apply_shell_language()
+        self.show_page("agent")
+        self.root.protocol("WM_DELETE_WINDOW", self._close)
+
+    def _set_window_title(self, title: str) -> None:
+        setter = getattr(self.root, "title", None)
+        if callable(setter):
+            try:
+                setter(title)
+            except (AttributeError, tk.TclError):
+                pass
+
+    def _apply_shell_language(self) -> None:
+        lang = self.language.get()
+        table = SHELL_TEXT.get(lang, SHELL_TEXT["en"])
+        self._set_window_title(table["title"])
+        self.nav_buttons["agent"].configure(text=table["nav_agent"])
+        self.nav_buttons["monitor"].configure(text=table["nav_monitor"])
+        self.monitor_page.apply_language()
+
+    def show_page(self, name: str) -> None:
+        """Display one page; unknown names fail closed on the current page."""
+        if name not in self.pages:
+            return
+        if self._current is not None:
+            self.pages[self._current].pack_forget()
+        self._current = name
+        self.pages[name].pack(fill=tk.BOTH, expand=True)
+
+    def _close(self) -> None:
+        try:
+            self.agent_page._close()
+        except Exception:
+            pass
+        try:
+            self.root.destroy()
+        except tk.TclError:
+            pass
+
+
+def main_unified() -> None:
+    root = tk.Tk()
+    UnifiedClientWindow(root)
+    root.mainloop()
 
 
 def main() -> None:
