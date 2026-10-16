@@ -1,55 +1,40 @@
 # Architecture
 
-## Purpose
+## Purpose and scope
 
-`ztemplate` is a language-agnostic repository foundation rather than an application runtime.
+This repository combines reusable repository-governance and project-bootstrap tooling with maintained Windows applications and the ZChat control-plane products. The governance and bootstrap layers stay portable; each application keeps its own runtime, dependencies, build, and acceptance boundaries.
 
-Its architecture is intentionally layered so generated projects can replace application-specific pieces without weakening repository governance.
+## Systems
 
-## Layers
+### Repository governance and template tooling
 
-### Repository governance
+Root policy documents define contribution, security, release, and agent behavior. `.github/` contains CI, CodeQL, dependency review, Dependabot, issue templates, and ownership rules. `scripts/bootstrap.py` changes project identity and ownership routing; it does not create an application runtime or deploy infrastructure. `scripts/validate_repo.py` checks required repository structure and local Markdown links.
 
-Root policy documents define ownership, contribution, security, evidence, and release expectations:
+### Camfrog desktop applications
 
-- `AGENTS.md`
-- `ZEAZ-INTRODUCTION.md`
-- `GOVERNANCE.md`
-- `SECURITY.md`
-- `CONTRIBUTING.md`
+The root Python modules implement separate Windows desktop tools for Camfrog workflows. UI Automation targets the installed official client. Build specifications and `build.bat` package each feature as a separate executable. Browser and session material remains local; automated tests use mocks and do not prove compatibility with a live Camfrog client or service.
 
-### GitHub control plane
+### LINE Status Changer
 
-`.github/` provides CI/security/community baselines.
+`line/` contains a separate Windows UI Automation application, configuration store, schedule engine, tray integration, and build pipeline. Its unit tests run in Linux CI and again from `line/build.bat` before packaging. UI Automation acceptance still depends on the supported LINE desktop version and an interactive Windows session.
 
-`scripts/github_admin.py` handles repository settings that cannot be enforced by committed files alone and verifies effective provider state after mutation.
+### ZChat Control Server and agent client
 
-### Validation
+`control-server/` contains the FastAPI control plane, PostgreSQL schema and Alembic migrations, operator dashboard, agent protocol, and provider seams. `zchat-client/` is a separate Windows desktop client for the internal ZChat agent-chat protocol. It does not implement Camfrog's network protocol.
 
-`scripts/validate_repo.py` checks required template structure and local Markdown links.
+The checked-in Compose stack is for local development and binds to loopback. The control server is not a production deployment: its limiter is process-local, live provider contracts are incomplete, and production database, secret rotation, recovery, Windows runtime, and soak evidence are outstanding. See [control-server/README.md](../control-server/README.md).
 
-`tests/` validates bootstrap behavior. `make validate-template` runs those isolated bootstrap tests after the structure/link validator; it does not discover project-wide tests.
+## Build and validation boundaries
 
-Application-specific lint/test/build/security validation must be added by generated projects.
+- Root application tests run from `tests/`.
+- ZChat client tests run from `zchat-client/tests/` with the control-server source on the import path.
+- Control-server tests and Alembic PostgreSQL migration validation run from `control-server/`.
+- LINE unit tests run from `line/tests/`; the Windows build executes them before packaging.
+- `full-build.bat` builds the Windows application artifacts and records the source commit and cleanliness state.
+- GitHub CI runs Python tests, dependency audits, format/lint checks, migration validation, and the Windows build. These checks do not replace interactive Windows acceptance or production deployment/recovery evidence.
 
-### Project initialization
+`make validate-template` validates repository structure and local Markdown links. `make test` runs the root, control-server, ZChat client, and LINE unit suites. Package builds remain Windows-only.
 
-`scripts/bootstrap.py` changes project identity/ownership routing only. It does not create application architecture or deploy infrastructure.
+## Deployment boundary
 
-### AI/agent execution
-
-`docs/ai/`, `skills/`, `components.d/`, and `plugins.d/` provide reusable agent execution guidance and discovery without making application-runtime assumptions.
-
-### Application placeholders
-
-The root Dockerfile and application Makefile targets are intentionally non-production placeholders. Generated projects replace them with stack-specific implementations.
-
-## Existing-repository adoption
-
-The architecture is composable. Established repositories should use [repository rollout](repository-rollout.md) and port only compatible missing layers rather than copying the tree wholesale.
-
-## Production boundary
-
-Repository-foundation readiness and application production readiness are separate claims.
-
-The template can verify repository controls, documentation structure, and baseline automation. A generated application must independently verify runtime architecture, deployment, data, recovery, observability, capacity, security, and incident-response gates that apply to it.
+The root `Dockerfile` and generic task-runner conventions belong to the reusable template and are not a deployment configuration for these desktop products. No public control-server deployment workflow is configured. A successful build or protected-branch merge is not evidence of a production deployment or production readiness.
