@@ -731,6 +731,7 @@ def get_window(cfg: dict):
     wins = Desktop(backend="uia").windows(
         title_re=cfg["window_title_regex"], visible_only=True)
     wins = [w for w in wins if not is_own_gui_window(w)]
+    wins = [w for w in wins if _window_process_id(w) != os.getpid()]
     if not wins:
         raise RuntimeError(t("no_window"))
     _require_single_window_process(wins)
