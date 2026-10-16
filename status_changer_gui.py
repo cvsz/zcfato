@@ -1075,6 +1075,25 @@ def _background_enter(ctrl, target="edit"):
             return
     if not handle:
         raise LookupError("Status combo has no HWND; cannot try combo Enter")
+
+    saved_sounds = {}
+    if os.name == "nt":
+        try:
+            import winreg
+            base_reg = r"AppEvents\Schemes\Apps\.Default"
+            for sub in (".Default", "SystemAsterisk", "SystemExclamation", "SystemNotification"):
+                try:
+                    k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
+                                       winreg.KEY_READ | winreg.KEY_WRITE)
+                    val, vtype = winreg.QueryValueEx(k, "")
+                    saved_sounds[sub] = (val, vtype)
+                    winreg.SetValueEx(k, "", 0, vtype, "")
+                    winreg.CloseKey(k)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
     u = ctypes.windll.user32
     try:
         u.PostMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint,
@@ -1082,10 +1101,29 @@ def _background_enter(ctrl, target="edit"):
         u.PostMessageW.restype = ctypes.c_int
     except (AttributeError, TypeError):
         pass
-    if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
-        raise RuntimeError("Could not post Enter key-down to status control")
-    if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
-        raise RuntimeError("Could not post Enter key-up to status control")
+
+    try:
+        if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
+            raise RuntimeError("Could not post Enter key-down to status control")
+        if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
+            raise RuntimeError("Could not post Enter key-up to status control")
+        if os.name == "nt":
+            time.sleep(0.02)
+    finally:
+        if saved_sounds:
+            try:
+                import winreg
+                base_reg = r"AppEvents\Schemes\Apps\.Default"
+                for sub, (val, vtype) in saved_sounds.items():
+                    try:
+                        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
+                                           winreg.KEY_SET_VALUE)
+                        winreg.SetValueEx(k, "", 0, vtype, val)
+                        winreg.CloseKey(k)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
 
 
 def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,
@@ -1108,8 +1146,11 @@ def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=N
         background_enter_target == "combo" or not require_fg or
         (background_if_not_foreground and not window_is_foreground))
     submit_target = background_enter_target
-    if (background_if_not_foreground and not window_is_foreground
-            and submit_target == "edit"):
+    # Always upgrade to "combo" when doing a background submit with "edit" target:
+    # posting Enter directly to the child Edit control triggers a Windows ding
+    # sound on Camfrog builds that don't handle Enter in the Edit — regardless
+    # of whether Camfrog is currently the foreground window.
+    if background_submit and submit_target == "edit":
         submit_target = "combo"
     needs_foreground = require_fg and apply_btn is None and not background_submit
     prev = foreground if restore and needs_foreground else 0
