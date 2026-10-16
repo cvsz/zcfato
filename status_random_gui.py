@@ -686,9 +686,12 @@ def _window_process_id(window):
 
 
 def _require_single_window_process(windows):
-    """Fail closed when a title filter spans more than one/unverifiable process."""
-    if len(windows) <= 1:
-        return
+    """Fail closed when a title filter spans more than one/unverifiable process.
+
+    Every candidate must resolve to a positive, identical process ID. A single
+    window with an unverifiable (missing or invalid) PID is rejected rather than
+    accepted silently, so automation never targets an arbitrary Camfrog account.
+    """
     pids = [_window_process_id(window) for window in windows]
     if any(pid is None for pid in pids) or len(set(pids)) != 1:
         raise RuntimeError(
@@ -704,6 +707,7 @@ def get_window(cfg: dict):
     wins = Desktop(backend="uia").windows(
         title_re=cfg["window_title_regex"], visible_only=False)
     wins = [w for w in wins if not is_own_gui_window(w)]
+    wins = [w for w in wins if _window_process_id(w) != os.getpid()]
     if not wins:
         raise RuntimeError(t("no_window"))
     _require_single_window_process(wins)
