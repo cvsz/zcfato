@@ -139,14 +139,14 @@ if errorlevel 1 goto :fail
 echo.
 echo === CONFIG VALIDATION EN ===
 
-"%VENV_PY%" camfrog_auto.py check --config config.example.json
+"%VENV_PY%" -m src.camfrog.camfrog_auto check --config config.example.json
 if errorlevel 1 goto :fail
 
 
 echo.
 echo === CONFIG VALIDATION TH ===
 
-"%VENV_PY%" camfrog_auto.py --lang th check --config config.example.json
+"%VENV_PY%" -m src.camfrog.camfrog_auto --lang th check --config config.example.json
 if errorlevel 1 goto :fail
 
 
