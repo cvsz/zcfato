@@ -110,6 +110,8 @@ S = {
     "not_fg": ("Camfrog not foreground; not sending", "Camfrog ไม่ได้อยู่หน้าสุด จึงไม่ส่ง"),
     "no_window": ("Camfrog window not found (check window_title_regex)",
                   "ไม่พบหน้าต่าง Camfrog (ตรวจ window_title_regex)"),
+    "verified_ambiguous": ("verified Camfrog discovery is ambiguous: {detail}",
+                           "การค้นหา Camfrog แบบยืนยันตัวตนกำกวม: {detail}"),
     "no_ctrl": ("control not found: {spec} (matches={n})", "ไม่พบ control: {spec} (พบ {n} รายการ)"),
     "status_set": ("status set: {text}", "ตั้ง status แล้ว: {text}"),
     "status_fail": ("status commit failed", "ตั้ง status ไม่สำเร็จ"),
@@ -317,6 +319,7 @@ DEFAULTS = {
     "active_hours": {"enabled": False, "start": "09:00", "end": "23:30"},
     "safety": {"stop_file": "STOP", "pid_file": "camfrog_auto.pid",
                "require_foreground": True, "restore_previous_window": True,
+               "discovery_mode": "legacy",  # or "verified" (executable identity + signature + role)
                "max_consecutive_failures": 5},
     "status": {
         "enabled": True,
@@ -485,6 +488,8 @@ def _validate(cfg, errs, warns):
         re.compile(cfg["window_title_regex"])
     except re.error as e:
         errs.append(t("e_regex", e=e))
+    if cfg.get("safety", {}).get("discovery_mode", "legacy") not in ("legacy", "verified"):
+        errs.append("safety.discovery_mode must be legacy or verified")
     if cfg["active_hours"]["enabled"]:
         try:
             parse_hm(cfg["active_hours"]["start"]); parse_hm(cfg["active_hours"]["end"])
@@ -708,7 +713,40 @@ def _require_single_window_process(windows):
         )
 
 
+def get_verified_main_window():
+    """Resolve the Camfrog main window via verified process identity.
+
+    Uses WindowsCamfrogProcessDiscovery (executable identity, Authenticode
+    signature, PID + creation time; CEF and ZChat own-process exclusion) and
+    WindowsCamfrogWindowClassifier (structural MAIN_DIRECTORY role). Fails
+    closed on ambiguous process or window identity instead of guessing.
+    """
+    from camfrog_windows_runtime import (
+        WindowRole,
+        WindowsCamfrogProcessDiscovery,
+        WindowsCamfrogWindowClassifier,
+    )
+    discovery = WindowsCamfrogProcessDiscovery()
+    try:
+        identity = discovery.get_verified_process()
+    except ProcessLookupError as exc:
+        raise RuntimeError(t("verified_ambiguous", detail=str(exc)))
+    except RuntimeError as exc:
+        raise RuntimeError(t("verified_ambiguous", detail=str(exc)))
+    classifier = WindowsCamfrogWindowClassifier()
+    windows = classifier.classify_process_windows(identity, visible_only=True)
+    mains = [w for w in windows
+             if w.role == WindowRole.MAIN_DIRECTORY and w.element is not None]
+    if len(mains) != 1:
+        raise RuntimeError(t("verified_ambiguous", detail=(
+            f"expected exactly one visible MAIN_DIRECTORY window for PID {identity.pid}, "
+            f"found {len(mains)}")))
+    return mains[0].element
+
+
 def get_window(cfg: dict):
+    if cfg.get("safety", {}).get("discovery_mode", "legacy") == "verified":
+        return get_verified_main_window()
     from pywinauto import Desktop  # lazy: `check` works without pywinauto
     wins = Desktop(backend="uia").windows(
         title_re=cfg["window_title_regex"], visible_only=True)

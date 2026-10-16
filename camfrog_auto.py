@@ -683,6 +683,28 @@ def shown(text: str) -> str:
 
 
 # ---------- UI helpers ----------
+try:
+    from camfrog_windows_runtime import (
+        WindowsCamfrogProcessDiscovery,
+        WindowsCamfrogWindowClassifier,
+        attach_to_camfrog_client,
+        evaluate_client_runtime_state,
+        ProcessIdentity,
+        ClassifiedWindow,
+        ClientRuntimeState,
+        WindowRole,
+    )
+except ImportError:
+    WindowsCamfrogProcessDiscovery = None  # type: ignore
+    WindowsCamfrogWindowClassifier = None  # type: ignore
+    attach_to_camfrog_client = None  # type: ignore
+    evaluate_client_runtime_state = None  # type: ignore
+    ProcessIdentity = None  # type: ignore
+    ClassifiedWindow = None  # type: ignore
+    ClientRuntimeState = None  # type: ignore
+    WindowRole = None  # type: ignore
+
+
 def is_own_gui_window(win) -> bool:
     """True for our own Tk GUI windows (they contain 'Camfrog' in the title
     and would otherwise match window_title_regex). Camfrog itself never
@@ -695,7 +717,8 @@ def is_own_gui_window(win) -> bool:
     try:
         title = win.window_text()
         if title and title.startswith((
-                "Camfrog Status Changer", "Camfrog Random Status", "Camfrog Marquee Status")):
+                "Camfrog Status Changer", "Camfrog Random Status", "Camfrog Marquee Status",
+                "Camfrog Music DJ", "Camfrog Auto Reply", "Camfrog Presence", "Room Control", "ZChat")):
             return True
     except Exception:
         pass
@@ -758,6 +781,27 @@ def process_windows(main) -> list:
     IM and the buddy list as separate windows)."""
     from pywinauto import Desktop
     return Desktop(backend="uia").windows(process=main.process_id(), visible_only=True)
+
+
+def get_verified_camfrog_process(pid: Optional[int] = None):
+    """Return a verified Camfrog client ProcessIdentity or None."""
+    if WindowsCamfrogProcessDiscovery is None:
+        return None
+    try:
+        return WindowsCamfrogProcessDiscovery().get_verified_process(pid=pid)
+    except Exception:
+        return None
+
+
+def get_client_runtime_state(pid: Optional[int] = None):
+    """Evaluate evidence-separated runtime states for verified Camfrog client."""
+    if attach_to_camfrog_client is None:
+        return None
+    try:
+        att = attach_to_camfrog_client(pid=pid)
+        return att.get_runtime_state()
+    except Exception:
+        return None
 
 
 def get_chat_window(cfg: dict, main) -> Optional[Any]:
@@ -1205,23 +1249,6 @@ def _background_enter(ctrl, target="edit"):
             return
     if not handle:
         raise LookupError("Status combo has no HWND; cannot try combo Enter")
-    saved_sounds = {}
-    if os.name == "nt":
-        try:
-            import winreg
-            base_reg = r"AppEvents\Schemes\Apps\.Default"
-            for sub in (".Default", "SystemAsterisk", "SystemExclamation", "SystemNotification"):
-                try:
-                    k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
-                                       winreg.KEY_READ | winreg.KEY_WRITE)
-                    val, vtype = winreg.QueryValueEx(k, "")
-                    saved_sounds[sub] = (val, vtype)
-                    winreg.SetValueEx(k, "", 0, vtype, "")
-                    winreg.CloseKey(k)
-                except Exception:
-                    pass
-        except Exception:
-            pass
 
     u = ctypes.windll.user32
     try:
@@ -1231,28 +1258,12 @@ def _background_enter(ctrl, target="edit"):
     except (AttributeError, TypeError):
         pass
 
-    try:
-        if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
-            raise RuntimeError("Could not post Enter key-down to status control")
-        if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
-            raise RuntimeError("Could not post Enter key-up to status control")
-        if os.name == "nt":
-            time.sleep(0.02)
-    finally:
-        if saved_sounds:
-            try:
-                import winreg
-                base_reg = r"AppEvents\Schemes\Apps\.Default"
-                for sub, (val, vtype) in saved_sounds.items():
-                    try:
-                        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
-                                           winreg.KEY_SET_VALUE)
-                        winreg.SetValueEx(k, "", 0, vtype, val)
-                        winreg.CloseKey(k)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+    if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-down to status control")
+    if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-up to status control")
+    if os.name == "nt":
+        time.sleep(0.02)
 
 
 def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,

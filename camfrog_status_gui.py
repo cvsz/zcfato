@@ -222,6 +222,10 @@ S = {
                   "ไม่พบหน้าต่าง Camfrog (ตรวจ window_title_regex)"),
     "no_ctrl": ("control not found: {spec} (matches={n})", "ไม่พบ control: {spec} (พบ {n} รายการ)"),
     "status_set": ("status set: {text}", "ตั้ง status แล้ว: {text}"),
+    "bg_status_applied": ("background status applied: {text}",
+                          "ตั้งสถานะเบื้องหลังแล้ว: {text}"),
+    "bg_status_failed": ("background status failed (state={state}, code={code})",
+                         "ตั้งสถานะเบื้องหลังไม่สำเร็จ (state={state}, code={code})"),
     "status_fail": ("status commit failed", "ตั้ง status ไม่สำเร็จ"),
     "reply_fail": ("reply commit failed", "ส่งข้อความตอบไม่สำเร็จ"),
     "replied": ("replied to {nick}: {text}", "ตอบ {nick} แล้ว: {text}"),
@@ -385,6 +389,7 @@ DEFAULTS = {
                "max_consecutive_failures": 5},
     "status": {
         "enabled": True,
+        "execution_mode": "interactive",  # or "strict_background" (no focus/input/clipboard/sound changes)
         "edit": {"class_name": "Edit", "auto_id": "1001", "index": 0},
         "apply_button": None,
         "background_enter_target": "edit",  # experimental "combo" targets the parent CComboBoxTS
@@ -525,6 +530,8 @@ def _validate(cfg, errs, warns):
             errs.append(t("e_sel", k="status.edit"))
         if st.get("background_enter_target", "edit") not in ("edit", "combo"):
             errs.append("status.background_enter_target must be edit or combo")
+        if st.get("execution_mode", "interactive") not in ("interactive", "strict_background"):
+            errs.append("status.execution_mode must be interactive or strict_background")
         mq, hs = st["marquee"], st["history"]
         try:
             inf = mq.get("infinite_loop", False)
@@ -925,52 +932,26 @@ def _background_enter(ctrl, target="edit"):
             return
     if not handle:
         raise LookupError("Status combo has no HWND; cannot try combo Enter")
-    saved_sounds = {}
-    if os.name == "nt":
-        try:
-            import winreg
-            base_reg = r"AppEvents\Schemes\Apps\.Default"
-            for sub in (".Default", "SystemAsterisk", "SystemExclamation", "SystemNotification"):
-                try:
-                    k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
-                                       winreg.KEY_READ | winreg.KEY_WRITE)
-                    val, vtype = winreg.QueryValueEx(k, "")
-                    saved_sounds[sub] = (val, vtype)
-                    winreg.SetValueEx(k, "", 0, vtype, "")
-                    winreg.CloseKey(k)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
     u = ctypes.windll.user32
-    try:
-        if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
-            raise RuntimeError("Could not post Enter key-down to status control")
-        if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
-            raise RuntimeError("Could not post Enter key-up to status control")
-        if os.name == "nt":
-            time.sleep(0.02)
-    finally:
-        if saved_sounds:
-            try:
-                import winreg
-                base_reg = r"AppEvents\Schemes\Apps\.Default"
-                for sub, (val, vtype) in saved_sounds.items():
-                    try:
-                        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
-                                           winreg.KEY_SET_VALUE)
-                        winreg.SetValueEx(k, "", 0, vtype, val)
-                        winreg.CloseKey(k)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+    if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-down to status control")
+    if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-up to status control")
+    if os.name == "nt":
+        time.sleep(0.02)
 
 
 def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,
-           restore: bool = False, background_enter_target: str = "edit") -> bool:
-    """Write text, verify read-back, confirm Camfrog is foreground, send, restore focus."""
+           restore: bool = False, background_enter_target: str = "edit",
+           execution_mode: str = "interactive") -> bool:
+    """Write text, verify read-back, confirm Camfrog is foreground, send, restore focus.
+
+    When execution_mode is "strict_background", delegates to commit_background() which
+    uses camfrog_status_engine.BackgroundStatusExecutor and performs the change without
+    focus stealing, global input injection, clipboard mutation, or sound-registry changes.
+    """
+    if execution_mode == "strict_background":
+        return commit_background(text, dry=dry)
     if dry:
         log.info(t("dry_send", text=shown(text)))
         return True
@@ -1005,6 +986,56 @@ def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=N
         time.sleep(0.15)
         user32.SetForegroundWindow(prev)  # best effort: give focus back to what you were doing
     return True
+
+def commit_background(text: str, dry: bool = False, pid: Optional[int] = None) -> bool:
+    """Change Camfrog status using strict background mode.
+
+    Uses camfrog_status_engine.BackgroundStatusExecutor which:
+    - Discovers and verifies the Camfrog process independently (PID + creation time +
+      Authenticode signature).
+    - Writes status text without stealing focus.
+    - Submits Enter via PostMessage without global keyboard/mouse injection.
+    - Does not modify the clipboard.
+    - Does not modify Windows sound-registry values.
+    - Verifies the applied status before reporting success.
+
+    Returns True if the status was verified as applied, False otherwise.
+    """
+    if dry:
+        log.info(t("dry_send", text=shown(text)))
+        return True
+
+    try:
+        from camfrog_status_engine import (
+            BackgroundStatusExecutor,
+            ExecutionMode,
+            StatusResultState,
+        )
+    except ImportError as exc:
+        log.error("camfrog_status_engine not available: %s", exc)
+        return False
+
+    executor = BackgroundStatusExecutor(
+        default_mode=ExecutionMode.STRICT_BACKGROUND,
+    )
+    try:
+        evidence = executor.execute_status_change(
+            status_text=text,
+            pid=pid,
+            execution_mode=ExecutionMode.STRICT_BACKGROUND,
+        )
+    except Exception as exc:
+        # Fail closed: ambiguous identity, emergency stop, or any other
+        # execution-boundary failure must never propagate into GUI workers
+        # (StopIteration in particular must not silently end a loop).
+        log.error(t("bg_status_failed", state="EXECUTION_ERROR", code=str(exc)[:120]))
+        return False
+
+    if evidence.result_state == StatusResultState.VERIFIED_APPLIED.value:
+        log.info(t("bg_status_applied", text=shown(text)))
+        return True
+    log.error(t("bg_status_failed", state=evidence.result_state, code=evidence.error_code))
+    return False
 
 def expand(text: str, nick: str = "", own: str = "") -> str:
     """Replace {sender} {me} {time} {date}. Plain replace (never str.format)."""
@@ -1429,13 +1460,20 @@ def cmd_detect(cfg, cfg_path=None, apply=False, as_json=False):
     return 0
 
 def cmd_status(cfg, text):
-    win = get_window(cfg)
     st, sf = cfg["status"], cfg["safety"]
+    text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
+    if st.get("execution_mode", "interactive") == "strict_background":
+        # Strict path discovers and verifies process/controls itself;
+        # never resolve legacy visible controls first.
+        ok = commit_background(text, dry=cfg["dry_run"])
+        print(t("ok") if ok else t("failed"))
+        return 0 if ok else 1
+    win = get_window(cfg)
     ctrl = find(win, st["edit"])
     btn = find(win, st["apply_button"]) if st["apply_button"] else None
-    text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
     ok = commit(win, ctrl, text, cfg["dry_run"], sf["require_foreground"], btn,
-                sf["restore_previous_window"], st.get("background_enter_target", "edit"))
+                sf["restore_previous_window"], st.get("background_enter_target", "edit"),
+                execution_mode=st.get("execution_mode", "interactive"))
     print(t("ok") if ok else t("failed"))
     return 0 if ok else 1
 

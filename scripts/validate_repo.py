@@ -44,6 +44,7 @@ REQUIRED_PATHS = (
 EXCLUDED_DIRS = {
     ".git",
     ".venv",
+    ".venv-runtime",
     "venv",
     "build",
     "dist",

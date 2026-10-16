@@ -18,9 +18,11 @@ Missing keys use built-in defaults. This reference covers the source CLI configu
 | `safety.stop_file` | `STOP` | Create this file to stop (cleared on next start) |
 | `safety.pid_file` | `camfrog_auto.pid` | PID file for background mode / single instance |
 | `safety.require_foreground` | `true` | Refuse to press Enter unless Camfrog is foreground |
+| `safety.discovery_mode` | `legacy` | `legacy` finds the Camfrog window by title regex; `verified` resolves it by executable identity, Authenticode signature, PID plus creation time, and structural window role, failing closed on ambiguity |
 | `safety.restore_previous_window` | `true` | After sending, return focus to the window you were using. Set `false` to leave Camfrog's chat window in front; IM auto-reply scrolls its local reply echo into the chat viewport either way |
 | `safety.max_consecutive_failures` | `5` | Stop after N failed ticks in a row (backoff + re-attach) |
 | `status.enabled` | `true` | Rotate status |
+| `status.execution_mode` | `interactive` | `interactive` keeps legacy behavior (may focus Camfrog and use foreground input); `strict_background` routes status changes through the shared background engine with no focus stealing, no global keyboard/mouse input, no clipboard changes, and no Windows sound-setting changes, reporting success only when the applied status is verified |
 | `status.edit` / `apply_button` | selectors / `null` | UIA selectors from `discover`; `apply_button` is invoked instead of Enter |
 | `status.background_enter_target` | `edit` | When Camfrog is not foreground, the status worker automatically posts Enter to the verified `CComboBoxTS` parent; `combo` forces this background path even while Camfrog is foreground. The Edit text is read back before submission. Camfrog must stay running in the same signed-in Windows session; a closed Camfrog process cannot be updated. |
 | `status.interval_seconds` | `600` | Minimum 0.3 |

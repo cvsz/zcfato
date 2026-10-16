@@ -83,6 +83,8 @@ echo === PYTHON COMPILE CHECK ===
     camfrog_auto.py ^
     camfrog_gui.py ^
     camfrog_status_gui.py ^
+    camfrog_windows_runtime.py ^
+    camfrog_status_engine.py ^
     camfrog_private_chat_gui.py ^
     camfrog_music_gui.py ^
     room_control_gui.py ^
@@ -218,7 +220,7 @@ echo === BUILD ROOM CONTROL ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\room-control --workpath build\room-control ^
     --name room-control %ICONARG% ^
-    --collect-all pywinauto --collect-submodules comtypes ^
+    --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
     room_control_entry.py
 if errorlevel 1 goto :fail
 
@@ -230,7 +232,7 @@ echo === BUILD PRIVATE CHAT WINDOW MANAGER ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\chat-im-private --workpath build\chat-im-private ^
     --name chat-im-private %ICONARG% ^
-    --collect-all pywinauto --collect-submodules comtypes ^
+    --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
     chat_im_private_entry.py
 if errorlevel 1 goto :fail
 
@@ -242,7 +244,8 @@ echo === BUILD RANDOM STATUS ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\status-random --workpath build\status-random ^
     --name status-random %ICONARG% ^
-    --collect-all pywinauto --collect-submodules comtypes ^
+    --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
+    --hidden-import camfrog_status_engine --hidden-import camfrog_windows_runtime ^
     status_random_entry.py
 if errorlevel 1 goto :fail
 
@@ -254,7 +257,8 @@ echo === BUILD MARQUEE STATUS ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\status-marquee --workpath build\status-marquee ^
     --name status-marquee %ICONARG% ^
-    --collect-all pywinauto --collect-submodules comtypes ^
+    --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
+    --hidden-import camfrog_status_engine --hidden-import camfrog_windows_runtime ^
     status_marquee_entry.py
 if errorlevel 1 goto :fail
 
@@ -266,7 +270,8 @@ echo === BUILD COMBINED STATUS CHANGER ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\status-changer --workpath build\status-changer ^
     --name status-changer %ICONARG% ^
-    --collect-all pywinauto --collect-submodules comtypes ^
+    --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
+    --hidden-import camfrog_status_engine --hidden-import camfrog_windows_runtime ^
     status_changer_entry.py
 if errorlevel 1 goto :fail
 
@@ -278,7 +283,7 @@ echo === BUILD PRIVATE IM AUTO-REPLY ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\im-autoreply --workpath build\im-autoreply ^
     --name im-autoreply %ICONARG% ^
-    --collect-all pywinauto --collect-submodules comtypes ^
+    --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
     im_autoreply_entry.py
 if errorlevel 1 goto :fail
 
@@ -290,6 +295,7 @@ echo === BUILD WEB STATUS UPDATER (GUI + CONSOLE PROTOTYPE) ===
     --noconfirm --clean --onefile --windowed ^
     --distpath dist\web-status --workpath build\web-status ^
     --name web-status %ICONARG% ^
+    --collect-all psutil ^
     --add-data "assets\zttato.png;assets" ^
     web_status_entry.py
 if errorlevel 1 goto :fail
@@ -302,7 +308,7 @@ echo === BUILD MUSIC DJ ===
     --distpath dist\music-dj --workpath build\music-dj ^
     --name music-dj %ICONARG% ^
     --add-data "assets\zeazdev-room.png;assets" ^
-    --collect-all pywinauto --collect-submodules comtypes ^
+    --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
     music_dj_entry.py
 if errorlevel 1 goto :fail
 

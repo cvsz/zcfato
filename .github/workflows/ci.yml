@@ -18,7 +18,7 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: pip install -r zchat-client/requirements.txt
       - run: python -m pip_audit -r requirements-dev.txt
-      - run: python -m py_compile camfrog_auto.py camfrog_gui.py camfrog_status_gui.py camfrog_private_chat_gui.py camfrog_music_gui.py camfrog_presence.py status_changer_gui.py room_control_gui.py im_autoreply_gui.py status_random_gui.py status_marquee_gui.py chat_im_private_gui.py camfrog_tray.py clipboard_support.py room_control_entry.py chat_im_private_entry.py status_random_entry.py status_marquee_entry.py status_changer_entry.py im_autoreply_entry.py music_dj_entry.py web_status_entry.py tools/web_status.py line/*.py
+      - run: python -m py_compile camfrog_auto.py camfrog_gui.py camfrog_status_gui.py camfrog_windows_runtime.py camfrog_status_engine.py camfrog_private_chat_gui.py camfrog_music_gui.py camfrog_presence.py status_changer_gui.py room_control_gui.py im_autoreply_gui.py status_random_gui.py status_marquee_gui.py chat_im_private_gui.py camfrog_tray.py clipboard_support.py room_control_entry.py chat_im_private_entry.py status_random_entry.py status_marquee_entry.py status_changer_entry.py im_autoreply_entry.py music_dj_entry.py web_status_entry.py tools/web_status.py line/*.py
       - run: python camfrog_auto.py check --config config.example.json
       - run: python camfrog_auto.py --lang th check --config config.example.json
       - run: xvfb-run -a pytest -q tests
