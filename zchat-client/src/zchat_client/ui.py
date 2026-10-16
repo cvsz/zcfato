@@ -1116,9 +1116,7 @@ class UnifiedClientWindow:
 
         self.nav_buttons: dict[str, ttk.Button] = {}
         for page in self.PAGES:
-            btn = ttk.Button(
-                self.sidebar, command=lambda p=page: self.show_page(p)
-            )
+            btn = ttk.Button(self.sidebar, command=lambda p=page: self.show_page(p))
             btn.pack(fill=tk.X, pady=2)
             self.nav_buttons[page] = btn
 
@@ -1126,9 +1124,7 @@ class UnifiedClientWindow:
         agent_host = ttk.Frame(self.container)
         self.agent_page = AgentChatWindow(agent_host, language=self.language)
         self.pages["agent"] = agent_host
-        self.monitor_page = ProcessMonitorPage(
-            self.container, get_language=self.language.get
-        )
+        self.monitor_page = ProcessMonitorPage(self.container, get_language=self.language.get)
         self.pages["monitor"] = self.monitor_page
 
         self.language.trace_add("write", lambda *_: self._apply_shell_language())
