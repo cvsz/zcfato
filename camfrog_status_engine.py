@@ -89,8 +89,15 @@ class StatusControlAdapter:
             import win32con
             import win32gui
 
-            # 1. Send WM_SETTEXT to Edit control
-            win32gui.SendMessage(self.edit_hwnd, win32con.WM_SETTEXT, 0, text)
+            # Fail closed on stale/dangling handles: never report success
+            # for a control that does not exist.
+            if not win32gui.IsWindow(self.edit_hwnd):
+                return False
+
+            # 1. Send WM_SETTEXT to Edit control (nonzero LRESULT = accepted)
+            settext_ok = win32gui.SendMessage(self.edit_hwnd, win32con.WM_SETTEXT, 0, text)
+            if not settext_ok:
+                return False
 
             # 2. Notify parent CComboBoxTS of EN_CHANGE
             wparam = (win32con.EN_CHANGE << 16) | 1001

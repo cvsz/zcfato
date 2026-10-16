@@ -117,6 +117,10 @@ S = {
                   "ไม่พบหน้าต่าง Camfrog (ตรวจ window_title_regex)"),
     "no_ctrl": ("control not found: {spec} (matches={n})", "ไม่พบ control: {spec} (พบ {n} รายการ)"),
     "status_set": ("status set: {text}", "ตั้ง status แล้ว: {text}"),
+    "bg_status_applied": ("background status applied: {text}",
+                          "ตั้งสถานะเบื้องหลังแล้ว: {text}"),
+    "bg_status_failed": ("background status failed (state={state}, code={code})",
+                         "ตั้งสถานะเบื้องหลังไม่สำเร็จ (state={state}, code={code})"),
     "status_slot_set": ("status slot {slot}/{total} set: {text}",
                         "ตั้งสถานะช่อง {slot}/{total} แล้ว: {text}"),
     "status_fail": ("status commit failed", "ตั้ง status ไม่สำเร็จ"),
@@ -317,6 +321,7 @@ DEFAULTS = {
                "max_consecutive_failures": 5},
     "status": {
         "enabled": True,
+        "execution_mode": "interactive",  # or "strict_background" (no focus/input/clipboard/sound changes)
         "edit": {"class_name": "Edit", "auto_id": "1001", "index": 0},
         "apply_button": None,
         "background_enter_target": "edit",  # experimental "combo" targets the parent CComboBoxTS
@@ -499,6 +504,8 @@ def _validate(cfg, errs, warns):
             errs.append(t("e_sel", k="status.edit"))
         if st.get("background_enter_target", "edit") not in ("edit", "combo"):
             errs.append("status.background_enter_target must be edit or combo")
+        if st.get("execution_mode", "interactive") not in ("interactive", "strict_background"):
+            errs.append("status.execution_mode must be interactive or strict_background")
         mq, hs = st["marquee"], st["history"]
         try:
             inf = mq.get("infinite_loop", False)
@@ -1133,8 +1140,16 @@ def _background_enter(ctrl, target="edit"):
 
 def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,
            restore: bool = False, background_enter_target: str = "edit",
-           background_if_not_foreground: bool = False) -> bool:
-    """Write and submit status text, requiring an actual Edit read-back before Enter."""
+           background_if_not_foreground: bool = False,
+           execution_mode: str = "interactive") -> bool:
+    """Write and submit status text, requiring an actual Edit read-back before Enter.
+
+    When execution_mode is "strict_background", delegates to commit_background() which
+    uses camfrog_status_engine.BackgroundStatusExecutor and performs the change without
+    focus stealing, global input injection, clipboard mutation, or sound-registry changes.
+    """
+    if execution_mode == "strict_background":
+        return commit_background(text, dry=dry)
     if dry:
         log.info(t("dry_send", text=shown(text)))
         return True
@@ -1189,6 +1204,50 @@ def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=N
         time.sleep(0.15)
         user32.SetForegroundWindow(prev)  # best effort: give focus back to what you were doing
     return True
+
+
+def commit_background(text: str, dry: bool = False, pid: Optional[int] = None) -> bool:
+    """Change Camfrog status using strict background mode.
+
+    Uses camfrog_status_engine.BackgroundStatusExecutor which:
+    - Discovers and verifies the Camfrog process independently (PID + creation time +
+      Authenticode signature).
+    - Writes status text without stealing focus.
+    - Submits Enter via PostMessage without global keyboard/mouse injection.
+    - Does not modify the clipboard.
+    - Does not modify Windows sound-registry values.
+    - Verifies the applied status before reporting success.
+
+    Returns True if the status was verified as applied, False otherwise.
+    """
+    if dry:
+        log.info(t("dry_send", text=shown(text)))
+        return True
+
+    try:
+        from camfrog_status_engine import (
+            BackgroundStatusExecutor,
+            ExecutionMode,
+            StatusResultState,
+        )
+    except ImportError as exc:
+        log.error("camfrog_status_engine not available: %s", exc)
+        return False
+
+    executor = BackgroundStatusExecutor(
+        default_mode=ExecutionMode.STRICT_BACKGROUND,
+    )
+    evidence = executor.execute_status_change(
+        status_text=text,
+        pid=pid,
+        execution_mode=ExecutionMode.STRICT_BACKGROUND,
+    )
+
+    if evidence.result_state == StatusResultState.VERIFIED_APPLIED.value:
+        log.info(t("bg_status_applied", text=shown(text)))
+        return True
+    log.error(t("bg_status_failed", state=evidence.result_state, code=evidence.error_code))
+    return False
 
 
 RESET_BURST = 25  # more fresh chat lines than this in one poll = history reset, not live chat
@@ -1814,7 +1873,8 @@ class Runner:
         return commit(win or self.win, ctrl, text, self.dry, s["require_foreground"], btn,
                       s["restore_previous_window"], target,
                       background_if_not_foreground=(
-                          ctrl is getattr(self, "status_edit", None) and win is None))
+                          ctrl is getattr(self, "status_edit", None) and win is None),
+                      execution_mode=self.cfg["status"].get("execution_mode", "interactive"))
 
     def resolve(self):
         try:
@@ -2873,7 +2933,8 @@ def cmd_status(cfg, text):
     text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
     ok = commit(win, ctrl, text, cfg["dry_run"], sf["require_foreground"], btn,
                 sf["restore_previous_window"], st.get("background_enter_target", "edit"),
-                background_if_not_foreground=True)
+                background_if_not_foreground=True,
+                execution_mode=st.get("execution_mode", "interactive"))
     print(t("ok") if ok else t("failed"))
     return 0 if ok else 1
 
@@ -3218,6 +3279,7 @@ DEFAULTS = {
                "max_consecutive_failures": 5},
     "status": {
         "enabled": True,
+        "execution_mode": "interactive",  # or "strict_background" (no focus/input/clipboard/sound changes)
         "edit": {"class_name": "Edit", "auto_id": "1001", "index": 0},
         "apply_button": None,
         "background_enter_target": "edit",  # experimental "combo" targets the parent CComboBoxTS
@@ -3348,6 +3410,8 @@ def initial_combined_config():
             marquee_config["status"].get("marquee", DEFAULTS["status"]["marquee"]))
         result["status"]["background_enter_target"] = marquee_config["status"].get(
             "background_enter_target", result["status"].get("background_enter_target", "edit"))
+        result["status"]["execution_mode"] = marquee_config["status"].get(
+            "execution_mode", result["status"].get("execution_mode", "interactive"))
     # The single worker identity belongs to the combined app, regardless of which
     # legacy config supplied the shared Camfrog selectors.
     result["status"]["random"] = False
@@ -3788,7 +3852,8 @@ def _commit_frames(config, frames, cancel_event=None):
         _raise_if_status_cancelled(cancel_event)
         ok = commit(win, ctrl, frame, config["dry_run"], sf["require_foreground"], btn,
                     sf["restore_previous_window"], st.get("background_enter_target", "edit"),
-                    background_if_not_foreground=True)
+                    background_if_not_foreground=True,
+                    execution_mode=st.get("execution_mode", "interactive"))
         if not ok:
             print(t("failed"))
             return 1

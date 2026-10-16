@@ -245,6 +245,7 @@ echo === BUILD RANDOM STATUS ===
     --distpath dist\status-random --workpath build\status-random ^
     --name status-random %ICONARG% ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
+    --hidden-import camfrog_status_engine --hidden-import camfrog_windows_runtime ^
     status_random_entry.py
 if errorlevel 1 goto :fail
 
@@ -257,6 +258,7 @@ echo === BUILD MARQUEE STATUS ===
     --distpath dist\status-marquee --workpath build\status-marquee ^
     --name status-marquee %ICONARG% ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
+    --hidden-import camfrog_status_engine --hidden-import camfrog_windows_runtime ^
     status_marquee_entry.py
 if errorlevel 1 goto :fail
 
@@ -269,6 +271,7 @@ echo === BUILD COMBINED STATUS CHANGER ===
     --distpath dist\status-changer --workpath build\status-changer ^
     --name status-changer %ICONARG% ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
+    --hidden-import camfrog_status_engine --hidden-import camfrog_windows_runtime ^
     status_changer_entry.py
 if errorlevel 1 goto :fail
 

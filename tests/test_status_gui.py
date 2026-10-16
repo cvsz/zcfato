@@ -78,7 +78,7 @@ def test_apply_status_text_preserves_foreground_setting(tmp_path, monkeypatch):
         gui, "get_window", lambda _config: win,
     )
     monkeypatch.setattr(gui, "find", lambda _win, _spec: ctrl)
-    monkeypatch.setattr(gui, "commit", lambda *args: calls.append(args) or True)
+    monkeypatch.setattr(gui, "commit", lambda *args, **kwargs: calls.append(args) or True)
 
     assert gui.apply_status_text(config_path, "status text") == 0
     assert calls[0][0] is win
