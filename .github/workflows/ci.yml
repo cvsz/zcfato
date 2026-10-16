@@ -12,6 +12,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with: { python-version: "3.12" }
+      - run: python scripts/validate_repo.py
       - run: sudo apt-get update && sudo apt-get install -y xvfb python3-tk
       - run: python -m pip install --upgrade pip
       - run: pip install -r requirements-dev.txt
@@ -21,6 +22,7 @@ jobs:
       - run: python camfrog_auto.py check --config config.example.json
       - run: python camfrog_auto.py --lang th check --config config.example.json
       - run: xvfb-run -a pytest -q tests
+      - run: python -m unittest discover -s line/tests -v
       - run: PYTHONPATH=zchat-client/src:control-server/src xvfb-run -a pytest -q zchat-client/tests
   control-server:
     runs-on: ubuntu-24.04
