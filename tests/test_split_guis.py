@@ -894,6 +894,7 @@ def test_status_window_discovery_includes_hidden_windows(monkeypatch):
         handle=77,
         class_name=lambda: "#32770",
         window_text=lambda: "Camfrog Video Chat",
+        process_id=lambda: 77,
     )
     calls = []
 
@@ -905,6 +906,9 @@ def test_status_window_discovery_includes_hidden_windows(monkeypatch):
     class UiaWindow:
         def wrapper_object(self):
             return self
+
+        def process_id(self):
+            return 77
 
     class UiaDesktop:
         def window(self, **_kwargs):

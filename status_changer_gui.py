@@ -695,6 +695,7 @@ def get_status_window(cfg, desktop_factory):
     windows = [win for win in windows if not is_own_gui_window(win)]
     if not windows:
         raise RuntimeError(t("no_window"))
+    _require_single_window_process(windows)
 
     desktop = desktop_factory(backend="uia")
     selector = cfg.get("status", {}).get("edit", {})
