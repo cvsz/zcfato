@@ -9,6 +9,7 @@ ZChat Control Server is an independent ZEAZDEV product for operator-managed acco
 - Account-scoped operator/agent chat transport with message-body validation, idempotency keys, paginated history, leased agent polling, and explicit delivery acknowledgements. This is an internal ZChat control-plane protocol, not a Camfrog network chat protocol.
 - Same-origin dashboard for agents, accounts, snapshots, commands, Cloud Bot status, imported Store metadata, and audit history.
 - Account-to-agent one-to-one assignment, heartbeat, leased command queue, command results, retry limit, revocation, and append-only-by-API audit events.
+- Case-insensitive, Unicode-normalized account nickname claims prevent new duplicate account records. Migration `0006_account_nickname_claims` reserves existing names without deleting or rewriting legacy account rows; duplicate legacy rows therefore remain visible until an operator reconciles them. Nickname-based presence lookup returns HTTP 409 while a preserved duplicate makes the requested account ambiguous.
 - Opt-in Windows provider for launching/stopping its own Camfrog process and opening official `join_room`, `add`, and `im` URI handlers. URI handoff means Windows accepted the URI; it does not prove Camfrog joined a room or completed an action.
 - Account-scoped process and room snapshots are separate from agent, login, and human presence states. Process state only reflects the child process launched by that agent; missing or stale reports become `unknown`.
 - Allowlisted profile projection and auth-state detector using `.nav-user-logged`, `external_data.type`, login-form visibility, and a CSRF-present boolean. Raw `external_data`, cookies, CSRF values, payment data, and CAPTCHA responses are discarded.
@@ -70,7 +71,7 @@ All routes are under `/api/v1` unless shown otherwise.
 | `GET /accounts/{id}/messages` | Admin JWT | Read chronological account history; use the oldest ID in a page as `before` to fetch older messages |
 | `GET /audit` | Admin JWT | Read audit history |
 | `POST /agent/heartbeat`, `GET /agent/commands/next` | Agent token | Heartbeat and claim a leased command |
-| `GET /agent/chat/session` | Agent token | Read the account assignment without refreshing command-agent presence |
+| `GET /agent/chat/session` | Agent token | Read the assigned account nickname and a read-only subscription summary without refreshing command-agent presence |
 | `POST /agent/commands/{id}/result` | Agent token | Complete a command using its one-time claim token |
 | `POST /agent/messages` | Agent token | Submit a message for the agent's assigned account |
 | `GET /agent/messages/next` | Agent token | Claim the next operator message with a bounded lease |
@@ -99,6 +100,8 @@ Agents claim operator messages from `GET /api/v1/agent/messages/next`. A claim t
 
 The HTTP contract, agent transport helpers, and API tests are implemented. The reference polling loop consumes messages only when a provider exposes `receive_chat_message`; the current Windows Camfrog adapter does not implement that method or inject messages into the desktop client. A claim/ack proves that a provider accepted the message only; it does not prove that a Camfrog user saw or sent it. No Camfrog private wire protocol is implemented or claimed.
 
+`GET /agent/chat/session` returns only the requesting agent's enabled account nickname and a sanitized subscription summary (tier, evidence source, record type, and active overlay expiry). Evidence notes and other accounts' subscription records are not exposed. The summary is a control-plane record, not live Camfrog verification and not an entitlement grant.
+
 ## Deployment boundaries
 
 - Put the API behind TLS and restrict network access to the operator dashboard/API and registered agents.
@@ -106,6 +109,7 @@ The HTTP contract, agent transport helpers, and API tests are implemented. The r
 - Keep request-body logging disabled at the reverse proxy. The application logs method, path, status, request id, and duration only.
 - Keep the agent token local to its assigned Windows machine. The sample's interactive prompt does not provide non-interactive Windows secret-store integration.
 - Use a dedicated PostgreSQL role with access only to this database. Back up and protect audit and account metadata according to your retention policy.
+- Stop the control-server API before applying migration `0006_account_nickname_claims`. The migration takes a PostgreSQL exclusive lock on `accounts` while it backfills nickname claims; keep legacy API writers stopped until the new server version is running.
 - Set aggregate SQLAlchemy pool limits against the database's actual connection budget before increasing worker count.
 - The in-process limiter does not coordinate across multiple API workers or replicas; production multi-instance deployments need a shared limiter such as Redis before scaling out.
 - Gold nickname changes, settings mutations, Store checkout, and Cloud Bot control operations remain disabled. Future sensitive actions must use the official flow, show exact changes/costs, and require fresh explicit confirmation.

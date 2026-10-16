@@ -8,7 +8,13 @@ from fastapi.testclient import TestClient
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from camfrog_control_server.models import Agent, ControlCommand, utcnow
+from camfrog_control_server.models import (
+    Agent,
+    ControlCommand,
+    SubscriptionEntitlement,
+    SubscriptionOverlay,
+    utcnow,
+)
 
 
 def _headers(token: str) -> dict[str, str]:
@@ -268,12 +274,62 @@ def test_chat_session_reads_assignment_without_refreshing_agent_presence(
     response = client.get("/api/v1/agent/chat/session", headers=_headers(agent_token))
 
     assert response.status_code == 200
-    assert response.json() == {"account_id": account_id}
+    assert response.json() == {
+        "account_id": account_id,
+        "account_nickname": "test-account",
+        "subscription_tier": "unknown",
+        "subscription_source": "baseline_not_recorded",
+        "subscription_evidence_source": "unknown",
+        "subscription_expires_at": None,
+    }
     with Session(engine) as session:
         agent = session.scalar(select(Agent).where(Agent.name == "agent-01"))
         assert agent is not None
         assert agent.runtime_state == "unknown"
         assert agent.last_seen_at is None
+
+
+def test_chat_session_exposes_only_assigned_account_vip_summary(
+    api_client: tuple[TestClient, object, str],
+) -> None:
+    client, engine, _, agent_token, account_id = _provision(api_client)
+    starts_at = utcnow() - timedelta(minutes=1)
+    expires_at = utcnow() + timedelta(days=7)
+    with Session(engine) as session:
+        session.add(
+            SubscriptionEntitlement(
+                account_id=UUID(account_id),
+                base_tier="free",
+                base_term="unknown",
+                evidence_source="official_record",
+                evidence_note="Private operator note must not be sent to an agent.",
+                observed_at=utcnow(),
+            )
+        )
+        session.add(
+            SubscriptionOverlay(
+                account_id=UUID(account_id),
+                tier="gold",
+                starts_at=starts_at,
+                expires_at=expires_at,
+                evidence_source="manual_entry",
+                evidence_note="Private overlay note must not be sent to an agent.",
+            )
+        )
+        session.commit()
+
+    response = client.get("/api/v1/agent/chat/session", headers=_headers(agent_token))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["account_id"] == account_id
+    assert payload["account_nickname"] == "test-account"
+    assert payload["subscription_tier"] == "gold"
+    assert payload["subscription_source"] == "temporary_overlay"
+    assert payload["subscription_evidence_source"] == "manual_entry"
+    assert payload["subscription_expires_at"] is not None
+    assert "evidence_note" not in payload
+    assert "Private" not in response.text
 
 
 def test_expired_lease_cannot_submit_result_and_can_be_reclaimed(
