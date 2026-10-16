@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import io
+
 import pytest
 
 from camfrog_control_server.adapters import (
@@ -14,6 +16,7 @@ from camfrog_control_server.agent import (
     poll_once,
     validate_server_url,
 )
+from camfrog_control_server.transport import normalize_agent_token
 
 
 def test_remote_agent_requires_https() -> None:
@@ -30,6 +33,61 @@ def test_server_url_rejects_embedded_credentials_and_fragments() -> None:
         validate_server_url("https://profiles.camfrog.com/path#fragment")
     with pytest.raises(ValueError, match="port"):
         validate_server_url("https://profiles.camfrog.com:invalid")
+
+
+def test_server_url_rejects_dashboard_paths() -> None:
+    with pytest.raises(ValueError, match="origin only"):
+        validate_server_url("https://control.example/dashboard")
+
+
+def test_agent_token_trims_boundary_whitespace_and_rejects_prefixes() -> None:
+    assert normalize_agent_token("  issued_token-123  ") == "issued_token-123"
+    with pytest.raises(ValueError, match="raw one-time-issued agent token"):
+        normalize_agent_token("Bearer issued_token-123")
+
+
+def test_control_plane_error_exposes_only_a_sanitized_cloudflare_ray_id() -> None:
+    client = ControlPlaneClient("https://control.example", "agent-token")
+    response = io.BytesIO(b"private edge response body")
+
+    def reject_request(*_args, **_kwargs):
+        from urllib.error import HTTPError
+
+        raise HTTPError(
+            "https://control.example/api/v1/agent/chat/session",
+            403,
+            "Forbidden",
+            {"CF-Ray": "9f0fbb987bcf4b19-IAD"},
+            response,
+        )
+
+    client._opener.open = reject_request
+    with pytest.raises(AgentTransportError) as captured:
+        client.chat_session()
+
+    assert captured.value.status_code == 403
+    assert captured.value.cf_ray_id == "9f0fbb987bcf4b19-IAD"
+    assert "9f0fbb987bcf4b19-IAD" in str(captured.value)
+    assert "private edge response body" not in str(captured.value)
+
+
+def test_control_plane_request_identifies_the_zchat_agent() -> None:
+    client = ControlPlaneClient("https://control.example", "agent-token")
+    captured = {}
+
+    class Response(io.BytesIO):
+        status = 200
+        headers = {}
+
+    def fake_open(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response(b"{}")
+
+    client._opener.open = fake_open
+
+    assert client.request("GET", "/agent/chat/session") == {}
+    assert captured["request"].get_header("User-agent") == "ZChat-Agent/1.0"
 
 
 def test_provider_fails_closed_until_configured() -> None:
