@@ -14,7 +14,7 @@ from typing import Any, ClassVar
 
 from camfrog_control_server.transport import normalize_agent_token, validate_server_url
 
-from .process_monitor import PM_TEXT, ProcessMonitorPage
+from .process_monitor import ProcessMonitorPage
 from .session import AgentChatWorker, WorkerEvent
 
 DEFAULT_SERVER_URL = ""

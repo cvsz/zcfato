@@ -7,15 +7,9 @@ client and without another ZChat executable.
 
 from __future__ import annotations
 
-import sys
 import tkinter as tk
-from pathlib import Path
 
 import pytest
-
-ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT))  # shared modules (camfrog_windows_runtime)
-
 from zchat_client.process_monitor import PM_TEXT, ProcessMonitorPage
 from zchat_client.ui import SHELL_TEXT, AgentChatWindow, UnifiedClientWindow
 
