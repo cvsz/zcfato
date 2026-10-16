@@ -33,6 +33,7 @@ else:
     RESOURCE_DIR = APP_DIR
 CONFIG_PATH = APP_DIR / "line_config.json"
 ICON_PATH = RESOURCE_DIR / "app.ico"
+LOGGER = logging.getLogger(__name__)
 
 
 def friendly_task_error(task, error):
@@ -184,16 +185,21 @@ def build_app(config_path=CONFIG_PATH):
             self.root.after(1000, self.poll_schedule)
 
         def report_callback_exception(self, exc_type, exc_value, traceback):
-            logging.error("Unhandled GUI callback exception",
-                          exc_info=(exc_type, exc_value, traceback))
+            LOGGER.error("Unhandled GUI callback exception",
+                         exc_info=(exc_type, exc_value, traceback))
             try:
+                if self.root.state() in {"iconic", "withdrawn"}:
+                    self.note.configure(
+                        text="เกิดข้อผิดพลาดเบื้องหลัง รายละเอียดอยู่ใน app.log"
+                    )
+                    return
                 messagebox.showerror(
                     "LINE Status Changer",
                     "เกิดข้อผิดพลาดในหน้าต่างโปรแกรม รายละเอียดอยู่ใน app.log",
                     parent=self.root,
                 )
-            except Exception:
-                pass
+            except (AttributeError, tk.TclError) as exc:
+                LOGGER.debug("Could not show callback error dialog: %s", exc)
 
         def _clipboard_error(self, exc):
             logging.error("Clipboard operation failed: %s", exc)

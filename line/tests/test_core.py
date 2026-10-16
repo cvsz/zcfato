@@ -309,6 +309,45 @@ _HAS_TK = importlib.util.find_spec("tkinter") is not None
 
 @unittest.skipUnless(_HAS_TK, "Tkinter is not installed in this Python environment")
 class GuiCloseBehaviorTests(unittest.TestCase):
+    def test_callback_error_is_logged_without_dialog_when_hidden(self):
+        from line_status_gui import build_app
+
+        app_type = build_app()
+        app = object.__new__(app_type)
+        error = RuntimeError("scheduled callback failed")
+        for state in ("iconic", "withdrawn"):
+            with self.subTest(state=state):
+                app.root = SimpleNamespace(state=mock.Mock(return_value=state))
+                app.note = SimpleNamespace(configure=mock.Mock())
+                with (
+                    mock.patch("tkinter.messagebox.showerror") as showerror,
+                    mock.patch("line_status_gui.LOGGER.error") as log_error,
+                ):
+                    app.report_callback_exception(RuntimeError, error, None)
+                log_error.assert_called_once()
+                showerror.assert_not_called()
+                app.note.configure.assert_called_once_with(
+                    text="เกิดข้อผิดพลาดเบื้องหลัง รายละเอียดอยู่ใน app.log"
+                )
+
+    def test_callback_error_shows_dialog_when_window_is_visible(self):
+        from line_status_gui import build_app
+
+        app_type = build_app()
+        app = object.__new__(app_type)
+        app.root = SimpleNamespace(state=mock.Mock(return_value="normal"))
+        error = RuntimeError("foreground callback failed")
+        with (
+            mock.patch("tkinter.messagebox.showerror") as showerror,
+            mock.patch("line_status_gui.LOGGER.error"),
+        ):
+            app.report_callback_exception(RuntimeError, error, None)
+        showerror.assert_called_once_with(
+            "LINE Status Changer",
+            "เกิดข้อผิดพลาดในหน้าต่างโปรแกรม รายละเอียดอยู่ใน app.log",
+            parent=app.root,
+        )
+
     def test_close_hides_in_tray_when_tray_is_available(self):
         from line_status_gui import build_app
 
