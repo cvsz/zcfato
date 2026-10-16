@@ -572,8 +572,8 @@ def test_get_window_skips_own_tk_gui(monkeypatch):
     import sys as _sys
     from types import SimpleNamespace
 
-    own = SimpleNamespace(class_name=lambda: "TkTopLevel", handle=1)
-    real = SimpleNamespace(class_name=lambda: "#32770", handle=2)
+    own = SimpleNamespace(class_name=lambda: "TkTopLevel", handle=1, process_id=lambda: 99)
+    real = SimpleNamespace(class_name=lambda: "#32770", handle=2, process_id=lambda: 42)
     fake_desktop = SimpleNamespace(windows=lambda **kw: [own, real])
     fake_pywinauto = SimpleNamespace(Desktop=lambda backend=None: fake_desktop)
     monkeypatch.setitem(_sys.modules, "pywinauto", fake_pywinauto)
@@ -587,6 +587,55 @@ def test_get_window_skips_own_tk_gui(monkeypatch):
     with pytest.raises(RuntimeError):
         c.get_window({"window_title_regex": ".*Camfrog.*"})
 
+
+
+
+def test_window_selection_rejects_multiple_processes():
+    from types import SimpleNamespace
+
+    windows = [
+        SimpleNamespace(process_id=lambda: 101),
+        SimpleNamespace(process_id=lambda: 202),
+    ]
+    with pytest.raises(RuntimeError, match="processes match"):
+        c._require_single_window_process(windows)
+
+
+def test_window_selection_allows_multiple_windows_from_one_process():
+    from types import SimpleNamespace
+
+    windows = [
+        SimpleNamespace(process_id=lambda: 101),
+        SimpleNamespace(process_id=lambda: 101),
+    ]
+    c._require_single_window_process(windows)
+
+
+def test_window_selection_rejects_unverifiable_process_in_multi_window_set():
+    from types import SimpleNamespace
+
+    windows = [
+        SimpleNamespace(process_id=lambda: 101),
+        SimpleNamespace(),
+    ]
+    with pytest.raises(RuntimeError, match="unverifiable"):
+        c._require_single_window_process(windows)
+
+
+def test_window_selection_rejects_single_unverifiable_window():
+    """P2: even one candidate must resolve to a positive, verified PID."""
+    from types import SimpleNamespace
+
+    windows = [SimpleNamespace()]  # process_id() missing -> unverifiable
+    with pytest.raises(RuntimeError, match="unverifiable"):
+        c._require_single_window_process(windows)
+
+
+def test_window_selection_allows_single_verified_window():
+    from types import SimpleNamespace
+
+    windows = [SimpleNamespace(process_id=lambda: 101)]
+    c._require_single_window_process(windows)
 
 def test_is_own_gui_window_matches_split_status_app_titles_when_class_lookup_fails():
     from types import SimpleNamespace
