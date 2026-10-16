@@ -9,7 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 @pytest.mark.parametrize("name", ["status_random_gui.py", "status_marquee_gui.py"])
 def test_auto_update_worker_handles_network_error(name):
-    source = (ROOT / name).read_text(encoding="utf-8")
+    source = (ROOT / "src" / "features" / name).read_text(encoding="utf-8")
     tree = ast.parse(source)
     method = next(node for node in ast.walk(tree)
                   if isinstance(node, ast.FunctionDef) and node.name == "_auto_update_check")
@@ -75,7 +75,7 @@ def test_manual_update_worker_handles_rate_limit(module_name, monkeypatch):
         def start(self):
             self.target()
     monkeypatch.setattr(module.threading, "Thread", SynchronousThread)
-    src = (ROOT / (module_name + ".py")).read_text(encoding="utf-8")
+    src = (ROOT / "src" / "features" / (module_name + ".py")).read_text(encoding="utf-8")
     import ast
     tree = ast.parse(src)
     method = next(node for node in ast.walk(tree)

@@ -26,7 +26,7 @@ Extron's [GUI Design Themes guide](https://www.extron.com/article/guidesign) is 
 
 ## Relation to this checkout
 
-The current client in [`web_status_gui.py`](../web_status_gui.py#L252) sends a `cloudbot` cookie to `www.camfrog.com`; it parses plugin links under `/bot/plugins/<id>` and sends a JSON `switch_plugin` request to `/bot/ajax/` ([client parser and switch call](../web_status_gui.py#L312)). These are implementation details in this repository, not endpoint semantics documented by Camfrog's public pages.
+The current client in [`web_status_gui.py`](../src/features/web_status_gui.py#L252) sends a `cloudbot` cookie to `www.camfrog.com`; it parses plugin links under `/bot/plugins/<id>` and sends a JSON `switch_plugin` request to `/bot/ajax/` ([client parser and switch call](../src/features/web_status_gui.py#L312)). These are implementation details in this repository, not endpoint semantics documented by Camfrog's public pages.
 
 [`IMPLEMENTATION_SUMMARY.md`](../IMPLEMENTATION_SUMMARY.md#L13) records an authenticated, read-only page check from the implementation work. This research did not repeat that check, so the reported Room/Profile forms and plugin inventory are not independently verified here. Public sources do not confirm the exact plugin IDs, `/bot/ajax/` RPC shape, save behavior, or the `/bot/stop` and `/bot/logout` actions.
 

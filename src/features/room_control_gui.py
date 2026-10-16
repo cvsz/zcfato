@@ -1,4 +1,4 @@
-"""Camfrog Status Changer - Random and Marquee modes with an activity log."""
+"""Camfrog Room Control - self-contained (engine + clipboard + GUI inlined, profile: room)."""
 import argparse
 import copy
 import ctypes
@@ -7,7 +7,6 @@ import hashlib
 import json
 import logging
 import logging.handlers
-import math
 import os
 import ntpath
 import random
@@ -20,8 +19,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional, Union
-from contextlib import closing
-import sqlite3
+import contextlib
+import io
 import queue
 import threading
 from types import SimpleNamespace
@@ -43,7 +42,6 @@ def system_taskkill_path():
         raise ctypes.WinError(ctypes.get_last_error())
     return os.path.join(buffer.value, "taskkill.exe")
 
-
 # ============================================================
 # Inlined engine (camfrog_auto.py) - no shared imports.
 # ============================================================
@@ -58,10 +56,24 @@ for _n in ("stdout", "stderr"):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
 # Frozen (PyInstaller) -> files live next to the exe, not the temp unpack dir.
-BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
-    else Path(__file__).resolve().parent
+def _source_base() -> Path:
+    """Repository root when running from a source checkout.
 
-APP_PROFILE = "status"
+    Source modules live under src/<area>/ while runtime data and example
+    configs live at the repository root (their pre-reorganization home).
+    Frozen executables and explicit *_DATA_DIR overrides are unaffected.
+    """
+    here = Path(__file__).resolve().parent
+    root = here.parent.parent
+    if here.parent.name == "src" and (root / "config.example.json").is_file():
+        return root
+    return here
+
+
+BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+    else _source_base()
+
+APP_PROFILE = "room"
 APP_PROFILES = {"full", "room", "im_reply", "status", "music"}
 
 # Standalone executables can pin runtime state to their own directory. Status
@@ -77,7 +89,7 @@ NICK_RE = re.compile(r"^[\w][\w .\-]{0,31}$", re.UNICODE)
 LINE_RE = re.compile(r"^(?P<nick>[^:\r\n]{1,32}):\s(?P<msg>.+)$")
 CTRL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 THAI_RE = re.compile(r"[\u0e00-\u0e7f]")
-log = logging.getLogger("camfrog_status")
+log = logging.getLogger("camfrog_room")
 LOG_TEXT = True
 LANG = "en"
 
@@ -115,14 +127,10 @@ S = {
     "not_fg": ("Camfrog not foreground; not sending", "Camfrog ไม่ได้อยู่หน้าสุด จึงไม่ส่ง"),
     "no_window": ("Camfrog window not found (check window_title_regex)",
                   "ไม่พบหน้าต่าง Camfrog (ตรวจ window_title_regex)"),
+    "verified_ambiguous": ("verified Camfrog discovery is ambiguous: {detail}",
+                           "การค้นหา Camfrog แบบยืนยันตัวตนกำกวม: {detail}"),
     "no_ctrl": ("control not found: {spec} (matches={n})", "ไม่พบ control: {spec} (พบ {n} รายการ)"),
     "status_set": ("status set: {text}", "ตั้ง status แล้ว: {text}"),
-    "bg_status_applied": ("background status applied: {text}",
-                          "ตั้งสถานะเบื้องหลังแล้ว: {text}"),
-    "bg_status_failed": ("background status failed (state={state}, code={code})",
-                         "ตั้งสถานะเบื้องหลังไม่สำเร็จ (state={state}, code={code})"),
-    "status_slot_set": ("status slot {slot}/{total} set: {text}",
-                        "ตั้งสถานะช่อง {slot}/{total} แล้ว: {text}"),
     "status_fail": ("status commit failed", "ตั้ง status ไม่สำเร็จ"),
     "reply_fail": ("reply commit failed", "ส่งข้อความตอบไม่สำเร็จ"),
     "replied": ("replied to {nick}: {text}", "ตอบ {nick} แล้ว: {text}"),
@@ -152,11 +160,6 @@ S = {
     "det_applied": ("detect: wrote selectors to {p}. Run `check`, then test with dry_run on.",
                     "detect: เขียน selector ลง {p} แล้ว รัน `check` แล้วทดสอบด้วย dry_run"),
     "det_report": ("detect: structure report (no chat text) -> {p}", "detect: รายงานโครงสร้าง (ไม่มีข้อความแชท) -> {p}"),
-    "discover_timeout": (
-        "Control discovery timed out after {seconds} seconds. Make sure Camfrog is open and try again.",
-        "ค้นหา control เกิน {seconds} วินาที ตรวจว่าเปิด Camfrog อยู่แล้วลองใหม่"),
-    "discover_failed": ("Control discovery failed (exit code {code}).",
-                        "ค้นหา control ไม่สำเร็จ (exit code {code})"),
     "no_room": ("no chat-room window yet (status still works). Open a room; it is picked up automatically.",
                 "ยังไม่พบหน้าต่างห้องแชท (ตั้ง status ได้ตามปกติ) เปิดห้องแชทแล้วจะจับให้เอง"),
     "room_attached": ("attached to chat room window {title}", "จับหน้าต่างห้องแชทแล้ว {title}"),
@@ -318,10 +321,10 @@ DEFAULTS = {
     "active_hours": {"enabled": False, "start": "09:00", "end": "23:30"},
     "safety": {"stop_file": "STOP", "pid_file": "camfrog_auto.pid",
                "require_foreground": True, "restore_previous_window": True,
+               "discovery_mode": "legacy",  # or "verified" (executable identity + signature + role)
                "max_consecutive_failures": 5},
     "status": {
         "enabled": True,
-        "execution_mode": "interactive",  # or "strict_background" (no focus/input/clipboard/sound changes)
         "edit": {"class_name": "Edit", "auto_id": "1001", "index": 0},
         "apply_button": None,
         "background_enter_target": "edit",  # experimental "combo" targets the parent CComboBoxTS
@@ -330,8 +333,7 @@ DEFAULTS = {
         "schedules": [],
         "language_cycle": [],
         "marquee": {"enabled": False, "scroll": False, "width": 28, "stride": 2, "step_seconds": 0.5,
-                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80,
-                    "infinite_loop": False, "loop_slots": False},
+                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80, "infinite_loop": False},
         "history": {"enabled": True, "file": "status_history.json", "max_items": 50,
                     "record": True, "use_as_source": False, "seed_from_messages": True,
                     "mode": "rotate"},
@@ -488,6 +490,8 @@ def _validate(cfg, errs, warns):
         re.compile(cfg["window_title_regex"])
     except re.error as e:
         errs.append(t("e_regex", e=e))
+    if cfg.get("safety", {}).get("discovery_mode", "legacy") not in ("legacy", "verified"):
+        errs.append("safety.discovery_mode must be legacy or verified")
     if cfg["active_hours"]["enabled"]:
         try:
             parse_hm(cfg["active_hours"]["start"]); parse_hm(cfg["active_hours"]["end"])
@@ -504,8 +508,6 @@ def _validate(cfg, errs, warns):
             errs.append(t("e_sel", k="status.edit"))
         if st.get("background_enter_target", "edit") not in ("edit", "combo"):
             errs.append("status.background_enter_target must be edit or combo")
-        if st.get("execution_mode", "interactive") not in ("interactive", "strict_background"):
-            errs.append("status.execution_mode must be interactive or strict_background")
         mq, hs = st["marquee"], st["history"]
         try:
             inf = mq.get("infinite_loop", False)
@@ -692,36 +694,6 @@ def is_own_gui_window(win) -> bool:
     return False
 
 
-def get_status_window(cfg, desktop_factory):
-    """Use fast Win32 title enumeration, then attach UIA only to Camfrog candidates."""
-    # Status rotation is allowed to target a minimized or explicitly hidden
-    # Camfrog window. The exact configured Edit selector is still required
-    # before accepting a candidate, so unrelated hidden windows are rejected.
-    windows = desktop_factory(backend="win32").windows(
-        title_re=cfg["window_title_regex"], visible_only=False)
-    windows = [win for win in windows if not is_own_gui_window(win)]
-    windows = [win for win in windows if _window_process_id(win) != os.getpid()]
-    if not windows:
-        raise RuntimeError(t("no_window"))
-    _require_single_window_process(windows)
-
-    desktop = desktop_factory(backend="uia")
-    selector = cfg.get("status", {}).get("edit", {})
-    for native_window in windows:
-        try:
-            window = desktop.window(handle=native_window.handle).wrapper_object()
-            if selector:
-                find(window, selector)
-            return window
-        except Exception:
-            continue
-
-    # Preserve the old setup behavior: let detection inspect the first Camfrog
-    # candidate and report that the saved selector may need replacing.
-    log.warning("Status edit control not found in any matching window; using first window")
-    return desktop.window(handle=windows[0].handle).wrapper_object()
-
-
 def _window_process_id(window):
     """Return a positive process ID for a UIA top-level window, or None."""
     try:
@@ -746,11 +718,41 @@ def _require_single_window_process(windows):
         )
 
 
-def get_window(cfg: dict):
-    from pywinauto import Desktop  # lazy: `check` works without pywinauto
-    if APP_PROFILE == "status":
-        return get_status_window(cfg, Desktop)
+def get_verified_main_window():
+    """Resolve the Camfrog main window via verified process identity.
 
+    Uses WindowsCamfrogProcessDiscovery (executable identity, Authenticode
+    signature, PID + creation time; CEF and ZChat own-process exclusion) and
+    WindowsCamfrogWindowClassifier (structural MAIN_DIRECTORY role). Fails
+    closed on ambiguous process or window identity instead of guessing.
+    """
+    from camfrog_windows_runtime import (
+        WindowRole,
+        WindowsCamfrogProcessDiscovery,
+        WindowsCamfrogWindowClassifier,
+    )
+    discovery = WindowsCamfrogProcessDiscovery()
+    try:
+        identity = discovery.get_verified_process()
+    except ProcessLookupError as exc:
+        raise RuntimeError(t("verified_ambiguous", detail=str(exc)))
+    except RuntimeError as exc:
+        raise RuntimeError(t("verified_ambiguous", detail=str(exc)))
+    classifier = WindowsCamfrogWindowClassifier()
+    windows = classifier.classify_process_windows(identity, visible_only=True)
+    mains = [w for w in windows
+             if w.role == WindowRole.MAIN_DIRECTORY and w.element is not None]
+    if len(mains) != 1:
+        raise RuntimeError(t("verified_ambiguous", detail=(
+            f"expected exactly one visible MAIN_DIRECTORY window for PID {identity.pid}, "
+            f"found {len(mains)}")))
+    return mains[0].element
+
+
+def get_window(cfg: dict):
+    if cfg.get("safety", {}).get("discovery_mode", "legacy") == "verified":
+        return get_verified_main_window()
+    from pywinauto import Desktop  # lazy: `check` works without pywinauto
     wins = Desktop(backend="uia").windows(
         title_re=cfg["window_title_regex"], visible_only=True)
     wins = [w for w in wins if not is_own_gui_window(w)]
@@ -779,6 +781,8 @@ def get_window(cfg: dict):
 def process_windows(main) -> list:
     """All visible top-level windows of the same process as `main` (Camfrog opens each chat room,
     IM and the buddy list as separate windows)."""
+    if main is None:
+        return []
     from pywinauto import Desktop
     return Desktop(backend="uia").windows(process=main.process_id(), visible_only=True)
 
@@ -902,6 +906,82 @@ def web_items(ctrl, tail=150):
     return out[-tail:] if tail else out
 
 
+def parse_web_dom_rows(rows, tail=150):
+    """Convert current Camfrog MSHTML rows into 'nick: message' lines.
+
+    Current Camfrog exposes message rows as `span.msg-user`, with sibling
+    `nickname-field` and `msgid` spans. Validate the nickname before returning
+    it so UI text that is not a message row cannot enter the reply pipeline.
+    """
+    lines = []
+    for row in rows:
+        row_classes = set(str(row.get("class_name", "")).lower().split())
+        if "msg-user" not in row_classes:
+            continue
+        nick = message = ""
+        for child in row.get("children", ()):
+            classes = set(str(child.get("class_name", "")).lower().split())
+            value = str(child.get("text", "")).strip()
+            if "nickname-field" in classes:
+                nick = value
+            elif "msgid" in classes:
+                message = value
+        if not NICK_RE.fullmatch(nick) or not message:
+            continue
+        message = " ".join(message.split())
+        if message:
+            lines.append(f"{nick}: {message}")
+    return lines[-tail:] if tail else lines
+
+
+def web_dom_rows(ctrl):
+    """Read Camfrog's IE/MSHTML message rows without logging private text.
+
+    UI Automation no longer exposes the sender hyperlink in current Camfrog
+    builds. `WM_HTML_GETOBJECT` gives the same embedded document and preserves
+    its explicit sender/message classes. Return None when this path is not
+    available so callers can retain the older UIA parser as a fallback.
+    """
+    try:
+        import pythoncom
+        import win32con
+        import win32gui
+        from win32com.client import Dispatch
+
+        servers = ctrl.descendants(class_name="Internet Explorer_Server")
+        if not servers:
+            return None
+        msg = win32gui.RegisterWindowMessage("WM_HTML_GETOBJECT")
+        sent, result = win32gui.SendMessageTimeout(
+            servers[0].handle, msg, 0, 0, win32con.SMTO_ABORTIFHUNG, 1000
+        )
+        if not sent or not result:
+            return None
+        document = Dispatch(pythoncom.ObjectFromLresult(result, pythoncom.IID_IDispatch, 0))
+        elements = document.all
+        rows = []
+        for index in range(int(elements.length)):
+            nickname = elements.item(index)
+            if "nickname-field" not in str(nickname.className or "").lower().split():
+                continue
+            parent = nickname.parentElement
+            row_classes = str(parent.className or "")
+            if "msg-user" not in row_classes.lower().split():
+                continue
+            children = []
+            for child_index in range(int(parent.children.length)):
+                child = parent.children.item(child_index)
+                children.append({
+                    "class_name": str(child.className or ""),
+                    "text": str(child.innerText or ""),
+                })
+            rows.append({"class_name": row_classes, "children": children})
+        return rows
+    except Exception as exc:
+        log.debug("MSHTML chat history read failed: %s", type(exc).__name__)
+        return None
+
+
 def is_web(ctrl):
     return _ctrl_attr(ctrl, "class_name") == "AtlAxWinLic140"
 
@@ -927,6 +1007,11 @@ def read_chat(ctrl, tail=150):
     """Chat history as text lines. Web log panes are parsed into 'nick: message'; other controls
     (older native builds) go through read_text()."""
     if is_web(ctrl):
+        dom_rows = web_dom_rows(ctrl)
+        if dom_rows is not None:
+            dom_lines = parse_web_dom_rows(dom_rows, tail)
+            if dom_lines:
+                return "\n".join(dom_lines)
         return "\n".join(parse_web_log(web_items(ctrl, tail)))
     return read_text(ctrl)
 
@@ -1087,174 +1172,47 @@ def _background_enter(ctrl, target="edit"):
             return
     if not handle:
         raise LookupError("Status combo has no HWND; cannot try combo Enter")
-
-    saved_sounds = {}
-    if os.name == "nt":
-        try:
-            import winreg
-            base_reg = r"AppEvents\Schemes\Apps\.Default"
-            for sub in (".Default", "SystemAsterisk", "SystemExclamation", "SystemNotification"):
-                try:
-                    k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
-                                       winreg.KEY_READ | winreg.KEY_WRITE)
-                    val, vtype = winreg.QueryValueEx(k, "")
-                    saved_sounds[sub] = (val, vtype)
-                    winreg.SetValueEx(k, "", 0, vtype, "")
-                    winreg.CloseKey(k)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
     u = ctypes.windll.user32
-    try:
-        u.PostMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint,
-                                   ctypes.c_size_t, ctypes.c_ssize_t)
-        u.PostMessageW.restype = ctypes.c_int
-    except (AttributeError, TypeError):
-        pass
-
-    try:
-        if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
-            raise RuntimeError("Could not post Enter key-down to status control")
-        if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
-            raise RuntimeError("Could not post Enter key-up to status control")
-        if os.name == "nt":
-            time.sleep(0.02)
-    finally:
-        if saved_sounds:
-            try:
-                import winreg
-                base_reg = r"AppEvents\Schemes\Apps\.Default"
-                for sub, (val, vtype) in saved_sounds.items():
-                    try:
-                        k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, f"{base_reg}\\{sub}\\.Current", 0,
-                                           winreg.KEY_SET_VALUE)
-                        winreg.SetValueEx(k, "", 0, vtype, val)
-                        winreg.CloseKey(k)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
+    if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-down to status control")
+    if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
+        raise RuntimeError("Could not post Enter key-up to status control")
 
 
 def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,
-           restore: bool = False, background_enter_target: str = "edit",
-           background_if_not_foreground: bool = False,
-           execution_mode: str = "interactive") -> bool:
-    """Write and submit status text, requiring an actual Edit read-back before Enter.
-
-    When execution_mode is "strict_background", delegates to commit_background() which
-    uses camfrog_status_engine.BackgroundStatusExecutor and performs the change without
-    focus stealing, global input injection, clipboard mutation, or sound-registry changes.
-    """
-    if execution_mode == "strict_background":
-        return commit_background(text, dry=dry)
+           restore: bool = False, background_enter_target: str = "edit") -> bool:
+    """Write text, verify read-back, confirm Camfrog is foreground, send, restore focus."""
     if dry:
         log.info(t("dry_send", text=shown(text)))
         return True
     if is_web(ctrl):
         return commit_web(win, ctrl, text, require_fg, restore)
-    user32 = ctypes.windll.user32
-    foreground = user32.GetForegroundWindow()
-    window_is_foreground = foreground == getattr(win, "handle", None)
-    # A status update should not raise Camfrog over the user's current window.
-    # If Camfrog is not foreground, write to its verified Edit and submit via
-    # its verified CComboBoxTS parent. Explicit combo mode uses the same path
-    # even while Camfrog is foreground (useful on builds that beep on Edit Enter).
-    background_submit = apply_btn is None and (
-        background_enter_target == "combo" or not require_fg or
-        (background_if_not_foreground and not window_is_foreground))
-    submit_target = background_enter_target
-    # Always upgrade to "combo" when doing a background submit with "edit" target:
-    # posting Enter directly to the child Edit control triggers a Windows ding
-    # sound on Camfrog builds that don't handle Enter in the Edit — regardless
-    # of whether Camfrog is currently the foreground window.
-    if background_submit and submit_target == "edit":
-        submit_target = "combo"
-    needs_foreground = require_fg and apply_btn is None and not background_submit
-    prev = foreground if restore and needs_foreground else 0
-    if needs_foreground and not foreground_ok(win):
-        log.error(t("not_fg"))
-        return False
-    if needs_foreground:
-        ctrl.set_focus()
-        if user32.GetForegroundWindow() != win.handle:
-            log.error(t("not_fg"))
-            return False
     if not write_text(ctrl, text):
         log.error(t("mismatch"))
+        return False
+    user32 = ctypes.windll.user32
+    prev = user32.GetForegroundWindow() if restore else 0
+    
+    needs_foreground = require_fg and apply_btn is None
+    if needs_foreground and not foreground_ok(win):
+        log.error(t("not_fg"))
         return False
 
     if apply_btn is not None:
         press_button(apply_btn)
     else:
-        if not background_submit:
-            if user32.GetForegroundWindow() != win.handle:  # focus stolen: do not submit
+        if require_fg:
+            ctrl.set_focus()
+            if user32.GetForegroundWindow() != win.handle:  # focus stolen: do not type
                 log.error(t("not_fg"))
                 return False
-            # Use a foreground key event so Camfrog's parent combo handles
-            # Enter normally. Posting raw key messages to the child Edit can
-            # trigger a Windows ding on every marquee frame on some builds.
             ctrl.type_keys("{ENTER}")
         else:
-            _background_enter(ctrl, submit_target)
-    if (prev and prev != win.handle and user32.IsWindow(prev)
-            and user32.GetForegroundWindow() != prev):
+            _background_enter(ctrl, background_enter_target)
+    if prev and prev != win.handle and user32.IsWindow(prev):
         time.sleep(0.15)
         user32.SetForegroundWindow(prev)  # best effort: give focus back to what you were doing
     return True
-
-
-def commit_background(text: str, dry: bool = False, pid: Optional[int] = None) -> bool:
-    """Change Camfrog status using strict background mode.
-
-    Uses camfrog_status_engine.BackgroundStatusExecutor which:
-    - Discovers and verifies the Camfrog process independently (PID + creation time +
-      Authenticode signature).
-    - Writes status text without stealing focus.
-    - Submits Enter via PostMessage without global keyboard/mouse injection.
-    - Does not modify the clipboard.
-    - Does not modify Windows sound-registry values.
-    - Verifies the applied status before reporting success.
-
-    Returns True if the status was verified as applied, False otherwise.
-    """
-    if dry:
-        log.info(t("dry_send", text=shown(text)))
-        return True
-
-    try:
-        from camfrog_status_engine import (
-            BackgroundStatusExecutor,
-            ExecutionMode,
-            StatusResultState,
-        )
-    except ImportError as exc:
-        log.error("camfrog_status_engine not available: %s", exc)
-        return False
-
-    executor = BackgroundStatusExecutor(
-        default_mode=ExecutionMode.STRICT_BACKGROUND,
-    )
-    try:
-        evidence = executor.execute_status_change(
-            status_text=text,
-            pid=pid,
-            execution_mode=ExecutionMode.STRICT_BACKGROUND,
-        )
-    except Exception as exc:
-        # Fail closed: ambiguous identity, emergency stop, or any other
-        # execution-boundary failure must never propagate into GUI workers
-        # (StopIteration in particular must not silently end a loop).
-        log.error(t("bg_status_failed", state="EXECUTION_ERROR", code=str(exc)[:120]))
-        return False
-
-    if evidence.result_state == StatusResultState.VERIFIED_APPLIED.value:
-        log.info(t("bg_status_applied", text=shown(text)))
-        return True
-    log.error(t("bg_status_failed", state=evidence.result_state, code=evidence.error_code))
-    return False
 
 
 RESET_BURST = 25  # more fresh chat lines than this in one poll = history reset, not live chat
@@ -1448,8 +1406,7 @@ def new_lines(prev, cur):
 
 # ---------- process control (background mode) ----------
 def pid_path(cfg):
-    # Each standalone status worker writes its PID/STOP into its own DATA_DIR.
-    return DATA_DIR / cfg["safety"]["pid_file"]
+    return BASE / cfg["safety"]["pid_file"]
 
 
 def read_pid(cfg):
@@ -1581,8 +1538,67 @@ def child_env():
     return env
 
 
+def cmd_start(cfg, args):
+    pid = running_pid(cfg)
+    if pid:
+        print(t("already_running", pid=pid))
+        return 1
+    if os.name != "nt":
+        print(t("win_only"))
+        return 2
+    if not cfg["log"]["file"]:
+        print(t("bg_needs_log"))
+        return 2
+    logf = BASE / cfg["log"]["file"]
+    flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    p = subprocess.Popen(child_cmd(args) + ["run"], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         creationflags=flags, close_fds=True, cwd=str(BASE),
+                         env=child_env())
+    time.sleep(2.5)
+    if p.poll() is not None:
+        print(t("bg_failed", code=p.returncode, log=logf))
+        return 1
+    print(t("bg_started", pid=p.pid, log=logf))
+    return 0
+
+
+def cmd_stop(cfg):
+    pid = running_pid(cfg)
+    stop_file = BASE / cfg["safety"]["stop_file"]
+    if not pid:
+        print(t("not_running"))
+        pid_path(cfg).unlink(missing_ok=True)
+        return 0
+    print(t("stopping", pid=pid))
+    stop_file.write_text("stop")
+    for _ in range(200):  # up to 20 s (a reply delay may be in progress)
+        if not pid_alive(pid):
+            break
+        time.sleep(0.1)
+    forced = False
+    if pid_alive(pid):
+        try:
+            subprocess.run([system_taskkill_path(), "/PID", str(pid), "/T", "/F"],
+                           capture_output=True, check=False, timeout=10)
+            forced = True
+        except (OSError, subprocess.TimeoutExpired):
+            log.exception("taskkill failed for PID %s", pid)
+        for _ in range(30):  # confirm exit after force termination
+            if not pid_alive(pid) or not pid_is_ours(pid):
+                break
+            time.sleep(0.1)
+    if pid_alive(pid) and pid_is_ours(pid):
+        print(t("stop_failed", pid=pid))
+        return 1  # retain STOP/PID files so another stop attempt can finish cleanup
+    print(t("killed") if forced else t("stopped_ok"))
+    stop_file.unlink(missing_ok=True)
+    pid_path(cfg).unlink(missing_ok=True)
+    return 0
+
+
 def stats_path(cfg):
-    return DATA_DIR / cfg["stats"]["file"]
+    return BASE / cfg["stats"]["file"]
 
 
 def cmd_state(cfg):
@@ -1603,7 +1619,7 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 RUN_VALUE = {
     "room": "CamfrogRoomControl",
     "im_reply": "CamfrogIMAutoReply",
-    "status": "CamfrogStatusChanger",
+    "status": f"CamfrogStatus{os.environ.get('ZCFATO_STATUS_MODE', 'App').title()}",
     "music": "CamfrogMusicDJ",
 }.get(APP_PROFILE, "CamfrogAuto")
 
@@ -1611,7 +1627,7 @@ RUN_VALUE = {
 PROFILE_ASSETS = {
     "room": "room-control.exe",
     "im_reply": "im-autoreply.exe",
-    "status": "status-changer.exe",
+    "status": "status-{mode}.exe",
     "music": "music-dj.exe",
     "chat_im_private": "chat-im-private.exe",
     "full": "",
@@ -1797,7 +1813,6 @@ class Runner:
 
     def apply_cfg(self, cfg):
         cfg = apply_app_profile(cfg)
-        normalize_marquee_loop(cfg)
         self.cfg = cfg
         self.dry = cfg["dry_run"]
         self.stop_file = BASE / cfg["safety"]["stop_file"]
@@ -1878,10 +1893,7 @@ class Runner:
         target = (self.cfg["status"].get("background_enter_target", "edit")
                   if ctrl is getattr(self, "status_edit", None) and win is None else "edit")
         return commit(win or self.win, ctrl, text, self.dry, s["require_foreground"], btn,
-                      s["restore_previous_window"], target,
-                      background_if_not_foreground=(
-                          ctrl is getattr(self, "status_edit", None) and win is None),
-                      execution_mode=self.cfg["status"].get("execution_mode", "interactive"))
+                      s["restore_previous_window"], target)
 
     def resolve(self):
         try:
@@ -2064,25 +2076,9 @@ class Runner:
         item = random.choice(pool) if st["random"] else pool[self.status_i % len(pool)]
         return pick_status(item, st["language_mode"], self.status_i)
 
-    def choose_status(self, sequence_index=None, sequence_pool=None):
-        """Pick a status, optionally pinned to its Marquee slot index."""
+    def choose_status(self):
+        """Pick the next status (raw template). Language cycle switches TH/EN automatically."""
         st = self.cfg["status"]
-        if sequence_index is not None:
-            pool = sequence_pool if sequence_pool is not None else self.status_pool()
-            if not pool:
-                return None
-            # Marquee is a slot sequence. Pick directly from the captured pool
-            # so history or language filters cannot redirect slot N.
-            item = pool[sequence_index % len(pool)]
-            cycle = st["language_cycle"]
-            if cycle:
-                desired = cycle[self.lang_i % len(cycle)]
-                self.lang_i += 1
-                if isinstance(item, dict) and item.get(desired):
-                    return item[desired]
-                if isinstance(item, str) and detect_lang(item) == desired:
-                    return item
-            return pick_status(item, st["language_mode"], sequence_index)
         h, cyc = st["history"], st["language_cycle"]
         desired = cyc[self.lang_i % len(cyc)] if cyc else None
         raw = None
@@ -2094,36 +2090,17 @@ class Runner:
             self.lang_i += 1
         return raw
 
-    def _finish_status(self, active, displayed):
-        """Complete one status and advance the Marquee slot cursor exactly once."""
-        self.marq = None
-        slot_index = active.get("slot_index")
-        if slot_index is None:
-            self.status_i += 1
-        else:
-            self.status_i = slot_index + 1
-        self.stats["statuses"] += 1
-        self.current_text = active["raw"]
-        if slot_index is None:
-            log.info(t("status_set", text=shown(displayed)))
-        else:
-            log.info(t("status_slot_set", slot=slot_index + 1,
-                       total=active["slot_count"], text=shown(displayed)))
-
     def build_frames(self, text):
         st, mq = self.cfg["status"], self.cfg["status"]["marquee"]
         limit = st["max_length"]
         final = clip(text, limit)
         if not mq["enabled"] or not mq.get("scroll", False):
             return [final]  # per-line rotation: one whole line per tick
-        # GUI Loop cycles through status slots. Preserve frame looping only for
-        # legacy configs that have not opted into slot looping.
-        frame_loop = bool(mq.get("infinite_loop", False)
-                          and not mq.get("loop_slots", False))
+        inf = mq.get("infinite_loop", False)
         frames = [clip(f, limit) for f in marquee_frames(
-            text, mq["width"], mq["stride"], mq["separator"], mq["cycles"], mq["max_frames"], frame_loop)]
-        if not frame_loop and (not frames or frames[-1] != final):
-            frames.append(final)  # finish this status before advancing to the next slot
+            text, mq["width"], mq["stride"], mq["separator"], mq["cycles"], mq["max_frames"], inf)]
+        if not inf and (not frames or frames[-1] != final):
+            frames.append(final)  # settle on full text unless infinite loop
         return frames
 
     def do_status(self, now):
@@ -2133,48 +2110,16 @@ class Runner:
                 log.warning(t("no_ctrl", spec={"section": "status.edit"}, n=0))
                 self._next_status_warn = now + 60
             return
-        mq = st["marquee"]
-        sequence = bool(mq.get("enabled") and not st.get("random", False))
-        active = self.marq
-        if active is not None and active.get("loop_frames") and now >= active["deadline"]:
-            self._finish_status(active, active["frames"][-1])
         if self.marq is None:
-            pool = None
-            if sequence:
-                pool = self.status_pool()
-                if not pool:
-                    return
-                if self.status_i >= len(pool):
-                    if mq.get("loop_slots", False):
-                        self.status_i = 0
-                    else:
-                        return
-            switch_delay = (max(MARQUEE_STEP_MIN,
-                                float(mq["step_seconds"])) if sequence
-                            else st["interval_seconds"])
-            if now - self.last_status < switch_delay:
+            if now - self.last_status < st["interval_seconds"]:
                 return
-            slot_index = self.status_i if sequence else None
-            raw = self.choose_status(slot_index, pool) if sequence else self.choose_status()
-            if raw is None:
-                return
+            raw = self.choose_status()
             text = expand(raw, own=self.cfg["autoreply"]["own_nickname"])
             if not text.strip():
                 log.warning(t("status_blank"))
                 self.last_status = now
                 return
-            frames = self.build_frames(text)
-            loop_frames = bool(mq.get("infinite_loop") and not mq.get("loop_slots")
-                               and mq.get("scroll") and len(frames) > 1)
-            self.marq = {"raw": raw, "frames": frames, "i": 0, "next": now,
-                         "loop_frames": loop_frames,
-                         "deadline": now + st["interval_seconds"],
-                         "history_recorded": False}
-            if sequence:
-                self.marq["slot_index"] = slot_index
-                self.marq["slot_count"] = len(pool)
-            if loop_frames:
-                self.last_status = now
+            self.marq = {"raw": raw, "frames": self.build_frames(text), "i": 0, "next": now}
         m = self.marq
         if now < m["next"]:
             return
@@ -2183,25 +2128,18 @@ class Runner:
             self.marq = None
             self.last_status = now - st["interval_seconds"] + st["retry_seconds"]
             raise RuntimeError(t("status_fail"))
-        if (m["i"] == 0 and not m["history_recorded"]
-                and st["history"]["enabled"] and st["history"]["record"]):
+        if m["i"] == 0 and st["history"]["enabled"] and st["history"]["record"]:
             self.hist.record(m["raw"])
-            m["history_recorded"] = True
         if len(m["frames"]) > 1:
             self.stats["marquee_frames"] += 1
         m["i"] += 1
-        if m["loop_frames"]:
-            if m["i"] >= len(m["frames"]):
-                m["i"] = 0
-            m["next"] = time.monotonic() + max(
-                0.3, float(st["marquee"]["step_seconds"]))
-            log.debug(t("status_set", text=shown(frame)))
-            return
         if m["i"] >= len(m["frames"]):
-            self._finish_status(m, frame)
-            # Marquee slot changes are paced by Step, regardless of Scroll.
-            # Random retains its separate Every interval.
+            self.marq = None
+            self.status_i += 1
+            self.stats["statuses"] += 1
+            self.current_text = m["raw"]
             self.last_status = now
+            log.info(t("status_set", text=shown(frame)))
         else:
             # Schedule from completion of the UI send, not the tick start. UIA
             # writes can be slow; using `now` here could make delayed sends run
@@ -2397,7 +2335,6 @@ class Runner:
         fails = 0
         try:
             while not self.stop_file.exists():
-                clean_worker_log_at_noon()
                 try:
                     now = time.monotonic()
                     self.maybe_reload(now)
@@ -2430,8 +2367,7 @@ class Runner:
                     if fails >= limit:
                         log.error(t("too_many"))
                         return 1
-                    if self._wait_for_stop(min(30, 2 ** fails)):
-                        continue
+                    time.sleep(min(30, 2 ** fails))
                     try:
                         self.resolve()
                     except Exception as e:
@@ -2447,16 +2383,6 @@ class Runner:
             return 0
         finally:
             self.write_stats(time.monotonic(), force=True)
-
-    def _wait_for_stop(self, seconds):
-        """Wait for retry backoff, checking the stop marker at short intervals."""
-        deadline = time.monotonic() + max(0.0, seconds)
-        while not self.stop_file.exists():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return False
-            time.sleep(min(0.1, remaining))
-        return True
 
 
 def run_guarded(cfg, cfg_path=None):
@@ -2811,27 +2737,18 @@ def write_detect_report(rows, path):
 
 def cmd_detect(cfg, cfg_path=None, apply=False, as_json=False):
     win = get_window(cfg)
-    if APP_PROFILE == "status":
-        # Status Changer only owns the status control. Do not walk chat room and
-        # IM trees that can contain thousands of UIA nodes and are irrelevant here.
-        per_window = [describe_controls(win)]
-    else:
-        per_window = [describe_controls(win)] + [describe_controls(w) for w in process_windows(win)
-                                                 if w.handle != win.handle]
+    per_window = [describe_controls(win)] + [describe_controls(w) for w in process_windows(win)
+                                             if w.handle != win.handle]
     rows = [r for rs in per_window for r in rs]
     found = {}
     for rs in per_window:  # selectors are per window (find() indexes inside one window)
         for k, v in detect_camfrog(rs).items():
             found.setdefault(k, v)
-    if APP_PROFILE == "status":
-        found = {key: value for key, value in found.items() if key == "status.edit"}
     rep = BASE / "detect_report.txt"
     write_detect_report(rows, rep)
     if as_json:
         print("PROPOSAL " + json.dumps({k: v[0] for k, v in found.items()}))
-    keys = ("status.edit",) if APP_PROFILE == "status" else (
-        "status.edit", "autoreply.history", "autoreply.input")
-    for key in keys:
+    for key in ("status.edit", "autoreply.history", "autoreply.input"):
         if key in found:
             print(t("det_found", k=key, sel=json.dumps(found[key][0]), why=found[key][1]))
         else:
@@ -2933,21 +2850,13 @@ def cmd_im_probe(cfg):
 
 
 def cmd_status(cfg, text):
-    st, sf = cfg["status"], cfg["safety"]
-    text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
-    if st.get("execution_mode", "interactive") == "strict_background":
-        # Strict path discovers and verifies process/controls itself;
-        # never resolve legacy visible controls first.
-        ok = commit_background(text, dry=cfg["dry_run"])
-        print(t("ok") if ok else t("failed"))
-        return 0 if ok else 1
     win = get_window(cfg)
+    st, sf = cfg["status"], cfg["safety"]
     ctrl = find(win, st["edit"])
     btn = find(win, st["apply_button"]) if st["apply_button"] else None
+    text = clip(expand(text, own=cfg["autoreply"]["own_nickname"]), st["max_length"])
     ok = commit(win, ctrl, text, cfg["dry_run"], sf["require_foreground"], btn,
-                sf["restore_previous_window"], st.get("background_enter_target", "edit"),
-                background_if_not_foreground=True,
-                execution_mode=st.get("execution_mode", "interactive"))
+                sf["restore_previous_window"], st.get("background_enter_target", "edit"))
     print(t("ok") if ok else t("failed"))
     return 0 if ok else 1
 
@@ -3154,918 +3063,8 @@ def set_lang(value):
 
 
 # ============================================================
-# GUI (from camfrog_status_gui.py), combined Random + Marquee modes.
+# Inlined clipboard support (clipboard_support.py).
 # ============================================================
-
-class SingleInstanceGuard:
-    """Prevent multiple GUI instances using a Windows named mutex.
-
-    On non-Windows platforms, always allows the instance to run.
-    If another instance exists, restores it instead of showing an error.
-    Use allow_multiple=True to bypass the check entirely.
-    """
-
-    ERROR_ALREADY_EXISTS = 183
-    WM_SHOWME = 0x8000 + 42  # Custom message to restore window
-
-    def __init__(self, name: Optional[str] = None, allow_multiple: bool = False):
-        self.mode = "both"
-        suffix = "" if self.mode == "both" else f"-{self.mode}"
-        self.name = name or f"CamfrogStatusChanger{suffix}"
-        self.allow_multiple = allow_multiple
-        self.handle = None
-        self.kernel32 = None
-        self.user32 = None
-
-    def acquire(self) -> bool:
-        if os.name != "nt" or self.allow_multiple:
-            if self.allow_multiple:
-                print("[SingleInstanceGuard] --allow-multiple: skipping mutex check")
-            return True
-        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        self.kernel32.CreateMutexW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_wchar_p)
-        self.kernel32.CreateMutexW.restype = ctypes.c_void_p
-        self.kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-        self.kernel32.CloseHandle.restype = ctypes.c_int
-        ctypes.set_last_error(0)
-        mutex_name = f"Local\\{self.name}"
-        self.handle = self.kernel32.CreateMutexW(None, False, mutex_name)
-        if not self.handle:
-            raise OSError(ctypes.get_last_error(), f"Could not create mutex {mutex_name}")
-        if ctypes.get_last_error() == self.ERROR_ALREADY_EXISTS:
-            print(f"[SingleInstanceGuard] Mutex {mutex_name} already exists - another instance running")
-            # Another instance exists - try to restore it
-            self._restore_existing_instance()
-            return False
-        print(f"[SingleInstanceGuard] Created mutex {mutex_name}")
-        return True
-
-    def _restore_existing_instance(self):
-        """Find the existing window and send a restore message."""
-        if os.name != "nt":
-            return
-        try:
-            self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-            # Find window by class name (TkTopLevel) and title containing our app name
-            # The first instance registers a window class we can find
-            self.user32.EnumWindows.argtypes = (ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p), ctypes.c_void_p)
-            self.user32.EnumWindows.restype = ctypes.c_int
-            self.user32.GetWindowTextW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int)
-            self.user32.GetWindowTextW.restype = ctypes.c_int
-            self.user32.GetClassNameW.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int)
-            self.user32.GetClassNameW.restype = ctypes.c_int
-            self.user32.PostMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)
-            self.user32.PostMessageW.restype = ctypes.c_int
-
-            found = []
-
-            def enum_callback(hwnd, lparam):
-                try:
-                    length = self.user32.GetWindowTextW(hwnd, ctypes.create_unicode_buffer(256), 256)
-                    if length > 0:
-                        title = ctypes.create_unicode_buffer(256)
-                        self.user32.GetWindowTextW(hwnd, title, 256)
-                        expected = ("Camfrog Status Changer" if self.mode == "both" else
-                                    f"Camfrog {self.mode.title()} Status")
-                        if expected in title.value:
-                            found.append(hwnd)
-                            # Found it - send restore message
-                            self.user32.PostMessageW(hwnd, self.WM_SHOWME, 0, 0)
-                            return False  # Stop enumeration
-                except Exception:
-                    pass
-                return True  # Continue enumeration
-
-            callback = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_void_p, ctypes.c_void_p)(enum_callback)
-            self.user32.EnumWindows(callback, 0)
-            if found:
-                print(f"[SingleInstanceGuard] Found existing window(s): {found} - sent restore message")
-            else:
-                print("[SingleInstanceGuard] Mutex exists but no matching window found (stale mutex?)")
-        except Exception as e:
-            print(f"[SingleInstanceGuard] Error restoring instance: {e}")
-            pass  # Best effort
-
-    @staticmethod
-    def force_cleanup(name: Optional[str] = None) -> bool:
-        """Forcefully release a stale mutex by opening and closing it.
-        Returns True if a mutex was found and closed."""
-        if os.name != "nt":
-            return False
-        try:
-            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-            kernel32.OpenMutexW.argtypes = (ctypes.c_int, ctypes.c_int, ctypes.c_wchar_p)
-            kernel32.OpenMutexW.restype = ctypes.c_void_p
-            kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
-            kernel32.CloseHandle.restype = ctypes.c_int
-            mode = "both"
-            suffix = "" if mode == "both" else f"-{mode}"
-            mutex_name = f"Local\\{name or 'CamfrogStatusChanger' + suffix}"
-            handle = kernel32.OpenMutexW(0x1F0001, False, mutex_name)  # MUTEX_ALL_ACCESS
-            if handle:
-                kernel32.CloseHandle(handle)
-                print(f"[SingleInstanceGuard] Force-cleaned stale mutex: {mutex_name}")
-                return True
-            return False
-        except Exception as e:
-            print(f"[SingleInstanceGuard] Force cleanup failed: {e}")
-            return False
-
-    def release(self):
-        if self.handle and self.kernel32:
-            self.kernel32.CloseHandle(self.handle)
-        self.handle = None
-
-DEFAULTS = {
-    "language": "auto",
-    "reload_config": True,
-    "stats": {"enabled": True, "file": "stats.json", "write_seconds": 60},
-    "window_title_regex": ".*Camfrog.*",
-    "dry_run": True,
-    "poll_seconds": 1.5,
-    "log": {"level": "INFO", "file": "camfrog_status_changer.log", "max_bytes": 1000000,
-            "backups": 3, "log_message_text": True},
-    "active_hours": {"enabled": False, "start": "09:00", "end": "23:30"},
-    "safety": {"stop_file": "camfrog_status_changer.STOP",
-               "pid_file": "camfrog_status_changer.pid",
-               "require_foreground": True, "restore_previous_window": True,
-               "max_consecutive_failures": 5},
-    "status": {
-        "enabled": True,
-        "execution_mode": "interactive",  # or "strict_background" (no focus/input/clipboard/sound changes)
-        "edit": {"class_name": "Edit", "auto_id": "1001", "index": 0},
-        "apply_button": None,
-        "background_enter_target": "edit",  # experimental "combo" targets the parent CComboBoxTS
-        "interval_seconds": 600, "set_on_start": True, "random": False,
-        "language_mode": "both", "retry_seconds": 30, "max_length": 120, "messages": [],
-        "schedules": [],
-        "language_cycle": [],
-        "marquee": {"enabled": False, "scroll": False, "width": 28, "stride": 2, "step_seconds": 0.5,
-                    "separator": "   \u2022   ", "cycles": 1, "max_frames": 80,
-                    "infinite_loop": False, "loop_slots": False},
-        "history": {"enabled": True, "file": "camfrog_status_changer_history.json", "max_items": 50,
-                    "record": True, "use_as_source": False, "seed_from_messages": True,
-                    "mode": "rotate"},
-    },
-    "autoreply": {
-        "enabled": True, "own_nickname": "", "window_title_regex": "", "log_kind": "room",
-        "history_tail": 150,
-        "history": {"class_name": "AtlAxWinLic140", "auto_id": "1002", "index": 0},
-        "input": {"class_name": "AtlAxWinLic140", "auto_id": "1002", "index": 1},
-        "ignore_nicknames": [], "only_nicknames": [],
-        "per_sender_cooldown_seconds": 300, "global_min_gap_seconds": 20,
-        "max_per_hour": 30, "delay_range_seconds": [2.0, 5.0],
-        "max_reply_length": 200, "max_incoming_length": 500, "rules": [],
-        "skip_patterns": [], "ignore_links": True,
-    },
-    # Private-message (IM) auto-reply: separate opt-in, own rules, own limits. Reuses the
-    # autoreply.history / autoreply.input selectors (IM windows have the same two web panes).
-    "autoreply_im": {
-        "enabled": False, "dry_run": True, "window_title_regex": "", "max_windows": 5,
-        "log_kinds": ["im"],
-        "only_nicknames": [], "rules": [], "skip_patterns": [], "ignore_links": True,
-        "prefix": "[auto] ", "answer_first_message": True,
-        "per_sender_cooldown_seconds": 3600, "max_per_sender_per_day": 3,
-        "global_min_gap_seconds": 20, "max_per_hour": 10, "delay_range_seconds": [2.0, 5.0],
-        "max_reply_length": 200, "max_incoming_length": 500,
-    },
-    # Room music DJ: needs autoreply.enabled for chat plumbing (see CONFIG docs).
-    "dj": {
-        "enabled": False, "prefix": "!", "queue_file": "dj_queue.json",
-        "max_per_user": 3, "music_dir": "music", "audio_backend": "chat",
-        "announce_now": "[dj] Now playing: {title} (requested by {user})",
-        "announce_queued": "[dj] Queued #{pos}: {title}",
-    },
-}
-
-
-STATUS_MODE = "both"
-
-# Keep the combined status app visually aligned with the Web Status GUI.
-STATUS_CHANGER_THEME = {
-    "background": "#f4f1e8",
-    "surface": "#fffdfa",
-    "surface_high": "#ebe5d9",
-    "entry": "#ffffff",
-    "border": "#d5c8ac",
-    "accent": "#8b672b",
-    "accent_hover": "#76541f",
-    "gold": "#8b672b",
-    "gold_hover": "#76541f",
-    "teal": "#d6e9e8",
-    "button_text": "#283648",
-    "button_active": "#d5c8ac",
-    "button_pressed": "#c2b392",
-    "text": "#283648",
-    "muted": "#626d7a",
-    "danger": "#9f3740",
-    "success": "#28744c",
-    "error": "#a3303a",
-    "log_text": "#2c3b4d",
-}
-
-# Where this app keeps its own config, status pool, logs, and worker PID/STOP.
-# The combined app keeps its worker state together and status pools separate.
-DATA_DIR = Path(os.environ["ZCFATO_DATA_DIR"]) if os.environ.get("ZCFATO_DATA_DIR") \
-    else BASE / "status-data"
-
-# ---------- Original Status GUI ----------
-
-
-ACTIVE_MODE_FILE = "camfrog_status_changer.mode"
-MODE_SETTINGS_FILE = "status-mode-settings.json"
-MARQUEE_STEP_MIN = 0.3
-MARQUEE_STRIDE_DEFAULT = 2
-RANDOM_INTERVAL_MIN = 0.3
-RANDOM_INTERVAL_DEFAULT = 600
-RANDOM_INTERVAL_MAX = 86400
-STATUS_SLOTS = 10
-CONTROL_DISCOVERY_TIMEOUT_SECONDS = 30
-
-
-def legacy_mode_data_dir(mode):
-    """Find an existing standalone app data folder so its status pool is reused."""
-    if mode not in ("random", "marquee"):
-        raise ValueError("mode must be random or marquee")
-    candidates = (
-        BASE / f"{mode}-data",
-        BASE.parent / f"status-{mode}" / f"{mode}-data",
-    )
-    return next((path for path in candidates if path.is_dir()), None)
-
-
-def mode_pool_path(mode):
-    if mode not in ("random", "marquee"):
-        raise ValueError("mode must be random or marquee")
-    return DATA_DIR / f"{mode}.db"
-
-
-def legacy_mode_config(mode):
-    legacy = legacy_mode_data_dir(mode)
-    if legacy is None:
-        return None
-    config_path = legacy / "camfrog-status-config.json"
-    if not config_path.is_file():
-        return None
-    try:
-        return load_cfg(config_path)
-    except (OSError, ValueError, KeyError, TypeError):
-        return None
-
-
-def initial_combined_config():
-    """Merge mode-specific legacy settings when creating the combined config."""
-    random_config = legacy_mode_config("random")
-    marquee_config = legacy_mode_config("marquee")
-    result = deep_merge(DEFAULTS, random_config or marquee_config or {})
-    if marquee_config:
-        result["status"]["marquee"] = copy.deepcopy(
-            marquee_config["status"].get("marquee", DEFAULTS["status"]["marquee"]))
-        result["status"]["background_enter_target"] = marquee_config["status"].get(
-            "background_enter_target", result["status"].get("background_enter_target", "edit"))
-        result["status"]["execution_mode"] = marquee_config["status"].get(
-            "execution_mode", result["status"].get("execution_mode", "interactive"))
-    # The single worker identity belongs to the combined app, regardless of which
-    # legacy config supplied the shared Camfrog selectors.
-    result["status"]["random"] = False
-    result["status"]["marquee"]["enabled"] = False
-    result["status"]["enabled"] = False
-    result["dry_run"] = True
-    return result
-
-
-def load_mode_intervals(legacy_configs=None, data_dir=None):
-    """Load separate Random/Marquee intervals, preferring combined-app settings."""
-    legacy_configs = legacy_configs or {}
-    values = {}
-    try:
-        settings_path = Path(data_dir or DATA_DIR) / MODE_SETTINGS_FILE
-        saved = json.loads(settings_path.read_text(encoding="utf-8"))
-        if isinstance(saved, dict):
-            values = saved
-    except (OSError, ValueError):
-        pass
-    result = {}
-    for mode in ("random", "marquee"):
-        fallback = (legacy_configs.get(mode) or {}).get("status", {}).get(
-            "interval_seconds", DEFAULTS["status"]["interval_seconds"])
-        raw = values.get(mode, fallback)
-        try:
-            result[mode] = parse_interval_seconds(raw)
-        except (TypeError, ValueError):
-            result[mode] = DEFAULTS["status"]["interval_seconds"]
-    return result
-
-
-def status_mode_config_paths(config_path):
-    """Return independent config paths for the combined app's two status modes."""
-    source = Path(config_path).resolve()
-    if source.name == "camfrog-status-config.json":
-        return {mode: source.parent / f"{mode}-config.json"
-                for mode in ("random", "marquee")}
-    return {mode: source.with_name(f"{source.stem}-{mode}.json")
-            for mode in ("random", "marquee")}
-
-
-def initialize_status_mode_configs(config_path):
-    """Create missing per-mode configs, copying legacy settings without deleting them."""
-    source_path = Path(config_path).resolve()
-    paths = status_mode_config_paths(source_path)
-    shared = load_cfg(source_path) if source_path.is_file() else None
-    legacy = {mode: legacy_mode_config(mode) for mode in ("random", "marquee")}
-    old_intervals = load_mode_intervals(legacy, source_path.parent)
-    settings_path = source_path.parent / MODE_SETTINGS_FILE
-    if shared and not settings_path.is_file() and not legacy.get("random"):
-        try:
-            old_intervals["random"] = parse_interval_seconds(
-                shared["status"]["interval_seconds"])
-        except (KeyError, TypeError, ValueError):
-            pass
-
-    for mode, path in paths.items():
-        if path.is_file():
-            continue
-        mode_legacy = legacy.get(mode)
-        seed = shared or mode_legacy or initial_combined_config()
-        config = deep_merge(DEFAULTS, seed)
-        if mode_legacy:
-            # A pre-existing standalone app may already have mode-specific
-            # messages and Marquee controls. Keep those while the old combined
-            # file remains the source for shared Camfrog selectors/settings.
-            legacy_status = mode_legacy.get("status", {})
-            for key, value in legacy_status.items():
-                if key in {"edit", "apply_button", "enabled", "random"}:
-                    continue
-                if mode == "random" and key == "marquee":
-                    continue
-                if mode == "marquee" and key == "interval_seconds":
-                    continue
-                config["status"][key] = copy.deepcopy(value)
-        if mode == "random":
-            config["status"]["interval_seconds"] = old_intervals["random"]
-        config["status"]["random"] = mode == "random"
-        config["status"]["marquee"]["enabled"] = mode == "marquee"
-        config["status"]["enabled"] = False
-        write_config(path, config)
-    return paths
-
-
-def parse_interval_seconds(raw):
-    """Switch time in seconds. Preserve fractions and clamp to the allowed window.
-
-    Raises ValueError on non-numeric input (including nan/inf)."""
-    try:
-        value = float(str(raw).strip())
-        if not math.isfinite(value):
-            raise ValueError("interval must be finite")
-    except (ValueError, TypeError, OverflowError) as exc:
-        raise ValueError(f"invalid interval: {raw!r}") from exc
-    value = min(RANDOM_INTERVAL_MAX, max(RANDOM_INTERVAL_MIN, value))
-    return int(value) if value.is_integer() else value
-
-
-def configure_status_mode(config, mode, messages, interval_seconds, marquee_options=None):
-    """Apply only the settings owned by the selected status workflow."""
-    if mode not in ("random", "marquee"):
-        raise ValueError("mode must be random or marquee")
-
-    status = config["status"]
-    marquee = status["marquee"]
-    status["interval_seconds"] = interval_seconds
-    status["messages"] = messages
-    status["random"] = mode == "random"
-    marquee["enabled"] = mode == "marquee"
-
-    # Marquee controls are independent from Random. An unfinished or invalid
-    # marquee edit must not prevent saving or starting the Random workflow.
-    if mode == "marquee":
-        options = marquee_options or {}
-        try:
-            step = float(str(options["step"]).strip())
-            stride = float(str(options["stride"]).strip())
-            if not math.isfinite(step) or not math.isfinite(stride):
-                raise ValueError("marquee values must be finite")
-            marquee["step_seconds"] = max(MARQUEE_STEP_MIN, step)
-            marquee["stride"] = max(1, int(stride))
-            if "loop_slots" in options:
-                marquee["loop_slots"] = bool(options["loop_slots"])
-                marquee["infinite_loop"] = False
-            else:
-                # Backward compatibility for callers using the old checkbox
-                # option name. New GUI saves use loop_slots explicitly.
-                legacy_loop = bool(options["infinite_loop"])
-                marquee["loop_slots"] = legacy_loop
-                marquee["infinite_loop"] = legacy_loop
-            marquee["scroll"] = bool(options["scroll"])
-        except (KeyError, TypeError, ValueError, OverflowError) as exc:
-            raise ValueError("invalid marquee speed values") from exc
-
-    return config
-
-
-def read_status_pool(path, seed_messages=None):
-    """Read one ten-slot pool, seeding a new database from legacy settings once."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    was_missing = not path.exists()
-    with closing(sqlite3.connect(path)) as connection:
-        with connection:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS status_slots "
-                "(slot INTEGER PRIMARY KEY CHECK(slot BETWEEN 1 AND 10), message TEXT NOT NULL)"
-            )
-            if was_missing and seed_messages is not None:
-                values = [message_to_text(message) for message in seed_messages[:STATUS_SLOTS]]
-                values.extend([""] * (STATUS_SLOTS - len(values)))
-                connection.executemany(
-                    "INSERT INTO status_slots(slot, message) VALUES(?, ?)",
-                    enumerate(values, start=1),
-                )
-            rows = dict(connection.execute("SELECT slot, message FROM status_slots"))
-    return [str(rows.get(slot, "")) for slot in range(1, STATUS_SLOTS + 1)]
-
-
-def write_status_pool(path, values):
-    """Persist all ten slots in a mode-specific SQLite database."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    values = [str(value) for value in values[:STATUS_SLOTS]]
-    values.extend([""] * (STATUS_SLOTS - len(values)))
-    with closing(sqlite3.connect(path)) as connection:
-        with connection:
-            connection.execute(
-                "CREATE TABLE IF NOT EXISTS status_slots "
-                "(slot INTEGER PRIMARY KEY CHECK(slot BETWEEN 1 AND 10), message TEXT NOT NULL)"
-            )
-            connection.execute("DELETE FROM status_slots")
-            connection.executemany(
-                "INSERT INTO status_slots(slot, message) VALUES(?, ?)",
-                enumerate(values, start=1),
-            )
-
-
-def migrate_status_pools():
-    """Copy legacy standalone pools into this app's private data folder once."""
-    paths = {mode: DATA_DIR / f"{mode}.db" for mode in ("random", "marquee")}
-    for mode, target in paths.items():
-        if target.is_file():
-            continue
-        legacy_dir = legacy_mode_data_dir(mode)
-        source = legacy_dir / f"{mode}.db" if legacy_dir is not None else None
-        if source is None or not source.is_file():
-            continue
-        try:
-            # Read-only query; do not alter a database still owned by the old app.
-            with closing(sqlite3.connect(source)) as connection:
-                rows = dict(connection.execute(
-                    "SELECT slot, message FROM status_slots"))
-            values = [str(rows.get(slot, "")) for slot in range(1, STATUS_SLOTS + 1)]
-            write_status_pool(target, values)
-        except (OSError, sqlite3.Error) as exc:
-            logging.warning("Could not import legacy %s status pool: %s",
-                            mode, type(exc).__name__)
-    return paths
-
-
-def text_to_message(value):
-    value = value.strip()
-    if not value:
-        return None
-    if "||" in value:
-        th, en = (part.strip() for part in value.split("||", 1))
-        if th and en:
-            return {"th": th, "en": en}
-        return th or en or None
-    return value
-
-
-def message_to_text(value):
-    if isinstance(value, dict):
-        return f"{value.get('th', '')} || {value.get('en', '')}"
-    return str(value or "")
-
-
-def messages_from_slots(values):
-    """Return the configured, non-empty messages represented by the ten GUI slots."""
-    result = []
-    for value in values:
-        message = text_to_message(value)
-        if message is not None:
-            result.append(message)
-    return result
-
-
-def normalize_marquee_loop(config):
-    """Interpret the legacy Marquee Loop flag as looping through status slots."""
-    marquee = config.get("status", {}).get("marquee", {})
-    if not marquee.get("enabled"):
-        return config
-    if marquee.get("loop_slots") or marquee.get("infinite_loop"):
-        marquee["loop_slots"] = True
-        marquee["infinite_loop"] = False
-    return config
-
-
-def runtime_config(config, mode="random"):
-    """Build worker settings for one mode while sharing one worker identity."""
-    if mode not in ("random", "marquee"):
-        raise ValueError("mode must be random or marquee")
-    runtime = copy.deepcopy(config)
-    status = runtime.setdefault("status", {})
-    status["random"] = mode == "random"
-    status.setdefault("marquee", {})["enabled"] = mode == "marquee"
-    if mode == "marquee":
-        normalize_marquee_loop(runtime)
-    runtime["autoreply"]["enabled"] = False
-    runtime.setdefault("autoreply_im", {})["enabled"] = False
-    runtime["stats"]["file"] = f"{mode}-status-stats.json"
-    runtime["log"]["file"] = f"{mode}-status-worker.log"
-    status.setdefault("history", {})["file"] = f"{mode}-status-history.json"
-    safety = runtime.setdefault("safety", {})
-    safety["pid_file"] = "camfrog_status_changer.pid"
-    safety["stop_file"] = "camfrog_status_changer.STOP"
-    return runtime
-
-
-def status_config_for_live_send(config, live_send):
-    """Return a copy whose dry-run setting matches the explicit UI live-send toggle."""
-    result = copy.deepcopy(config)
-    result["dry_run"] = not bool(live_send)
-    return result
-
-
-def write_config(path, config):
-    atomic_write(path, json.dumps(config, ensure_ascii=False, indent=2) + "\n")
-
-
-_ACTIVITY_LOG_LOCK = threading.Lock()
-
-STATUS_LOG_FILES = (
-    ("status_activity.log", None),
-    ("random-status-worker.log", "random"),
-    ("marquee-status-worker.log", "marquee"),
-    ("camfrog_status_changer.log", None),
-)
-
-
-def _local_now(now=None):
-    value = now if now is not None else dt.datetime.now().astimezone()
-    return value.astimezone() if value.tzinfo is None else value
-
-
-def _log_clean_marker(path):
-    path = Path(path)
-    return path.with_name(f".{path.name}.clean-date")
-
-
-def _log_cleanup_due(path, now):
-    if now.time().replace(tzinfo=None) < dt.time(12, 0):
-        return False
-    try:
-        last_clean = _log_clean_marker(path).read_text(encoding="utf-8").strip()
-    except (OSError, UnicodeError):
-        last_clean = ""
-    return last_clean != now.date().isoformat()
-
-
-def _clear_log_file(path, now, backup_count=0):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("w", encoding="utf-8"):
-        pass
-    for index in range(1, max(0, int(backup_count)) + 1):
-        Path(f"{path}.{index}").unlink(missing_ok=True)
-    atomic_write(_log_clean_marker(path), now.date().isoformat() + "\n")
-
-
-def clean_status_logs_at_noon(data_dir=None, now=None, active_modes=()):
-    """Clear the combined Status Changer logs once per local day at or after noon."""
-    data_dir = Path(data_dir) if data_dir is not None else DATA_DIR
-    local_now = _local_now(now)
-    active_modes = {mode for mode in active_modes if mode in ("random", "marquee")}
-    cleaned = []
-    with _ACTIVITY_LOG_LOCK:
-        for filename, mode in STATUS_LOG_FILES:
-            if mode in active_modes:
-                continue
-            path = data_dir / filename
-            if not _log_cleanup_due(path, local_now):
-                continue
-            try:
-                _clear_log_file(path, local_now, backup_count=3)
-            except OSError:
-                continue
-            cleaned.append(filename)
-    return tuple(cleaned)
-
-
-def clean_worker_log_at_noon(now=None, handlers=None):
-    """Reset this worker's open rotating log safely once local noon has passed."""
-    local_now = _local_now(now)
-    if local_now.time().replace(tzinfo=None) < dt.time(12, 0):
-        return ()
-    handlers = logging.getLogger().handlers if handlers is None else handlers
-    worker_logs = {"random-status-worker.log", "marquee-status-worker.log",
-                   "camfrog_status_changer.log"}
-    cleaned = []
-    for handler in tuple(handlers):
-        if not isinstance(handler, logging.handlers.RotatingFileHandler):
-            continue
-        path = Path(handler.baseFilename)
-        if path.name not in worker_logs:
-            continue
-        handler.acquire()
-        try:
-            if not _log_cleanup_due(path, local_now):
-                continue
-            try:
-                if handler.stream is not None:
-                    handler.flush()
-                    handler.stream.close()
-                    handler.stream = None
-                _clear_log_file(path, local_now, backup_count=handler.backupCount)
-                cleaned.append(path.name)
-            except OSError:
-                pass
-            finally:
-                if handler.stream is None:
-                    try:
-                        handler.stream = handler._open()
-                    except OSError:
-                        pass
-        finally:
-            handler.release()
-    return tuple(cleaned)
-
-
-def write_activity_log(mode, message):
-    """Append a credential-free GUI event to the combined app activity log."""
-    try:
-        DATA_DIR.mkdir(parents=True, exist_ok=True)
-        stamp = dt.datetime.now().astimezone().strftime("%Y-%m-%d %H:%M:%S %z")
-        safe_mode = mode if mode in ("random", "marquee") else "app"
-        safe_message = " ".join(str(message).replace("\r", " ").replace("\n", " ").split())
-        line = f"{stamp} | {safe_mode} | {safe_message}\n"
-        with _ACTIVITY_LOG_LOCK:
-            with (DATA_DIR / "status_activity.log").open("a", encoding="utf-8") as stream:
-                stream.write(line)
-    except OSError:
-        logging.exception("Could not append Status Changer activity log")
-
-
-def active_worker_mode():
-    try:
-        value = (DATA_DIR / ACTIVE_MODE_FILE).read_text(encoding="utf-8").strip()
-    except OSError:
-        return None
-    return value if value in ("random", "marquee") else None
-
-
-def apply_status_text(config_path, text):
-    """Apply one status with the saved safety settings, discovering controls if needed."""
-    config = load_cfg(config_path)
-    try:
-        return cmd_status(config, text)
-    except (LookupError, RuntimeError):
-        try:
-            detected = cmd_detect(config, config_path, apply=True)
-        except RuntimeError as exc:
-            raise RuntimeError(t(
-                "Cannot find Camfrog window. Is Camfrog running?",
-                "ไม่พบหน้าต่าง Camfrog เปิดแล้วหรือยัง")) from exc
-        if detected == 0:
-            return cmd_status(load_cfg(config_path), text)
-        raise RuntimeError(t(
-            "Could not find status controls. Open a chat room in Camfrog and retry.",
-            "ไม่พบ control ของ status เปิดห้องแชทใน Camfrog แล้วลองใหม่"))
-
-
-class StatusOperationCancelled(Exception):
-    """Raised when Stop cancels an in-progress one-shot status animation."""
-
-
-def _raise_if_status_cancelled(cancel_event):
-    if cancel_event is not None and cancel_event.is_set():
-        raise StatusOperationCancelled("status update cancelled")
-
-
-def _commit_frames(config, frames, cancel_event=None):
-    """Send prebuilt frames one by one, stopping between frames on request."""
-    st, sf = config["status"], config["safety"]
-    mq = st["marquee"]
-    strict = st.get("execution_mode", "interactive") == "strict_background"
-    _raise_if_status_cancelled(cancel_event)
-    if strict:
-        # Strict path discovers and verifies process/controls itself per
-        # frame; never resolve legacy visible controls first.
-        win = ctrl = btn = None
-    else:
-        win = get_window(config)
-        ctrl = find(win, st["edit"])
-        btn = find(win, st["apply_button"]) if st["apply_button"] else None
-    try:
-        step = max(0.3, float(mq.get("step_seconds", 0.3)))
-    except (TypeError, ValueError):
-        step = 0.3
-    for i, frame in enumerate(frames):
-        _raise_if_status_cancelled(cancel_event)
-        if strict:
-            ok = commit_background(frame, dry=config["dry_run"])
-        else:
-            ok = commit(win, ctrl, frame, config["dry_run"], sf["require_foreground"], btn,
-                        sf["restore_previous_window"], st.get("background_enter_target", "edit"),
-                        background_if_not_foreground=True,
-                        execution_mode=st.get("execution_mode", "interactive"))
-        if not ok:
-            print(t("failed"))
-            return 1
-        # A frame already being submitted cannot be rolled back, but Stop must
-        # prevent every later frame from being queued to Camfrog.
-        _raise_if_status_cancelled(cancel_event)
-        if i < len(frames) - 1:
-            if cancel_event is not None:
-                if cancel_event.wait(step):
-                    raise StatusOperationCancelled("status update cancelled")
-            else:
-                time.sleep(step)
-    print(t("ok"))
-    return 0
-
-
-def apply_status_scrolling(config_path, text, cancel_event=None):
-    """Apply one status, scrolling it immediately when scroll is enabled.
-
-    Static configs fall back to the single-shot path (with control discovery).
-    A supplied event lets the GUI Stop button cancel the frame sequence.
-    """
-    _raise_if_status_cancelled(cancel_event)
-    config = load_cfg(config_path)
-    frames = Runner(config).build_frames(
-        expand(text, own=config["autoreply"]["own_nickname"]))
-    if len(frames) <= 1:
-        _raise_if_status_cancelled(cancel_event)
-        return apply_status_text(config_path, text)
-    try:
-        return _commit_frames(config, frames, cancel_event=cancel_event)
-    except (LookupError, RuntimeError):
-        _raise_if_status_cancelled(cancel_event)
-        try:
-            detected = cmd_detect(config, config_path, apply=True)
-        except RuntimeError as exc:
-            raise RuntimeError(t(
-                "Cannot find Camfrog window. Is Camfrog running?",
-                "ไม่พบหน้าต่าง Camfrog เปิดแล้วหรือยัง")) from exc
-        if detected == 0:
-            _raise_if_status_cancelled(cancel_event)
-            return _commit_frames(load_cfg(config_path), frames,
-                                  cancel_event=cancel_event)
-        raise RuntimeError(t(
-            "Could not find status controls. Open a chat room in Camfrog and retry.",
-            "ไม่พบ control ของ status เปิดห้องแชทใน Camfrog แล้วลองใหม่"))
-
-
-def cmd_start(cfg, args):
-    pid = running_pid(cfg)
-    if pid:
-        print(t("already_running", pid=pid))
-        return 1
-    if os.name != "nt":
-        print(t("win_only"))
-        return 2
-    if not cfg["log"]["file"]:
-        print(t("bg_needs_log"))
-        return 2
-    logf = BASE / cfg["log"]["file"]
-    flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-    p = subprocess.Popen(child_cmd(args) + ["run"], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=flags, close_fds=True, cwd=str(BASE),
-                         env=child_env())
-    time.sleep(2.5)
-    if p.poll() is not None:
-        raise RuntimeError(t("bg_failed", code=p.returncode, log=logf))
-    print(t("bg_started", pid=p.pid, log=logf))
-    return 0
-
-def worker_cmd(args):
-    """Relaunch this standalone app in its hidden worker mode."""
-    if getattr(sys, "frozen", False):
-        command = [sys.executable]
-    else:
-        python = Path(sys.executable)
-        pythonw = python.with_name("pythonw.exe")
-        entrypoint = Path(__file__).with_name("status_changer_entry.py")
-        command = [str(pythonw if pythonw.exists() else python), str(entrypoint.resolve())]
-    command.append("--worker")
-    cfg_arg = []
-    if getattr(args, "config", None):
-        cfg_arg += ["--config", str(Path(args.config).resolve())]
-    if getattr(args, "lang", None):
-        cfg_arg += ["--lang", args.lang]
-    return command + cfg_arg
-
-
-def run_control_discovery(config_path, apply=True, timeout=CONTROL_DISCOVERY_TIMEOUT_SECONDS):
-    """Run UI Automation discovery out of process so a hung UIA call cannot pin the GUI busy."""
-    args = SimpleNamespace(config=str(Path(config_path).resolve()), lang=None)
-    command = worker_cmd(args)
-
-    # A console Python child keeps CLI errors available to its caller while
-    # CREATE_NO_WINDOW prevents a console from flashing beside the GUI.
-    if not getattr(sys, "frozen", False):
-        console_python = Path(command[0]).with_name("python.exe")
-        if console_python.is_file():
-            command[0] = str(console_python)
-    command.extend(("detect", "--apply") if apply else ("detect",))
-    creationflags = (0x08000000 | 0x00000200) if os.name == "nt" else 0
-    try:
-        result = subprocess.run(
-            command,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            cwd=str(BASE),
-            env=child_env(),
-            timeout=timeout,
-            check=False,
-            creationflags=creationflags,
-        )
-    except subprocess.TimeoutExpired as exc:
-        seconds = int(timeout) if float(timeout).is_integer() else timeout
-        raise RuntimeError(t("discover_timeout", seconds=seconds)) from exc
-    if result.returncode != 0:
-        raise RuntimeError(t("discover_failed", code=result.returncode))
-    return result.returncode
-
-
-def cmd_start_worker(cfg, args):
-    """Start this app's hidden status worker in the background."""
-    pid = running_pid(cfg)
-    if pid:
-        print(t("already_running", pid=pid))
-        return 1
-    if os.name != "nt":
-        print(t("win_only"))
-        return 2
-    if not cfg["log"]["file"]:
-        print(t("bg_needs_log"))
-        return 2
-    logf = DATA_DIR / cfg["log"]["file"]
-    flags = 0x08000000 | 0x00000200  # CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    env = child_env()
-    env["ZCFATO_DATA_DIR"] = str(DATA_DIR)
-    env["ZCFATO_STATUS_MODE"] = STATUS_MODE
-    p = subprocess.Popen(worker_cmd(args) + ["run"], stdin=subprocess.DEVNULL,
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         creationflags=flags, close_fds=True, cwd=str(DATA_DIR),
-                         env=env)
-    time.sleep(2.5)
-    if p.poll() is not None:
-        print(t("bg_failed", code=p.returncode, log=logf))
-        return 1
-    print(t("bg_started", pid=p.pid, log=logf))
-    return 0
-
-def cmd_stop(cfg):
-    pid = running_pid(cfg)
-    stop_file = DATA_DIR / cfg["safety"]["stop_file"]
-    if not pid:
-        print(t("not_running"))
-        pid_path(cfg).unlink(missing_ok=True)
-        (DATA_DIR / ACTIVE_MODE_FILE).unlink(missing_ok=True)
-        return 0
-    print(t("stopping", pid=pid))
-    stop_file.write_text("stop")
-    for _ in range(200):  # up to 20 s (a reply delay may be in progress)
-        if not pid_alive(pid):
-            break
-        time.sleep(0.1)
-    forced = False
-    if pid_alive(pid):
-        try:
-            subprocess.run([system_taskkill_path(), "/PID", str(pid), "/T", "/F"],
-                           capture_output=True, check=False, timeout=10)
-            forced = True
-        except (OSError, subprocess.TimeoutExpired):
-            log.exception("taskkill failed for PID %s", pid)
-        for _ in range(30):  # confirm exit after force termination
-            if not pid_alive(pid) or not pid_is_ours(pid):
-                break
-            time.sleep(0.1)
-    if pid_alive(pid) and pid_is_ours(pid):
-        print(t("stop_failed", pid=pid))
-        return 1  # retain STOP/PID files so another stop attempt can finish cleanup
-    print(t("killed") if forced else t("stopped_ok"))
-    stop_file.unlink(missing_ok=True)
-    pid_path(cfg).unlink(missing_ok=True)
-    (DATA_DIR / ACTIVE_MODE_FILE).unlink(missing_ok=True)
-    return 0
-
-STRUCT_SKIP = {"Text", "Hyperlink", "Image", "ListItem", "DataItem", "TreeItem"}
-
-# ---------- Inlined ClipboardController ----------
-
 
 _WIDGET_CLASSES = {
     "Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox", "Text", "Listbox",
@@ -4231,15 +3230,12 @@ class ClipboardController:
                               command=lambda: self.select_all(self.target))
 
     def refresh_menu(self):
-        labels = (
-            "Cut|\u0e15\u0e31\u0e14",
-            "Copy|\u0e04\u0e31\u0e14\u0e25\u0e2d\u0e01",
-            "Paste|\u0e27\u0e32\u0e07",
-            "Select all|\u0e40\u0e25\u0e37\u0e2d\u0e01\u0e17\u0e31\u0e49\u0e07\u0e2b\u0e21\u0e14",
-        )
+        """Refresh localized labels after the GUI language changes."""
+        labels = ("Cut|ตัด", "Copy|คัดลอก", "Paste|วาง",
+                  "Select all|เลือกทั้งหมด")
         for index, label in enumerate(labels):
-            menu_index = index if index < 3 else 4
-            self.menu.entryconfigure(menu_index, label=self.translate(label))
+            self.menu.entryconfigure(index if index < 3 else 4,
+                                     label=self.translate(label))
 
     def install(self, parent):
         """Bind editors recursively, including controls added after the first build."""
@@ -4251,15 +3247,10 @@ class ClipboardController:
                 if widget_class in {"Text", "Listbox"}:
                     try:
                         widget.configure(
-                            background=(STATUS_CHANGER_THEME["entry"]
-                                        if widget_class == "Text"
-                                        else STATUS_CHANGER_THEME["surface"]),
-                            foreground=STATUS_CHANGER_THEME["text"],
-                            selectbackground=STATUS_CHANGER_THEME["accent"],
-                            selectforeground=STATUS_CHANGER_THEME["surface"],
-                            insertbackground=STATUS_CHANGER_THEME["text"],
-                            highlightbackground=STATUS_CHANGER_THEME["border"],
-                            highlightcolor=STATUS_CHANGER_THEME["accent"])
+                            background="#ffffff" if widget_class == "Text" else "#fffdfa",
+                            foreground="#283648", selectbackground="#8b672b",
+                            selectforeground="#fffdfa", insertbackground="#283648",
+                            highlightbackground="#d5c8ac", highlightcolor="#8b672b")
                     except Exception:
                         pass
                 for sequence, action in (
@@ -4352,1120 +3343,1049 @@ class ClipboardController:
             except Exception:
                 pass
         return "break"
+
+
+# ============================================================
+# GUI (from camfrog_gui.py.py), profile: room.
+# ============================================================
+
+
+
+APP_NAME = "Room Control"
+
+
+
+
+CLI_COMMANDS = {"check", "discover", "detect", "chat-probe", "im-probe", "windows", "run", "start", "stop", "state", "update", "status",
+                "autostart-on", "autostart-off", "init", "marquee", "history", "history-add",
+                "history-import", "test-rules"}
+
+
+def has_cli_command(argv):
+    """Detect CLI passthrough without mistaking an option value for a command."""
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in ("--config", "--lang"):
+            index += 2
+            continue
+        if token in CLI_COMMANDS:
+            return True
+        index += 1
+    return False
+
+
+def parse_gui_args(argv):
+    parser = argparse.ArgumentParser(description="Camfrog feature app")
+    parser.add_argument("--config", default=None, help="use an alternate app-local config")
+    args = parser.parse_args(argv)
+    if args.config is not None and not args.config.strip():
+        parser.error("argument --config: expected a path")
+    return args
+SEL_FIELDS = ("control_type", "auto_id", "class_name", "title", "title_re", "index")
+
+
+def bi(s):
+    """'English|ไทย' -> text for the current language."""
+    en, _, th = s.partition("|")
+    return (th if (LANG == "th" and th) else en).replace("{pipe}", "||")  # {pipe}: literal ||
+
+
+# ---------------------------------------------------------------- Tk-free logic
+def sel_to_strs(sel):
+    sel = sel or {}
+    return {k: ("" if sel.get(k) in (None, "") else str(sel[k])) for k in SEL_FIELDS}
+
+
+def strs_to_sel(d, allow_empty=False):
+    """Selector fields -> dict. Blank everywhere -> None (only valid for apply_button)."""
+    out = {}
+    for k in SEL_FIELDS:
+        v = str(d.get(k, "")).strip()
+        if v:
+            out[k] = int(v) if k == "index" else v
+    if not out:
+        return None if allow_empty else {}
+    out.setdefault("index", 0)
+    return out
+
+
+def iter_proposals(out):
+    """Yield PROPOSAL dicts from detect output, skipping malformed lines.
+
+    A corrupt PROPOSAL line must never kill the Tk pump loop.
+    """
+    for line in str(out).splitlines():
+        if not line.startswith("PROPOSAL "):
+            continue
+        try:
+            proposal = json.loads(line[9:])
+        except ValueError:
+            continue
+        if isinstance(proposal, dict):
+            yield proposal
+
+
+def apply_proposal_to_vars(sel_vars, proposal):
+    """Fill selector StringVars from a detect PROPOSAL dict.
+
+    sel_vars maps key tuples to (vars_dict, optional) as built by
+    selector_group. Keys with no visible box (e.g. status.edit in the
+    room/im_reply profiles) are skipped, never KeyError.
+    Returns (applied_keys, skipped_keys)."""
+    applied, skipped = [], []
+    for key, sel in proposal.items():
+        pair = sel_vars.get(tuple(key.split(".")))
+        if pair is None:
+            skipped.append(key)
+            continue
+        vars_ = pair[0]
+        for k in SEL_FIELDS:
+            vars_[k].set(sel.get(k, "") if k != "index" else str(sel.get("index", 0)))
+        applied.append(key)
+    return applied, skipped
+
+
+def reply_to_fields(spec):
+    """rule reply (str | list | {th,en}) -> (th_text, en_text, any_text), one variant per line."""
+    def lines(x):
+        return "\n".join([x] if isinstance(x, str) else (x or []))
+    if isinstance(spec, dict):
+        return lines(spec.get("th")), lines(spec.get("en")), ""
+    return "", "", lines(spec)
+
+
+def fields_to_reply(th, en, anyl):
+    def pool(x):
+        v = [ln.strip() for ln in x.splitlines() if ln.strip()]
+        return v[0] if len(v) == 1 else v
+    th_p, en_p, any_p = pool(th), pool(en), pool(anyl)
+    if not (th_p or en_p or any_p):
+        return None
+    if th_p or en_p:
+        return {"th": th_p or any_p or en_p, "en": en_p or any_p or th_p}
+    return any_p
+
+
+class ConfigModel:
+    """Load / validate / atomically save config.json. Never writes an invalid config."""
+
+    def __init__(self, path):
+        self.path = Path(path).resolve()
+        if APP_PROFILE == "room":
+            try:
+                self.path.relative_to(BASE.resolve())
+            except ValueError as exc:
+                raise ValueError("This app's config must stay inside its own folder.") from exc
+        self.cfg = None
+
+    def load(self):
+        if not self.path.exists():
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_init(self.path, False)
+        self.cfg = apply_app_profile(load_cfg(self.path))
+        return self.cfg
+
+    @staticmethod
+    def check(cfg):
+        errs, warns = validate(cfg)
+        ar = cfg["autoreply"]
+        if (not cfg["dry_run"] and ar["enabled"] and not ar["own_nickname"].strip()
+                and t("refuse_live") not in errs):
+            errs.append(t("refuse_live"))
+        return errs, warns
+
+    def save(self, cfg):
+        cfg = apply_app_profile(cfg)
+        errs, warns = self.check(cfg)
+        if errs:
+            return errs, warns
+        atomic_write(self.path, json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+        self.cfg = copy.deepcopy(cfg)
+        return [], warns
+
+
+def tail_text(path, nbytes=40000, lines=400):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - nbytes))
+            data = f.read()
+    except OSError:
+        return ""
+    return "\n".join(data.decode("utf-8", "replace").splitlines()[-lines:])
+
+
+def read_stats(cfg):
+    try:
+        return json.loads(stats_path(cfg).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def explain(cfg, nick, msg, im=False):
+    """Human text for the offline room or private-message rule tester."""
+    r = (evaluate_im if im else evaluate_message)(cfg, nick, msg)
+    head = t("tr_lang", l=r["lang"])
+    if r["skip"]:
+        return head + "\n" + t("tr_skip", why=t("why_" + r["skip"]))
+    if r["rule"] is None:
+        return head + "\n" + t("tr_none")
+    return head + "\n" + t("tr_match", i=r["rule"]["idx"],
+                              reply=r["reply"] or t("tr_blocked"))
+
+
+def autosave_needs_confirmation(cfg, bot_running):
+    """Live config changes need an explicit Save confirmation while the bot runs."""
+    return bool(bot_running and not cfg.get("dry_run", True))
+
+
+# ---------------------------------------------------------------- GUI
 def build_app():
     import tkinter as tk
     from tkinter import messagebox, ttk
 
-    class StatusChanger:
-        def __init__(self, config_path):
-            self.config_paths = initialize_status_mode_configs(config_path)
-            self.config_path = self.config_paths["random"]
-            self.runtime_config_paths = {
-                "random": DATA_DIR / "random-status-runtime.json",
-                "marquee": DATA_DIR / "marquee-status-runtime.json",
-            }
+    class RuleDialog(tk.Toplevel):
+        def __init__(self, app, rule=None):
+            super().__init__(app.root)
+            self.result = None
+            self.title(bi("Rule|กฎ"))
+            self.transient(app.root)
+            rule = rule or {"pattern": "", "reply": {"th": [], "en": []}}
+            self.pat = tk.StringVar(value=rule.get("pattern", ""))
+            self.lang = tk.StringVar(value=rule.get("lang", ""))
+            self.cool = tk.StringVar(value=str(rule.get("cooldown_seconds", 0)))
+            self.mention = tk.BooleanVar(value=bool(rule.get("mention")))
+            self.enabled = tk.BooleanVar(value=rule.get("enabled", True))
+            f = ttk.Frame(self, padding=10)
+            f.pack(fill="both", expand=True)
+            ttk.Label(f, text=bi("Pattern (regex)|รูปแบบ (regex)")).grid(row=0, column=0, sticky="w")
+            ttk.Entry(f, textvariable=self.pat, width=60).grid(row=0, column=1, columnspan=3, sticky="we")
+            th, en, anyl = reply_to_fields(rule.get("reply"))
+            self.boxes = []
+            for r, (lab, val) in enumerate(((bi("Reply TH (one per line = random)|ตอบไทย (บรรทัดละแบบ สุ่ม)"), th),
+                                            (bi("Reply EN|ตอบอังกฤษ"), en),
+                                            (bi("Reply any language|ตอบทุกภาษา"), anyl)), 1):
+                ttk.Label(f, text=lab).grid(row=r, column=0, sticky="nw", pady=2)
+                box = tk.Text(f, width=60, height=3)
+                box.insert("1.0", val)
+                box.grid(row=r, column=1, columnspan=3, sticky="we", pady=2)
+                self.boxes.append(box)
+            ttk.Label(f, text=bi("Only language|เฉพาะภาษา")).grid(row=4, column=0, sticky="w")
+            ttk.Combobox(f, textvariable=self.lang, values=("", "th", "en"), width=6,
+                         state="readonly").grid(row=4, column=1, sticky="w")
+            ttk.Label(f, text=bi("Cooldown (s)|คูลดาวน์ (วินาที)")).grid(row=4, column=2, sticky="e")
+            ttk.Entry(f, textvariable=self.cool, width=8).grid(row=4, column=3, sticky="w")
+            ttk.Checkbutton(f, text=bi("Only when my nick is mentioned|ตอบเมื่อมีคนพิมพ์นิคเรา"),
+                            variable=self.mention).grid(row=5, column=0, columnspan=2, sticky="w")
+            ttk.Checkbutton(f, text=bi("Enabled|เปิดใช้"), variable=self.enabled).grid(
+                row=5, column=2, columnspan=2, sticky="w")
+            ttk.Label(f, text=bi("Variables: {sender} {me} {time} {date}. Replies starting with / are blocked.|"
+                                 "ตัวแปร: {sender} {me} {time} {date} คำตอบที่ขึ้นต้นด้วย / จะถูกบล็อก"),
+                      foreground="#626d7a").grid(row=6, column=0, columnspan=4, sticky="w", pady=4)
+            bar = ttk.Frame(f)
+            bar.grid(row=7, column=0, columnspan=4, sticky="e")
+            ttk.Button(bar, text="OK", command=self.ok).pack(side="left", padx=4)
+            ttk.Button(bar, text=bi("Cancel|ยกเลิก"), command=self.destroy).pack(side="left")
+            app.install_clipboard_support(self, remember=False)
+            self.grab_set()
+            self.wait_window()
+
+        def ok(self):
+            try:
+                pat = self.pat.get()
+                re.compile(pat, re.I)
+                reply = fields_to_reply(*(b.get("1.0", "end") for b in self.boxes))
+                cool = float(self.cool.get() or 0)
+                if not pat or reply is None or cool < 0:
+                    raise ValueError(bi("pattern and reply are required|ต้องมี pattern และ reply"))
+            except (re.error, ValueError) as e:
+                messagebox.showerror(bi("Rule|กฎ"), str(e), parent=self)
+                return
+            rule = {"pattern": pat, "reply": reply}
+            if self.mention.get():
+                rule["mention"] = True
+            if self.lang.get():
+                rule["lang"] = self.lang.get()
+            if cool:
+                rule["cooldown_seconds"] = int(cool) if cool == int(cool) else cool
+            if not self.enabled.get():
+                rule["enabled"] = False
+            self.result = rule
+            self.destroy()
+
+    class App:
+        def __init__(self, cfg_path):
             self.root = tk.Tk()
-            self.root.configure(background=STATUS_CHANGER_THEME["background"])
-            self.app_name = "Status Changer"
-            self.root.title(f"Camfrog {self.app_name}")
-            self.root.geometry("520x700")
-            self.root.minsize(480, 640)
-            self.root.resizable(True, True)
-            try:
-                self.root.iconbitmap(str(BASE / "app.ico"))
-            except (tk.TclError, OSError):
-                pass
-            self.busy = False
-            self.close_requested = False
-            self.stop_in_progress = False
-            self.pending_stop_mode = None
-            self.task_results = queue.Queue()
-            self.stop_results = queue.Queue()
-            self.task_poll_job = None
-            self.state_job = None
-            self.save_job = None
-            self.mode = "random"
-            self.loading_mode = False
-            self.activity_refresh_job = None
-            self.log_cleanup_job = None
-            self.activity_snapshot = None
-            self.entry_widgets = {"random": [], "marquee": []}
-            try:
-                self.config = load_cfg(self.config_path)
-            except Exception as exc:
-                messagebox.showerror(f"Camfrog {self.app_name}", str(exc), parent=self.root)
-                self.root.destroy()
-                raise SystemExit(2)
-            global LANG
-            self.language_preference = self.config.get("language", "auto")
-            LANG = resolve_lang(self.language_preference)
-            self.pool_paths = migrate_status_pools()
-            # Only Random has a wall-clock switch interval. Marquee advances by
-            # its Frame setting, so it has no hidden Every control/value.
-            self.intervals = {"random": tk.StringVar(value=str(
-                self.config["status"]["interval_seconds"]))}
-            self.random_fields = [tk.StringVar(value="") for _ in range(STATUS_SLOTS)]
-            self.marquee_fields = [tk.StringVar(value="") for _ in range(STATUS_SLOTS)]
-            self.step = tk.StringVar(value=str(max(
-                MARQUEE_STEP_MIN, self.config["status"]["marquee"]["step_seconds"])))
-            self.stride = tk.StringVar(value=str(self.config["status"]["marquee"].get(
-                "stride", MARQUEE_STRIDE_DEFAULT)))
-            marquee = self.config["status"]["marquee"]
-            self.loop_slots = tk.BooleanVar(value=bool(
-                marquee.get("loop_slots", False) or marquee.get("infinite_loop", False)))
-            self.scroll_frames = tk.BooleanVar(value=bool(
-                self.config["status"]["marquee"].get("scroll", False)))
-            self.combo_enter = tk.BooleanVar(value=(
-                self.config["status"].get("background_enter_target", "edit") == "combo"))
-            self.live_send = tk.BooleanVar(value=not self.config.get("dry_run", True))
-            try:
-                self._load_fields()
-            except (OSError, sqlite3.Error) as exc:
-                messagebox.showerror(f"Camfrog {self.app_name}", str(exc), parent=self.root)
-                self.root.destroy()
-                raise SystemExit(2)
-            for variable in (self.random_fields + self.marquee_fields +
-                             list(self.intervals.values()) +
-                             [self.step, self.stride, self.live_send]):
-                variable.trace_add("write", self.schedule_save)
-            self._build()
-            self.clean_logs_at_noon()
-            self._log_activity("Application opened", "app")
-            self.clipboard_controller = ClipboardController(
-                self.root, translate=self._translate_clipboard, on_error=self._clipboard_error)
-            self.clipboard_controller.install(self.root)
-            self.root.protocol("WM_DELETE_WINDOW", self.close_app)
-            self.task_poll_job = self.root.after(100, self.poll_task_results)
-            self.state_job = self.root.after(500, self.refresh_state)
-            self.activity_refresh_job = self.root.after(500, self.refresh_activity_log)
-            self.root.after(2500, self._auto_update_check)
-
-            # A second launch restores the visible standalone window.
-            if os.name == "nt":
-                self._register_single_instance_handler()
-
-        def _load_fields(self):
-            for mode, fields in (("random", self.random_fields),
-                                 ("marquee", self.marquee_fields)):
-                mode_config = load_cfg(self.config_paths[mode])
-                seed = mode_config["status"].get("messages", [])[:STATUS_SLOTS]
-                values = read_status_pool(self.pool_paths[mode], seed_messages=seed)
-                for var, message in zip(fields, values[:STATUS_SLOTS]):
-                    var.set(message)
-
-        def _fields_for_mode(self, mode=None):
-            mode = mode or self.mode
-            return self.random_fields if mode == "random" else self.marquee_fields
-
-        def _load_mode_controls(self, mode):
-            """Load that mode's independent settings into the shared controls."""
-            self.loading_mode = True
-            try:
-                self.config_path = self.config_paths[mode]
-                self.config = load_cfg(self.config_path)
-                self.live_send.set(not self.config.get("dry_run", True))
-                self.combo_enter.set(
-                    self.config["status"].get("background_enter_target", "edit") == "combo")
-                status = self.config["status"]
-                if mode == "random":
-                    self.intervals["random"].set(str(status["interval_seconds"]))
-                else:
-                    marquee = status["marquee"]
-                    self.step.set(str(max(MARQUEE_STEP_MIN, marquee["step_seconds"])))
-                    self.stride.set(str(marquee.get("stride", MARQUEE_STRIDE_DEFAULT)))
-                    self.loop_slots.set(bool(
-                        marquee.get("loop_slots", False) or marquee.get("infinite_loop", False)))
-                    self.scroll_frames.set(bool(marquee.get("scroll", False)))
-            finally:
-                self.loading_mode = False
-
-        def _tr(self, en, th):
-            return th if LANG == "th" else en
-
-        def _change_language(self, _event=None):
-            global LANG
-            LANG = "th" if self.language_box.get() == "TH" else "en"
-            self.language_preference = LANG
-            # Language is a shared UI preference; mirror only this field into
-            # each mode file so reopening the app in either tab keeps the choice.
-            try:
-                for config_path in self.config_paths.values():
-                    config = load_cfg(config_path)
-                    config["language"] = self.language_preference
-                    write_config(config_path, config)
-            except (OSError, ValueError, KeyError, TypeError) as exc:
-                logging.exception("Could not save Status Changer language preference")
-                try:
-                    self.note.configure(text=str(exc),
-                                        foreground=STATUS_CHANGER_THEME["error"])
-                except (AttributeError, tk.TclError):
-                    pass
-            self._build()
-            if hasattr(self, "clipboard_controller"):
-                self.clipboard_controller.widgets.clear()
-                self.clipboard_controller.target = None
-                self.clipboard_controller.refresh_menu()
-                self.clipboard_controller.install(self.root)
-            self.schedule_save()
-
-        def _translate_clipboard(self, text):
-            en, separator, th = text.partition("||")
-            if not separator:
-                en, _, th = text.partition("|")
-            th, en = th.strip(), en.strip()
-            return th if LANG == "th" and th else en
-
-        def _clipboard_error(self, exc):
-            try:
-                self.note.configure(text=self._tr(f"Clipboard error: {exc}",
-                                                   f"คลิปบอร์ดผิดพลาด: {exc}"))
-            except tk.TclError:
-                pass
-
-        def _build(self):
-            root = self.root
-            clipboard_menu = getattr(
-                getattr(self, "clipboard_controller", None), "menu", None)
-            for child in root.winfo_children():
-                if child is not clipboard_menu:
-                    child.destroy()
-            self.entry_widgets = {"random": [], "marquee": []}
-            style = ttk.Style(root)
+            self.root.configure(background="#f4f1e8")
+            style = ttk.Style(self.root)
             try:
                 style.theme_use("clam")
             except tk.TclError:
                 pass
-            colors = STATUS_CHANGER_THEME
-            root.configure(background=colors["background"])
-            style.configure("TFrame", background=colors["background"])
-            style.configure("TLabel", background=colors["background"],
-                            foreground=colors["text"], font=("Segoe UI", 9))
-            style.configure("TCheckbutton", background=colors["background"],
-                            foreground=colors["text"], font=("Segoe UI", 9))
-            style.map("TCheckbutton", background=[("active", colors["background"])],
-                      foreground=[("disabled", colors["muted"])])
-            style.configure("TRadiobutton", background=colors["background"],
-                            foreground=colors["text"])
-            style.configure("TLabelframe", background=colors["background"],
-                            bordercolor=colors["border"], relief="solid", padding=8)
-            style.configure("TLabelframe.Label", background=colors["background"],
-                            foreground=colors["accent"], font=("Segoe UI", 9, "bold"))
-            style.configure("TButton", padding=(10, 6), background=colors["surface_high"],
-                            foreground=colors["button_text"], bordercolor=colors["border"],
-                            font=("Segoe UI", 9, "bold"), relief="flat")
-            style.map("TButton", background=[("disabled", colors["surface"]),
-                                              ("pressed", colors["button_pressed"]),
-                                              ("active", colors["button_active"])],
-                      foreground=[("disabled", colors["muted"])])
-            style.configure("Action.TButton", padding=(8, 7),
+            style.configure("TFrame", background="#f4f1e8")
+            style.configure("TLabel", background="#f4f1e8", foreground="#283648", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TRadiobutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TLabelframe", background="#f4f1e8", bordercolor="#d5c8ac")
+            style.configure("TLabelframe.Label", background="#f4f1e8", foreground="#8b672b",
                             font=("Segoe UI", 9, "bold"))
-            style.configure("Primary.TButton", padding=(12, 7),
-                            background=colors["accent"], foreground=colors["surface"],
-                            bordercolor=colors["accent"], font=("Segoe UI", 9, "bold"),
-                            relief="flat")
-            style.map("Primary.TButton", background=[("disabled", colors["surface_high"]),
-                                                       ("pressed", colors["accent"]),
-                                                       ("active", colors["accent_hover"])],
-                      foreground=[("disabled", colors["muted"])])
-            style.configure("Success.TButton", padding=(9, 7),
-                            background=colors["success"], foreground=colors["surface"],
-                            bordercolor=colors["success"], font=("Segoe UI", 9, "bold"),
-                            relief="flat")
-            style.map("Success.TButton", background=[("disabled", colors["surface_high"]),
-                                                       ("pressed", colors["success"]),
-                                                       ("active", colors["success"])],
-                      foreground=[("disabled", colors["muted"])])
-            style.configure("Danger.TButton", padding=(9, 7),
-                            background=colors["danger"], foreground=colors["surface"],
-                            bordercolor=colors["danger"], font=("Segoe UI", 9, "bold"),
-                            relief="flat")
-            style.map("Danger.TButton", background=[("disabled", colors["surface_high"]),
-                                                      ("pressed", colors["danger"]),
-                                                      ("active", colors["danger"])],
-                      foreground=[("disabled", colors["muted"])])
-            style.configure("TEntry", padding=(7, 6), fieldbackground=colors["entry"],
-                            foreground=colors["text"], bordercolor=colors["border"],
-                            lightcolor=colors["accent"], darkcolor=colors["border"])
-            style.configure("TSpinbox", padding=(5, 5), fieldbackground=colors["entry"],
-                            foreground=colors["text"], bordercolor=colors["border"],
-                            arrowcolor=colors["accent"])
-            style.configure("TNotebook", background=colors["background"], borderwidth=0)
-            style.configure("TNotebook.Tab", padding=(14, 8),
-                            background=colors["surface_high"], foreground=colors["muted"],
-                            font=("Segoe UI", 9, "bold"))
-            style.map("TNotebook.Tab", background=[("selected", colors["surface"])],
-                      foreground=[("selected", colors["accent"])])
-            style.configure("Brand.TLabel", background=colors["background"],
-                            font=("Segoe UI", 10, "bold"), foreground=colors["accent"])
-            style.configure("State.TLabel", background=colors["background"],
-                            foreground=colors["text"], font=("Segoe UI", 9, "bold"))
-            style.configure("State.OK.TLabel", background=colors["background"],
-                            font=("Segoe UI", 9, "bold"), foreground=colors["success"])
-            style.configure("State.STOP.TLabel", background=colors["background"],
-                            font=("Segoe UI", 9, "bold"), foreground=colors["danger"])
-            style.configure("Hint.TLabel", background=colors["background"],
-                            font=("Segoe UI", 8), foreground=colors["muted"])
-            style.configure("Mode.TNotebook", tabmargins=(0, 5, 0, 0))
-            style.configure("Mode.TNotebook.Tab", padding=(12, 7),
-                            font=("Segoe UI", 9, "bold"))
-            style.configure("Card.TFrame", background=colors["surface"], padding=(3, 3))
-            style.configure("Card.TLabel", background=colors["surface"],
-                            foreground=colors["text"], font=("Segoe UI", 9))
-            style.configure("Index.TLabel", background=colors["surface"],
-                            foreground=colors["accent"], font=("Segoe UI", 8, "bold"))
-            style.configure("Entry.TEntry", padding=(7, 4))
-            outer = ttk.Frame(root, padding=(12, 10, 12, 10))
-            outer.pack(fill="both", expand=True)
-
-            header = ttk.Frame(outer)
-            header.pack(fill="x", pady=(0, 2))
-            ttk.Label(header, text=self.app_name.upper(), style="Brand.TLabel").pack(side="left")
-            self.state_label = ttk.Label(header, text="", style="State.TLabel")
-            self.state_label.pack(side="right")
-            self.language_box = ttk.Combobox(
-                header, values=("TH", "EN"), width=3, state="readonly")
-            self.language_box.set("TH" if LANG == "th" else "EN")
-            self.language_box.pack(side="right", padx=(0, 9))
-            self.language_box.bind("<<ComboboxSelected>>", self._change_language)
-            hint = self._tr("Random and Marquee status tools with a combined activity log.",
-                            "จัดการสถานะสุ่มและข้อความเลื่อน พร้อมบันทึกกิจกรรม")
-            ttk.Label(outer, text=hint, style="Hint.TLabel").pack(anchor="w", pady=(0, 6))
-
-            self.tabs = ttk.Notebook(outer, style="Mode.TNotebook")
-            self.tabs.pack(fill="both", expand=True)
-            self.pages = {}
-            for name_en, name_th, mode in (
-                    ("Random", "สุ่ม", "random"),
-                    ("Marquee", "เลื่อน", "marquee"),
-                    ("Activity Log", "บันทึกกิจกรรม", "activity")):
-                page = ttk.Frame(self.tabs, padding=8)
-                self.tabs.add(page, text=self._tr(name_en, name_th))
-                self.pages[mode] = page
-                self._build_page(page, mode)
-            self.tabs.bind("<<NotebookTabChanged>>", self._tab_changed)
-            if self.mode in self.pages:
-                self.tabs.select(self.pages[self.mode])
-
-            self.note = ttk.Label(outer, text="", font=("Segoe UI", 8), anchor="w",
-                                  foreground=colors["muted"], wraplength=420)
-            self.note.pack(fill="x", pady=(7, 5))
-            options = ttk.Frame(outer)
-            options.pack(fill="x", pady=(0, 5))
-            ttk.Checkbutton(
-                options,
-                text=self._tr("Send statuses live to Camfrog", "ส่งสถานะจริงไป Camfrog"),
-                variable=self.live_send,
-                command=self.schedule_save,
-            ).pack(side="left")
-            ttk.Checkbutton(
-                options,
-                text=self._tr("Use background status updates", "ส่งสถานะเบื้องหลัง"),
-                variable=self.combo_enter,
-                command=self.schedule_save,
-            ).pack(side="left", padx=(8, 0))
-            self._build_actions(outer)
-            ttk.Label(outer, text=f"CAMFROG {self.app_name.upper()}", style="Brand.TLabel",
-                      anchor="center").pack(fill="x")
-
-        def _build_page(self, page, mode):
-            if mode == "activity":
-                toolbar = ttk.Frame(page)
-                toolbar.pack(fill="x", pady=(0, 5))
-                ttk.Label(toolbar, text=self._tr(
-                    "GUI actions and worker logs appear here. Sent status text is included when log_message_text is enabled. Logs clear daily at 12:00 local time; if the app is closed, cleanup runs at next launch.",
-                    "บันทึก GUI และ worker จะแสดงที่นี่ โดยข้อความสถานะที่ส่งจะอยู่ใน log เมื่อเปิด log_message_text ระบบล้าง log ทุกวันเวลา 12:00 ตามเวลาท้องถิ่น หากปิดแอปไว้จะล้างเมื่อเปิดครั้งถัดไป"),
-                    style="Hint.TLabel").pack(side="left", fill="x", expand=True)
-                ttk.Button(toolbar, text=self._tr("Open log folder", "เปิดโฟลเดอร์ log"),
-                           command=self.open_log_folder).pack(side="right")
-                frame = ttk.Frame(page)
-                frame.pack(fill="both", expand=True)
-                self.activity_text = tk.Text(
-                    frame, wrap="none", state="disabled", height=24,
-                    background=STATUS_CHANGER_THEME["entry"],
-                    foreground=STATUS_CHANGER_THEME["log_text"],
-                    insertbackground=STATUS_CHANGER_THEME["accent"],
-                    selectbackground=STATUS_CHANGER_THEME["border"],
-                    relief="flat", padx=9, pady=8,
-                    font=("Consolas", 9), undo=False)
-                scroll_y = ttk.Scrollbar(frame, orient="vertical",
-                                         command=self.activity_text.yview)
-                scroll_x = ttk.Scrollbar(frame, orient="horizontal",
-                                         command=self.activity_text.xview)
-                self.activity_text.configure(yscrollcommand=scroll_y.set,
-                                             xscrollcommand=scroll_x.set)
-                self.activity_text.grid(row=0, column=0, sticky="nsew")
-                scroll_y.grid(row=0, column=1, sticky="ns")
-                scroll_x.grid(row=1, column=0, sticky="ew")
-                frame.rowconfigure(0, weight=1)
-                frame.columnconfigure(0, weight=1)
-                self.activity_snapshot = None
-                return
-
-            title = self._tr("Random status pool", "ชุดข้อความสุ่ม") if mode == "random" \
-                else self._tr("Marquee status pool", "ชุดข้อความเลื่อน")
-            hint = self._tr("Pick one of these entries on each switch.",
-                            "สุ่มเลือกหนึ่งข้อความเมื่อถึงรอบเปลี่ยน") if mode == "random" \
-                else self._tr("Marquee settings and messages stay separate from Random.",
-                              "ตั้งค่าความเร็วและข้อความแยกจากโหมดสุ่ม")
-            ttk.Label(page, text=title, font=("Segoe UI", 9, "bold")).pack(
-                anchor="w", pady=(0, 3))
-            ttk.Label(page, text=hint, style="Hint.TLabel").pack(
-                anchor="w", pady=(0, 6))
-
-            timing = ttk.Frame(page, style="Card.TFrame", padding=(7, 6))
-            timing.pack(fill="x", pady=(0, 4))
-            colors = STATUS_CHANGER_THEME
-            if mode == "random":
-                ttk.Label(timing, text=self._tr("Every", "เปลี่ยนทุก"),
-                          style="Card.TLabel").pack(side="left", padx=(2, 0))
-                ttk.Spinbox(timing, textvariable=self.intervals["random"],
-                            from_=RANDOM_INTERVAL_MIN, to=RANDOM_INTERVAL_MAX,
-                            increment=1, width=6).pack(side="left", padx=(5, 3))
-                ttk.Label(timing, text="s", style="Card.TLabel").pack(
-                    side="left", padx=(0, 7))
-                ttk.Label(timing, text=self._tr("status interval", "ช่วงเปลี่ยน"),
-                          style="Card.TLabel", foreground=colors["muted"]).pack(side="left")
-            else:
-                ttk.Label(timing, text=self._tr("Frame", "จังหวะ"),
-                          style="Card.TLabel").pack(side="left", padx=(2, 0))
-                ttk.Spinbox(timing, textvariable=self.step, from_=MARQUEE_STEP_MIN,
-                            to=10, increment=0.1, width=5).pack(side="left", padx=(4, 3))
-                ttk.Label(timing, text="s", style="Card.TLabel").pack(side="left")
-                ttk.Label(timing, text=self._tr("Stride", "ก้าว"),
-                          style="Card.TLabel").pack(side="left", padx=(8, 2))
-                ttk.Spinbox(timing, textvariable=self.stride, from_=1, to=10,
-                            increment=1, width=3).pack(side="left")
-                ttk.Checkbutton(timing, text=self._tr("Loop slots", "วนช่อง 1–10"),
-                                variable=self.loop_slots,
-                                command=self.schedule_save).pack(side="left", padx=(8, 0))
-                ttk.Checkbutton(timing, text=self._tr("Scroll", "เลื่อน"),
-                                variable=self.scroll_frames,
-                                command=self.schedule_save).pack(side="left", padx=(8, 0))
-
-            entries = ttk.Frame(page, style="Card.TFrame", padding=4)
-            entries.pack(fill="both", expand=True, pady=(4, 0))
-            for index, var in enumerate(self._fields_for_mode(mode)):
-                ttk.Label(entries, text=f"{index + 1:02d}", width=3,
-                          style="Index.TLabel").grid(
-                    row=index, column=0, sticky="w", pady=1, padx=(4, 8))
-                entry = ttk.Entry(entries, textvariable=var, style="Entry.TEntry")
-                entry.grid(row=index, column=1, sticky="ew", pady=1, padx=(0, 4))
-                self.entry_widgets[mode].append((entry, var))
-            entries.columnconfigure(1, weight=1)
-
-        def _build_actions(self, parent):
-            """Two-column, colour-coded controls shared by Random and Marquee."""
-            actions = ttk.Frame(parent)
-            actions.pack(fill="x", pady=(2, 8))
-            for col in range(4):
-                actions.columnconfigure(col, weight=1, uniform="action")
-            for index, (title_en, title_th, command, button_style) in enumerate((
-                ("1. Discovery", "1. ค้นหา Control", self.discover, "Action.TButton"),
-                ("2. Save Data", "2. บันทึกข้อมูล", self.save_data, "Success.TButton"),
-                ("3. Start", "3. เริ่ม", lambda: self.set_worker_running(self.mode, True), "Primary.TButton"),
-                ("4. Stop", "4. หยุด", lambda: self.set_worker_running(self.mode, False), "Danger.TButton"),
-            )):
-                button = ttk.Button(actions, text=self._tr(title_en, title_th),
-                                    command=command, style=button_style, takefocus=True)
-                button.grid(row=0, column=index,
-                            padx=(0, 4) if index < 3 else (0, 0),
-                            pady=(0, 4), sticky="ew")
-            ttk.Button(parent, text=self._tr("Check for updates", "ตรวจอัปเดต"),
-                       command=self.check_update).pack(fill="x", pady=(0, 5))
-            ttk.Label(parent, text=self._tr(
-                "Close / X stops this app's worker before exiting.",
-                "ปิดหน้าต่างด้วย X เพื่อหยุด worker ของแอปก่อนออก"),
-                 style="Hint.TLabel").pack(anchor="w", pady=(0, 5))
-
-        def _tab_changed(self, _event=None):
-            try:
-                selected = str(self.tabs.select())
-                selected_mode = next(mode for mode, page in self.pages.items()
-                                     if str(page) == selected)
-            except (StopIteration, tk.TclError):
-                return
-            if selected_mode not in ("random", "marquee") or selected_mode == self.mode:
-                return
-            old_mode = self.mode
-            try:
-                if self.save_job is not None:
-                    try:
-                        self.root.after_cancel(self.save_job)
-                    except tk.TclError:
-                        pass
-                    self.save_job = None
-                self._save_pools()
-                if self.save_settings(mode=old_mode) is None:
-                    self.tabs.select(self.pages[old_mode])
-                    return
-                self.mode = selected_mode
-                self._load_mode_controls(selected_mode)
-            except (OSError, sqlite3.Error, ValueError, KeyError, tk.TclError) as exc:
-                logging.exception("Could not switch status mode config")
-                self.mode = old_mode
-                try:
-                    self._load_mode_controls(old_mode)
-                    self.tabs.select(self.pages[old_mode])
-                    self.note.configure(text=str(exc), foreground=STATUS_CHANGER_THEME["error"])
-                except (OSError, ValueError, KeyError, tk.TclError):
-                    pass
-
-        def _log_activity(self, message, mode=None):
-            write_activity_log(mode or self.mode, message)
-            self.activity_snapshot = None
-
-        def refresh_activity_log(self):
-            if not self.root.winfo_exists():
-                return
-            widget = getattr(self, "activity_text", None)
-            if widget is not None:
-                entries = []
-                sources = [(DATA_DIR / "status_activity.log", "GUI")]
-                sources.extend((DATA_DIR / f"{mode}-status-worker.log",
-                                f"{mode.title()} worker")
-                               for mode in ("random", "marquee"))
-                for path, source in sources:
-                    try:
-                        with path.open("rb") as stream:
-                            stream.seek(max(0, path.stat().st_size - 500_000))
-                            raw_lines = stream.read().decode("utf-8", errors="replace").splitlines()
-                    except OSError:
-                        continue
-                    for line in raw_lines[-1500:]:
-                        stamp = line[:19]
-                        entries.append((stamp, f"[{source}] {line}"))
-                entries.sort(key=lambda item: item[0])
-                text = "\n".join(line for _stamp, line in entries[-3000:])
-                if text != self.activity_snapshot:
-                    widget.configure(state="normal")
-                    widget.delete("1.0", "end")
-                    widget.insert("end", text or self._tr(
-                        "No activity recorded yet.", "ยังไม่มีบันทึกกิจกรรม"))
-                    widget.configure(state="disabled")
-                    widget.see("end")
-                    self.activity_snapshot = text
-            try:
-                self.activity_refresh_job = self.root.after(1000, self.refresh_activity_log)
-            except tk.TclError:
-                self.activity_refresh_job = None
-
-        def clean_logs_at_noon(self):
-            if not self.root.winfo_exists():
-                return
-            active_modes = set()
-            mode = active_worker_mode()
-            if mode:
-                try:
-                    config = load_cfg(self.config_paths[mode])
-                    if running_pid(runtime_config(config, mode)):
-                        active_modes.add(mode)
-                except (OSError, ValueError, KeyError):
-                    pass
-            if clean_status_logs_at_noon(DATA_DIR, active_modes=active_modes):
-                self.activity_snapshot = None
-            now = dt.datetime.now().astimezone()
-            next_noon = now.replace(hour=12, minute=0, second=0, microsecond=0)
-            if next_noon <= now:
-                next_noon += dt.timedelta(days=1)
-            delay_ms = max(1000, int((next_noon - now).total_seconds() * 1000))
-            try:
-                self.log_cleanup_job = self.root.after(delay_ms, self.clean_logs_at_noon)
-            except tk.TclError:
-                self.log_cleanup_job = None
-
-        def open_log_folder(self):
-            try:
-                if os.name == "nt":
-                    os.startfile(str(DATA_DIR))
-                else:
-                    self.note.configure(text=self._tr(
-                        f"Logs are stored in {DATA_DIR}", f"ไฟล์ log อยู่ที่ {DATA_DIR}"))
-            except OSError as exc:
-                self.note.configure(text=str(exc), foreground=STATUS_CHANGER_THEME["error"])
-
-        def check_update(self):
-            self.note.configure(text=self._tr("Checking for updates...",
-                                              "กำลังตรวจอัปเดต..."),
-                                foreground=STATUS_CHANGER_THEME["muted"])
-
-            def work():
-                try:
-                    state, message = self_update("status-changer.exe")
-                except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-                    logging.warning("Manual update check unavailable: %s", type(exc).__name__)
-                    state, message = "failed", "Update check unavailable (network or metadata error)."
-                try:
-                    self.root.after(0, lambda: self._update_done(state, message))
-                except RuntimeError:
-                    pass  # Window closed before the worker finished
-
-            threading.Thread(target=work, daemon=True).start()
-
-        def _update_done(self, state, message):
-            self.note.configure(
-                text=message,
-                foreground=(STATUS_CHANGER_THEME["error"] if state == "failed"
-                            else STATUS_CHANGER_THEME["success"]))
-            if state == "ready":
-                self.root.after(1200, self.root.destroy)
-
-        def _auto_update_check(self):
-            def work():
-                try:
-                    found = check_for_update("status-changer.exe")
-                    if found:
-                        self.root.after(0, self.check_update)
-                except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
-                    # GitHub 403/rate limits, offline mode and invalid metadata
-                    # must not crash an unattended GUI background thread.
-                    logging.warning("Automatic update check unavailable: %s", type(exc).__name__)
-            threading.Thread(target=work, daemon=True).start()
-
-        def schedule_save(self, *_args):
-            if self.loading_mode:
-                return
-            if self.save_job is not None:
-                try:
-                    self.root.after_cancel(self.save_job)
-                except tk.TclError:
-                    pass
-            self.save_job = self.root.after(450, self.save_settings)
-
-        def collect_config(self, enabled=None, mode=None):
-            mode = mode if mode in ("random", "marquee") else self.mode
-            self._save_pools()
-            config = status_config_for_live_send(
-                load_cfg(self.config_path), self.live_send.get())
-            config["language"] = self.language_preference
-            st = config["status"]
-            st["background_enter_target"] = "combo" if self.combo_enter.get() else "edit"
-            if mode == "random":
-                try:
-                    interval = parse_interval_seconds(self.intervals["random"].get())
-                except ValueError as exc:
-                    raise ValueError(self._tr("Enter a valid switch interval.",
-                                              "กรอกช่วงเวลาเปลี่ยนสถานะให้ถูกต้อง")) from exc
-            else:
-                # The engine uses marquee.step_seconds to pace slot changes.
-                # Keep the legacy schema field valid without an Every control.
-                interval = MARQUEE_STEP_MIN
-            marquee_options = None
-            if mode == "marquee":
-                marquee_options = {
-                    "step": self.step.get(),
-                    "stride": self.stride.get(),
-                    "loop_slots": self.loop_slots.get(),
-                    "scroll": self.scroll_frames.get(),
-                }
-            try:
-                configure_status_mode(
-                    config, mode,
-                    messages_from_slots(var.get() for var in self._fields_for_mode(mode)),
-                    interval, marquee_options,
-                )
-            except ValueError as exc:
-                raise ValueError(self._tr("Enter valid marquee speed values.",
-                                          "กรอกค่าความเร็วข้อความเลื่อนให้ถูกต้อง")) from exc
-            if enabled:
-                # "Start" means rotate a status now, not after one interval.
-                st["set_on_start"] = True
-            if enabled is not None:
-                st["enabled"] = enabled
-            else:
-                active = active_worker_mode()
-                st["enabled"] = bool(
-                    active == mode and running_pid(runtime_config(config, mode)))
-            if st["enabled"] and not st["messages"]:
-                raise ValueError(self._tr("Enter at least one status.", "กรอกสถานะอย่างน้อยหนึ่งข้อความ"))
-            errors, _warnings = validate(config)
-            if errors:
-                raise ValueError("\n".join(errors))
-            return config
-
-        def save_settings(self, enabled=None, mode=None, notify=False):
-            self.save_job = None
-            mode = mode if mode in ("random", "marquee") else self.mode
-            try:
-                config = self.collect_config(enabled=enabled, mode=mode)
-                write_config(self.config_path, config)
-                runtime = runtime_config(config, mode)
-                write_config(self.runtime_config_paths[mode], runtime)
-                self.config = config
-                self._log_activity("Status lines saved", mode)
-                if notify:
-                    self.note.configure(text=self._tr("Saved to standalone status config",
-                                                      "บันทึกการตั้งค่า Status Changer แล้ว"))
-                return config
-            except (OSError, sqlite3.Error, ValueError, KeyError) as exc:
-                self.note.configure(text=str(exc), foreground=STATUS_CHANGER_THEME["error"])
-                return None
-
-        def _save_pools(self):
-            modes = ("random", "marquee")
-            for mode in modes:
-                write_status_pool(
-                    self.pool_paths[mode], [var.get() for var in self._fields_for_mode(mode)])
-
-        def save_data(self):
-            """Persist current status pools and settings without contacting Camfrog."""
-            if self.busy or self.stop_in_progress:
-                return
-            if self.save_job is not None:
-                try:
-                    self.root.after_cancel(self.save_job)
-                except tk.TclError:
-                    pass
-                self.save_job = None
-            config = self.save_settings()
-            if config is None:
-                return
-            self.note.configure(
-                text=self._tr("Status data saved.", "บันทึกข้อมูลสถานะแล้ว"),
-                foreground=STATUS_CHANGER_THEME["success"])
-
-        def discover(self):
-            """Scan the running Camfrog window for status/room controls and write the
-            detected selectors into this app's config (apply=True)."""
-            if self.busy:
-                return
-            # Persist current operator edits before discovery rewrites selectors.
-            if self.save_settings() is None:
-                return
-            def do():
-                rc = run_control_discovery(self.config_path)
-                if rc == 0:
-                    self.config = load_cfg(self.config_path)
-                return rc
-            self.run_task(do, self._tr("Controls discovered", "ดึง control แล้ว"),
-                          action=self._tr("Discover controls", "ค้นหา control"))
-
-        def set_worker_running(self, mode, should_run):
-            """Start or stop the single worker for the explicitly selected mode."""
-            if mode not in ("random", "marquee"):
-                self.note.configure(text=self._tr("Select a status mode first.",
-                                                  "กรุณาเลือกโหมดสถานะก่อน"),
-                                    foreground=STATUS_CHANGER_THEME["error"])
-                return
-            if not should_run:
-                self.mode = mode
-                if self.stop_in_progress:
-                    self.note.configure(
-                        text=self._tr("A stop request is already running.",
-                                      "กำลังดำเนินการหยุด worker อยู่แล้ว"),
-                        foreground=STATUS_CHANGER_THEME["muted"])
-                    return
-                # Stop is an emergency/operator action: do not validate or save
-                # unsaved form data first. Invalid input must never block Stop.
-                try:
-                    config = load_cfg(self.config_path)
-                    runtime = runtime_config(config, mode)
-                    worker_pid = running_pid(runtime)
-                except (OSError, sqlite3.Error, ValueError, KeyError) as exc:
-                    self.note.configure(text=str(exc), foreground=STATUS_CHANGER_THEME["error"])
-                    return
-                if worker_pid:
-                    self._start_stop_task(
-                        runtime,
-                        self._tr("Status worker stopped.", "หยุดตัวเปลี่ยนสถานะแล้ว"),
-                        action=self._tr("Stop worker", "หยุด worker"))
-                elif self.busy:
-                    # A Start task may be between spawning the worker and
-                    # recording its PID. Recheck as soon as that task returns.
-                    self.pending_stop_mode = mode
-                    self.note.configure(
-                        text=self._tr("Stop queued until the current task finishes.",
-                                      "รับคำสั่งหยุดแล้ว จะตรวจอีกครั้งเมื่องานปัจจุบันเสร็จ"),
-                        foreground=STATUS_CHANGER_THEME["muted"])
-                else:
-                    self.note.configure(text=self._tr("Status rotation is not running.",
-                                                      "ไม่ได้เปิดการเปลี่ยนสถานะอยู่"),
-                                        foreground=STATUS_CHANGER_THEME["muted"])
-                return
-
-            if self.busy or self.stop_in_progress:
-                return
-            self.mode = mode
-
-            config = self.save_settings(enabled=True, mode=mode)
-            if config is None:
-                return
-            runtime = runtime_config(config, mode)
-            if running_pid(runtime):
-                active = active_worker_mode() or self._tr("another mode", "อีกโหมด")
-                self.note.configure(text=self._tr(
-                    f"Status worker is already running ({active}). Stop it before switching modes.",
-                    f"worker กำลังทำงานโหมด {active} อยู่ ให้หยุดก่อนเปลี่ยนโหมด"),
-                                    foreground=STATUS_CHANGER_THEME["success"])
-                return
-            self._start_worker(config, mode)
-
-        def _start_worker(self, config, mode):
-            runtime = runtime_config(config, mode)
-            runtime_path = self.runtime_config_paths[mode]
-            args = SimpleNamespace(config=str(runtime_path), lang=None)
-
-            def start():
-                rc = cmd_start_worker(runtime, args)
-                if rc == 0:
-                    deadline = time.monotonic() + 5.0
-                    while time.monotonic() < deadline:
-                        if running_pid(runtime):
-                            (DATA_DIR / ACTIVE_MODE_FILE).write_text(mode, encoding="utf-8")
-                            return rc
-                        time.sleep(0.1)
-                    raise RuntimeError(self._tr(
-                        "Worker started but its process could not be verified.",
-                        "เริ่ม worker แล้วแต่ตรวจสอบโปรเซสไม่ได้"))
-                return rc
-
-            if config["dry_run"]:
-                done_text = self._tr(
-                    "Status worker started in dry-run mode; no statuses will be sent.",
-                    "เริ่ม worker ในโหมดทดลองแล้ว จะยังไม่ส่งสถานะ")
-            else:
-                done_text = self._tr("Status worker started.", "เริ่มตัวเปลี่ยนสถานะแล้ว")
-            self.run_task(start, done_text,
-                          action=self._tr(f"Start {mode} worker", f"เริ่ม worker โหมด{mode}"))
-
-        def _stop_worker(self, runtime):
-            return cmd_stop(runtime)
-
-        def run_task(self, function, done_text, on_done=None, action=None):
-            if self.busy or self.stop_in_progress:
-                return False
-            self.busy = True
-            self.note.configure(text=self._tr("Working…", "กำลังทำงาน…"), foreground=STATUS_CHANGER_THEME["muted"])
-            task_mode = self.mode
-            if action:
-                self._log_activity(f"{action} started", task_mode)
-
-            def worker():
-                try:
-                    result = function()
-                    text = done_text if result in (None, 0) else self._tr("Command failed.", "คำสั่งไม่สำเร็จ")
-                    ok = result in (None, 0)
-                    if action:
-                        self._log_activity(f"{action} {'succeeded' if ok else 'failed'}", task_mode)
-                except StatusOperationCancelled:
-                    text = self._tr("Status update stopped.", "หยุดการเปลี่ยนสถานะแล้ว")
-                    ok = True
-                    if action:
-                        self._log_activity(
-                            self._tr("Apply status cancelled", "ยกเลิกการใช้สถานะ"),
-                            task_mode)
-                except Exception as exc:
-                    text, ok = str(exc), False
-                    if action:
-                        self._log_activity(
-                            f"{action} failed | {type(exc).__name__}: {exc}", task_mode)
-                self.task_results.put((text, ok, on_done))
-
-            try:
-                threading.Thread(target=worker, daemon=True, name="camfrog-status-task").start()
-                return True
-            except RuntimeError as exc:
-                self.busy = False
-                self.note.configure(text=str(exc), foreground=STATUS_CHANGER_THEME["error"])
-                return False
-
-        def _start_stop_task(self, runtime, done_text, on_done=None, action=None):
-            """Stop the worker independently of unrelated GUI background tasks."""
-            if self.stop_in_progress:
-                return False
-            self.stop_in_progress = True
-            self.note.configure(text=self._tr("Stopping worker…", "กำลังหยุด worker…"),
-                                foreground=STATUS_CHANGER_THEME["muted"])
-            task_mode = self.mode
-            if action:
-                self._log_activity(f"{action} started", task_mode)
-
-            def worker():
-                try:
-                    result = self._stop_worker(runtime)
-                    text = done_text if result in (None, 0) else self._tr(
-                        "Command failed.", "คำสั่งไม่สำเร็จ")
-                    ok = result in (None, 0)
-                    if action:
-                        self._log_activity(
-                            f"{action} {'succeeded' if ok else 'failed'}", task_mode)
-                except Exception as exc:
-                    text, ok = str(exc), False
-                    if action:
-                        self._log_activity(
-                            f"{action} failed | {type(exc).__name__}: {exc}", task_mode)
-                self.stop_results.put((text, ok, on_done))
-
-            try:
-                threading.Thread(target=worker, daemon=True,
-                                 name="camfrog-status-stop").start()
-                return True
-            except RuntimeError as exc:
-                self.stop_in_progress = False
-                self.note.configure(text=str(exc), foreground=STATUS_CHANGER_THEME["error"])
-                return False
-
-        def poll_task_results(self):
-            try:
-                while True:
-                    text, ok, on_done = self.task_results.get_nowait()
-                    self.finish_task(text, ok, on_done)
-            except queue.Empty:
-                pass
-            except Exception as exc:
-                logging.exception("Could not process Status Changer task result")
-                if self.root.winfo_exists():
-                    self.note.configure(text=str(exc), foreground=STATUS_CHANGER_THEME["error"])
-            try:
-                while True:
-                    text, ok, on_done = self.stop_results.get_nowait()
-                    self.finish_stop_task(text, ok, on_done)
-            except queue.Empty:
-                pass
-            except Exception as exc:
-                logging.exception("Could not process Status Changer stop result")
-                if self.root.winfo_exists():
-                    self.note.configure(text=str(exc), foreground=STATUS_CHANGER_THEME["error"])
-            try:
-                self.task_poll_job = self.root.after(100, self.poll_task_results)
-            except tk.TclError:
-                self.task_poll_job = None
-
-        def finish_task(self, text, ok, on_done=None):
+            style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
+                            background="#ebe5d9", foreground="#283648")
+            style.map("TButton", background=[("active", "#d6e9e8"), ("pressed", "#d5c8ac")])
+            style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
+                            foreground="#283648")
+            style.configure("TNotebook", background="#f4f1e8")
+            style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
+            style.map("TNotebook.Tab", background=[("selected", "#fffdfa")],
+                      foreground=[("selected", "#8b672b")])
+            self.root.geometry("800x560")
+            self.root.minsize(660, 460)
+            self.model = ConfigModel(cfg_path)
+            self.q = queue.Queue()
             self.busy = False
-            self.note.configure(text=text, foreground=(
-                STATUS_CHANGER_THEME["success"] if ok else STATUS_CHANGER_THEME["error"]))
-            self.refresh_state()
-            close_after_task = self.close_requested
-            self.close_requested = False
-            if on_done:
-                on_done(ok)
-            if close_after_task:
-                self.pending_stop_mode = None
-                try:
-                    if self.root.winfo_exists():
-                        self.close_app()
-                except tk.TclError:
-                    pass
-            elif self.pending_stop_mode is not None:
-                pending_mode = self.pending_stop_mode
-                self.pending_stop_mode = None
-                self.set_worker_running(pending_mode, False)
-
-        def finish_stop_task(self, text, ok, on_done=None):
-            self.stop_in_progress = False
-            self.note.configure(text=text, foreground=(
-                STATUS_CHANGER_THEME["success"] if ok else STATUS_CHANGER_THEME["error"]))
-            self.refresh_state()
-            close_after_stop = self.close_requested
-            self.close_requested = False
-            if on_done:
-                on_done(ok)
-            if close_after_stop and ok:
-                try:
-                    if self.root.winfo_exists():
-                        self.close_app()
-                except tk.TclError:
-                    pass
-
-        def _restore_window(self):
+            self.last_log = None
+            self.binds = []
+            self._autosave_after = None
+            self._autosave_traces = []
+            self.clipboard_widgets = []
             try:
-                self.root.deiconify()
-                self.root.lift()
-                self.root.focus_force()
-            except tk.TclError:
-                pass
+                self.draft = copy.deepcopy(self.model.load())
+            except Exception as e:
+                messagebox.showerror(APP_NAME, t("cannot_load", e=e))
+                self.root.destroy()
+                raise SystemExit(2)
+            set_lang(resolve_lang(self.draft["language"]))
+            self.build()
+            self._closing = False
+            self.root.protocol("WM_DELETE_WINDOW", self.close_app)
+            self.root.bind("<Control-s>", lambda _e: self.save())
+            self.root.after(150, self.pump)
+            self.root.after(500, self.tick)
+            self.root.after(2500, self.auto_update_check)
 
+        # ---- close
         def close_app(self):
-            """Stop the standalone worker and exit; never leave the UI in the tray."""
-            if self.stop_in_progress:
-                self.close_requested = True
-                self.note.configure(text=self._tr(
-                    "Waiting for the worker to stop before exit…",
-                    "กำลังรอให้ worker หยุดก่อนปิดโปรแกรม…"),
-                    foreground=STATUS_CHANGER_THEME["muted"])
+            """Cleanly tear down all scheduled callbacks so the process exits."""
+            if self._closing:
                 return
-            if self.busy:
-                self.close_requested = True
-                self.note.configure(text=self._tr(
-                    "Finishing the current task before exit…",
-                    "รอให้งานปัจจุบันเสร็จแล้วปิดโปรแกรม…"), foreground=STATUS_CHANGER_THEME["muted"])
-                return
-            try:
-                config = load_cfg(self.config_path)
-                runtime = runtime_config(config, self.mode)
-                if running_pid(runtime):
-                    self.note.configure(text=self._tr(
-                        "Stopping the status worker before exit…",
-                        "กำลังหยุดตัวเปลี่ยนสถานะก่อนออก…"), foreground=STATUS_CHANGER_THEME["muted"])
-                    self._start_stop_task(
-                        runtime,
-                        self._tr("Status worker stopped.", "หยุดตัวเปลี่ยนสถานะแล้ว"),
-                        on_done=self._close_after_worker_stop,
-                        action=self._tr("Stop worker before exit", "หยุด worker ก่อนออก"),
-                    )
-                    return
-            except Exception as exc:
-                logging.exception("Could not prepare a clean Status Changer exit")
-                messagebox.showerror(
-                    f"Camfrog {self.app_name}",
-                    self._tr(
-                        f"Could not verify worker shutdown: {exc}",
-                        f"ตรวจสอบการหยุด worker ไม่สำเร็จ: {exc}"),
-                    parent=self.root,
-                )
-                return
-            self._finalize_close()
-
-        def _close_after_worker_stop(self, ok):
-            if ok:
-                self._finalize_close()
-            else:
-                self.note.configure(text=self._tr(
-                    "Worker did not confirm shutdown. The window stays open so you can retry.",
-                    "worker ยังไม่ยืนยันว่าหยุดแล้ว หน้าต่างยังเปิดไว้ให้ลองใหม่"),
-                    foreground=STATUS_CHANGER_THEME["error"])
-
-        def _finalize_close(self):
-            if self.save_job is not None:
-                try:
-                    self.root.after_cancel(self.save_job)
-                except tk.TclError:
-                    pass
-                self.save_job = None
-            self.save_settings(enabled=False, mode=self.mode)
-            for job in (self.state_job, self.task_poll_job, self.activity_refresh_job,
-                        self.log_cleanup_job):
-                if job is not None:
-                    try:
-                        self.root.after_cancel(job)
-                    except tk.TclError:
-                        pass
+            self._closing = True
+            self.cancel_autosave()
             try:
                 self.root.quit()
-            except tk.TclError:
+            except Exception:
                 pass
             try:
                 self.root.destroy()
-            except tk.TclError:
-                pass
-
-        def _register_single_instance_handler(self):
-            """Subclass the Tk root window proc to handle WM_SHOWME from second instance."""
-            if os.name != "nt":
-                return
-            try:
-                import ctypes
-                self.user32 = ctypes.WinDLL("user32", use_last_error=True)
-                self.user32.SetWindowLongPtrW.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p)
-                self.user32.SetWindowLongPtrW.restype = ctypes.c_void_p
-                self.user32.CallWindowProcW.argtypes = (ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)
-                self.user32.CallWindowProcW.restype = ctypes.c_void_p
-
-                self.root.update_idletasks()
-                hwnd = self.root.winfo_id()
-
-                def new_wndproc(hwnd, msg, wparam, lparam):
-                    if msg == SingleInstanceGuard.WM_SHOWME:
-                        self.root.after(0, self._restore_window)
-                        return 0
-                    return self.user32.CallWindowProcW(self.old_wndproc, hwnd, msg, wparam, lparam)
-
-                self.new_wndproc = ctypes.WINFUNCTYPE(ctypes.c_void_p, ctypes.c_void_p, ctypes.c_uint, ctypes.c_void_p, ctypes.c_void_p)(new_wndproc)
-
-                GWLP_WNDPROC = -4
-                self.old_wndproc = self.user32.SetWindowLongPtrW(hwnd, GWLP_WNDPROC, self.new_wndproc)
             except Exception:
                 pass
+
+        # ---- layout
+        def build(self):
+            self.cancel_autosave()
+            for var, trace_id in self._autosave_traces:
+                try:
+                    var.trace_remove("write", trace_id)
+                except (tk.TclError, AttributeError):
+                    pass
+            self._autosave_traces = []
+            self.clipboard_widgets = []
+            for w in self.root.winfo_children():
+                w.destroy()
+            self.binds = []
+            self.root.title(f"{APP_NAME}  -  {self.model.path}")
+            self.setup_clipboard_menu()
+            top = ttk.Frame(self.root, padding=(8, 6))
+            top.pack(fill="x")
+            self.state_lbl = ttk.Label(top, text="...", font=("Segoe UI", 14, "bold"))
+            self.state_lbl.pack(side="left")
+            self.mode_lbl = ttk.Label(top, text="", font=("Segoe UI", 11, "bold"))
+            self.mode_lbl.pack(side="left", padx=14)
+            ttk.Button(top, text="TH / EN", width=8, command=self.switch_lang).pack(side="right")
+            bar = ttk.Frame(self.root, padding=(8, 6))
+            bar.pack(side="bottom", fill="x")
+            ttk.Button(bar, text=bi("Save (Ctrl+S)|บันทึก (Ctrl+S)"), command=self.save).pack(side="left")
+            ttk.Button(bar, text=bi("Reload from disk|โหลดจากไฟล์ใหม่"), command=self.reload).pack(side="left", padx=6)
+            ttk.Button(bar, text=bi("Check config|ตรวจคอนฟิก"), command=self.check_cfg).pack(side="left")
+            ttk.Button(bar, text=bi("Update|อัปเดต"), command=self.check_update).pack(side="left", padx=6)
+            if not hasattr(self, "auto_apply_var"):
+                self.auto_apply_var = tk.BooleanVar(master=self.root, value=True)
+            ttk.Checkbutton(bar, text=bi("Auto-apply valid changes|ใช้ค่าที่ถูกต้องอัตโนมัติ"),
+                            variable=self.auto_apply_var, command=self.auto_apply_toggled).pack(side="right")
+            self.msg = ttk.Label(bar, text="", foreground="#626d7a")
+            self.msg.pack(side="left", padx=12)
+            self.nb = ttk.Notebook(self.root)
+            self.nb.pack(fill="both", expand=True, padx=8)
+            tab_specs = (("Dashboard|แดชบอร์ด", "Dashboard", self.tab_dashboard),
+                         ("Setup|ตั้งค่าเริ่มต้น", "Setup", self.tab_setup),
+                         ("Auto-reply|ตอบอัตโนมัติ", "Auto-reply", self.tab_reply),
+                         ("Advanced|ขั้นสูง", "Advanced", self.tab_advanced))
+            for name, key, fn in tab_specs:
+                f = ttk.Frame(self.nb, padding=8)
+                fn(f)
+                self.nb.add(f, text=bi(name))
+            self.load_ui()
+            self.install_clipboard_support(self.root)
+            self.attach_autosave_hooks()
+            self.refresh_state()
+
+        def setup_clipboard_menu(self):
+            old = getattr(self, "clipboard_controller", None)
+            if old is not None:
+                try:
+                    old.menu.destroy()
+                except tk.TclError:
+                    pass
+            self.clipboard_controller = ClipboardController(
+                self.root, translate=bi, on_error=self.clipboard_error)
+            self.clipboard_menu = self.clipboard_controller.menu
+            self.clipboard_target = None
+
+        def install_clipboard_support(self, parent, remember=True):
+            """Install reliable clipboard shortcuts and context menus on editors."""
+            self.clipboard_controller.install(parent)
+            if remember:
+                self.clipboard_widgets = list(self.clipboard_controller.widgets)
+
+        def clipboard_error(self, exc):
+            if hasattr(self, "msg"):
+                try:
+                    self.msg.configure(text=bi("Clipboard error: {error}|คลิปบอร์ดผิดพลาด: {error}").format(
+                        error=exc))
+                except tk.TclError:
+                    pass
+
+        def clipboard_virtual(self, event, virtual):
+            self.clipboard_target = event.widget
+            action = {"<<Copy>>": "copy", "<<Cut>>": "cut", "<<Paste>>": "paste"}.get(virtual)
+            if action:
+                self.clipboard_controller.perform(event.widget, action)
+            return "break"
+
+        def clipboard_action(self, virtual):
+            widget = self.clipboard_target
+            action = {"<<Copy>>": "copy", "<<Cut>>": "cut", "<<Paste>>": "paste"}.get(virtual)
+            if action:
+                self.clipboard_controller.perform(widget, action)
+
+        def select_all(self, widget_or_event):
+            widget = getattr(widget_or_event, "widget", widget_or_event)
+            return self.clipboard_controller.select_all(widget)
+
+        def show_clipboard_menu(self, event):
+            self.clipboard_target = event.widget
+            return self.clipboard_controller.show_menu(event)
+
+        def field(self, parent, label, path, kind="str", choices=(), width=26, hint=""):
+            row = parent.grid_size()[1]
+            ttk.Label(parent, text=bi(label)).grid(row=row, column=0, sticky="w", padx=4, pady=2)
+            if kind == "bool":
+                var = tk.BooleanVar()
+                w = ttk.Checkbutton(parent, variable=var)
+            elif kind == "choice":
+                var = tk.StringVar()
+                w = ttk.Combobox(parent, textvariable=var, values=choices, state="readonly", width=width - 3)
+            else:
+                var = tk.StringVar()
+                w = ttk.Entry(parent, textvariable=var, width=width)
+            w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
+            if hint:
+                ttk.Label(parent, text=bi(hint), foreground="#626d7a").grid(row=row, column=2, sticky="w")
+            self.binds.append((path, kind, var, label))
+            return var
+
+        def textbox(self, parent, height, key):
+            box = tk.Text(parent, height=height, width=70, undo=True)
+            setattr(self, key, box)
+            return box
+
+        # ---- tabs
+        def tab_dashboard(self, f):
+            row = ttk.Frame(f)
+            row.pack(fill="x")
+            self.btn_start = ttk.Button(row, text=bi("Save & Start (background)|บันทึกและเริ่ม (เบื้องหลัง)"), command=self.start)
+            self.btn_start.pack(side="left")
+            self.btn_bg = ttk.Button(row, text=bi("Start & close window|เริ่มเบื้องหลังแล้วปิดหน้าต่าง"),
+                                     command=lambda: self.start(close=True))
+            self.btn_bg.pack(side="left", padx=6)
+            self.btn_stop = ttk.Button(row, text=bi("Stop|หยุด"), command=self.stop)
+            self.btn_stop.pack(side="left", padx=6)
+            ttk.Button(row, text=bi("EMERGENCY STOP|หยุดฉุกเฉิน"), command=self.emergency).pack(side="left", padx=6)
+            self.live_var = tk.BooleanVar()
+            self.binds.append((("dry_run",), "live", self.live_var, "dry_run"))
+            ttk.Checkbutton(row, text=bi("LIVE: really send messages|โหมดจริง: ส่งข้อความจริง"), variable=self.live_var,
+                            command=self.live_toggled).pack(side="right")
+            self.stats_lbl = ttk.Label(f, text="")
+            self.stats_lbl.pack(anchor="w", pady=6)
+            ttk.Label(f, text=bi("Closing this window does not stop the bot. Dry-run only logs what it would send.|"
+                                 "ปิดหน้าต่างนี้ไม่หยุดบอท โหมดทดลองแค่บันทึกว่าจะส่งอะไร"), foreground="#626d7a").pack(anchor="w")
+            lf = ttk.Frame(f)
+            lf.pack(fill="both", expand=True, pady=6)
+            self.log = tk.Text(lf, state="disabled", wrap="none", height=18, font=("Consolas", 9))
+            sb = ttk.Scrollbar(lf, command=self.log.yview)
+            self.log.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            self.log.pack(fill="both", expand=True)
+
+        def selector_group(self, parent, title, key, optional=False):
+            lf = ttk.LabelFrame(parent, text=bi(title), padding=6)
+            lf.pack(fill="x", pady=4)
+            vars_ = {}
+            for i, k in enumerate(SEL_FIELDS):
+                ttk.Label(lf, text=k).grid(row=0, column=i, sticky="w", padx=3)
+                v = tk.StringVar()
+                ttk.Entry(lf, textvariable=v, width=14).grid(row=1, column=i, padx=3)
+                vars_[k] = v
+            self.sel_vars[key] = (vars_, optional)
+
+        def tab_setup(self, f):
+            self.sel_vars = {}
+            g = ttk.Frame(f)
+            g.pack(fill="x")
+            self.field(g, "Window title regex|regex ชื่อหน้าต่าง", ("window_title_regex",), width=40)
+            self.field(g, "My nickname|นิคของฉัน", ("autoreply", "own_nickname"), width=40,
+                       hint="required for live mode|จำเป็นเมื่อรันจริง")
+            row = ttk.Frame(f)
+            row.pack(fill="x", pady=4)
+            ttk.Button(row, text=bi("List windows|แสดงหน้าต่าง"), command=lambda: self.helper("windows")).pack(side="left")
+            ttk.Button(row, text=bi("Auto-detect (Camfrog 8.x)|ตรวจหา control อัตโนมัติ"),
+                       command=self.detect).pack(side="left", padx=6)
+            ttk.Button(row, text=bi("Discover controls -> controls.txt|ดึง control -> controls.txt"),
+                       command=lambda: self.helper("discover")).pack(side="left", padx=6)
+            ttk.Label(row, text=bi("Windows only. Copy values from controls.txt into the boxes below.|"
+                                   "เฉพาะ Windows คัดลอกค่าจาก controls.txt มาใส่ช่องด้านล่าง"), foreground="#626d7a").pack(side="left")
+            self.selector_group(f, "Chat history selector|selector ประวัติแชท", ("autoreply", "history"))
+            self.selector_group(f, "Chat input selector|selector ช่องพิมพ์แชท", ("autoreply", "input"))
+            self.helper_out = tk.Text(f, height=8, state="disabled")
+            self.helper_out.pack(fill="both", expand=True, pady=4)
+
+        def tab_reply(self, f):
+            top = ttk.Frame(f)
+            top.pack(fill="x")
+            self.field(top, "Auto-reply enabled|เปิดตอบอัตโนมัติ", ("autoreply", "enabled"), "bool")
+            self.field(top, "Ignore links|ไม่ตอบข้อความที่มีลิงก์", ("autoreply", "ignore_links"), "bool")
+            self.field(top, "Per-sender cooldown (s)|คูลดาวน์ต่อคน", ("autoreply", "per_sender_cooldown_seconds"), "int", width=8)
+            self.field(top, "Global gap (s)|ระยะห่างทุกคำตอบ", ("autoreply", "global_min_gap_seconds"), "int", width=8)
+            self.field(top, "Max per hour|สูงสุดต่อชั่วโมง", ("autoreply", "max_per_hour"), "int", width=8)
+            self.field(top, "Delay range s (min, max)|หน่วงสุ่ม", ("autoreply", "delay_range_seconds"), "pair", width=12)
+            self.field(top, "Ignore nicks|ข้ามนิค", ("autoreply", "ignore_nicknames"), "list", width=40, hint="comma separated|คั่นด้วย ,")
+            self.field(top, "Only nicks|ตอบเฉพาะนิค", ("autoreply", "only_nicknames"), "list", width=40, hint="empty = everyone|ว่าง = ทุกคน")
+            ttk.Label(f, text=bi("Rules (first match wins - put specific rules first)|กฎ (ตัวแรกที่ตรงชนะ วางกฎเฉพาะไว้ก่อน)")).pack(anchor="w", pady=(8, 0))
+            tf = ttk.Frame(f)
+            tf.pack(fill="both", expand=True)
+            cols = ("n", "on", "lang", "men", "pat", "rep")
+            self.tree = ttk.Treeview(tf, columns=cols, show="headings", height=7, selectmode="browse")
+            for c, w, h in (("n", 30, "#"), ("on", 40, "on"), ("lang", 45, "lang"), ("men", 50, "@me"),
+                            ("pat", 300, "pattern"), ("rep", 380, "reply")):
+                self.tree.heading(c, text=h)
+                self.tree.column(c, width=w, anchor="w")
+            self.tree.pack(side="left", fill="both", expand=True)
+            self.tree.bind("<Double-1>", lambda _e: self.rule_edit())
+            bf = ttk.Frame(tf)
+            bf.pack(side="left", padx=6, anchor="n")
+            for txt, fn in (("Add|เพิ่ม", self.rule_add), ("Edit|แก้", self.rule_edit), ("Delete|ลบ", self.rule_del),
+                            ("Up|ขึ้น", lambda: self.rule_move(-1)), ("Down|ลง", lambda: self.rule_move(1))):
+                ttk.Button(bf, text=bi(txt), command=fn, width=8).pack(pady=1)
+            ttk.Label(f, text=bi("Skip patterns (regex, one per line)|skip patterns (regex บรรทัดละอัน)")).pack(anchor="w")
+            self.textbox(f, 2, "t_skips").pack(fill="x")
+            lf = ttk.LabelFrame(f, text=bi("Rule tester (offline, nothing is sent)|ทดสอบกฎ (ออฟไลน์ ไม่ส่งจริง)"), padding=6)
+            lf.pack(fill="x", pady=6)
+            self.tn = tk.StringVar(value="TestUser")
+            self.tm = tk.StringVar(value="สวัสดีครับ")
+            ttk.Entry(lf, textvariable=self.tn, width=14).pack(side="left")
+            e = ttk.Entry(lf, textvariable=self.tm, width=44)
+            e.pack(side="left", padx=4)
+            e.bind("<Return>", lambda _e: self.test_rule())
+            ttk.Button(lf, text=bi("Test|ทดสอบ"), command=self.test_rule).pack(side="left")
+            self.tout = ttk.Label(lf, text="", foreground="#28744c")
+            self.tout.pack(side="left", padx=8)
+
+        def tab_advanced(self, f):
+            g = ttk.Frame(f)
+            g.pack(fill="x")
+            self.field(g, "Language|ภาษา", ("language",), "choice", ("auto", "th", "en"), 8)
+            self.field(g, "Poll seconds (0.2-60)|ความถี่ลูป", ("poll_seconds",), "float", width=8)
+            self.field(g, "Hot reload config|โหลดคอนฟิกใหม่เอง", ("reload_config",), "bool")
+            self.field(g, "Active hours only|ทำงานเฉพาะช่วงเวลา", ("active_hours", "enabled"), "bool")
+            self.field(g, "  start (HH:MM)|  เริ่ม", ("active_hours", "start"), width=8)
+            self.field(g, "  end (HH:MM)|  สิ้นสุด", ("active_hours", "end"), width=8)
+            self.field(g, "Require Camfrog foreground|ต้องอยู่หน้าสุดก่อนส่ง", ("safety", "require_foreground"), "bool")
+            self.field(g, "Restore previous window|คืนโฟกัสหลังส่ง", ("safety", "restore_previous_window"), "bool")
+            self.field(g, "Max consecutive failures|ล้มเหลวติดกันสูงสุด", ("safety", "max_consecutive_failures"), "int", width=6)
+            self.field(g, "Log level|ระดับล็อก", ("log", "level"), "choice", ("DEBUG", "INFO", "WARNING", "ERROR"), 10)
+            self.field(g, "Log chat text|เก็บเนื้อข้อความใน log", ("log", "log_message_text"), "bool",
+                       hint="off = privacy|ปิด = ความเป็นส่วนตัว")
+            self.field(g, "Stats enabled|เก็บสถิติ", ("stats", "enabled"), "bool")
+            row = ttk.Frame(f)
+            row.pack(fill="x", pady=10)
+            ttk.Button(row, text=bi("Start at Windows login|เริ่มเมื่อเข้า Windows"), command=lambda: self.helper("autostart-on")).pack(side="left")
+            ttk.Button(row, text=bi("Remove autostart|ยกเลิก autostart"), command=lambda: self.helper("autostart-off")).pack(side="left", padx=6)
+
+        # ---- config <-> widgets
+        @staticmethod
+        def _get(d, path):
+            for k in path:
+                d = d[k]
+            return d
+
+        @staticmethod
+        def _set(d, path, v):
+            for k in path[:-1]:
+                d = d[k]
+            d[path[-1]] = v
+
+        def load_ui(self):
+            d = self.draft
+            for path, kind, var, _lab in self.binds:
+                v = self._get(d, path)
+                if kind == "bool":
+                    var.set(bool(v))
+                elif kind == "live":
+                    var.set(not v)
+                elif kind in ("list", "pair"):
+                    var.set(", ".join(str(x) for x in v))
+                else:
+                    var.set(str(v))
+            for key, (vars_, _opt) in self.sel_vars.items():
+                for k, s in sel_to_strs(self._get(d, key)).items():
+                    vars_[k].set(s)
+            self.t_skips.insert("1.0", "\n".join(d["autoreply"]["skip_patterns"]))
+            self.rules = copy.deepcopy(d["autoreply"]["rules"])
+            self.rules_refresh()
+            for box in (self.t_skips,):
+                box.edit_modified(False)
+
+        def collect(self):
+            """Widgets -> new cfg dict. Returns (cfg, errors)."""
+            d, errs = copy.deepcopy(self.draft), []
+            for path, kind, var, lab in self.binds:
+                try:
+                    raw = var.get()
+                    if kind == "bool":
+                        v = bool(raw)
+                    elif kind == "live":
+                        v = not raw
+                    elif kind == "int":
+                        v = int(str(raw).strip())
+                    elif kind == "float":
+                        v = float(str(raw).strip())
+                    elif kind == "list":
+                        v = [x.strip() for x in str(raw).split(",") if x.strip()]
+                    elif kind == "pair":
+                        v = [float(x) for x in str(raw).split(",")]
+                        if len(v) != 2:
+                            raise ValueError("need 2 numbers")
+                    else:
+                        v = str(raw)
+                    self._set(d, path, v)
+                except ValueError:
+                    errs.append(f"{bi(lab)}: {bi('invalid value|ค่าไม่ถูกต้อง')}")
+            for key, (vars_, optional) in self.sel_vars.items():
+                try:
+                    self._set(d, key, strs_to_sel({k: v.get() for k, v in vars_.items()}, optional))
+                except ValueError:
+                    errs.append(f"{'.'.join(key)}: index")
+            d["autoreply"]["skip_patterns"] = [x.strip() for x in self.t_skips.get("1.0", "end").splitlines() if x.strip()]
+            d["autoreply"]["rules"] = copy.deepcopy(self.rules)
+            return d, errs
+
+        # ---- actions
+        # ---- self-update from the GitHub release
+        def _confirm_update(self, tag):
+            from tkinter import messagebox
+            return messagebox.askyesno(
+                "Update available",
+                "Version " + tag + " is available (running " + APP_VERSION + ").\n"
+                "Download and install it now?", parent=self.root)
+
+        def check_update(self):
+            def do():
+                state, message = self_update("room-control.exe", confirm=self._confirm_update)
+                print(message)
+                if state == "ready":
+                    print("restart the app to run the new version.")
+                return 0 if state in ("ready", "no-update") else 2
+            self.run_bg(do, "checked")
+
+        def auto_update_check(self):
+            """Silent banner at startup: only speak up when something is newer."""
+            def probe():
+                found = check_for_update("room-control.exe")
+                print("update" if found else "none")
+                return 0
+            self.run_bg(probe, "auto-update")
+
+        def say(self, text, bad=False):
+            self.msg.configure(text=text, foreground="#a3303a" if bad else "#28744c")
+
+        def attach_autosave_hooks(self):
+            vars_ = [var for _path, _kind, var, _label in self.binds]
+            vars_.extend(v for group, _optional in self.sel_vars.values() for v in group.values())
+            for var in vars_:
+                trace_id = var.trace_add("write", self.schedule_autosave)
+                self._autosave_traces.append((var, trace_id))
+            for box in (self.t_skips,):
+                box.bind("<<Modified>>", self.text_changed)
+
+        def text_changed(self, event):
+            box = event.widget
+            if box.edit_modified():
+                box.edit_modified(False)
+                self.schedule_autosave()
+
+        def cancel_autosave(self):
+            if self._autosave_after is not None:
+                try:
+                    self.root.after_cancel(self._autosave_after)
+                except tk.TclError:
+                    pass
+                self._autosave_after = None
+
+        def schedule_autosave(self, *_args):
+            if not getattr(self, "auto_apply_var", None) or not self.auto_apply_var.get():
+                return
+            self.cancel_autosave()
+            self._autosave_after = self.root.after(700, self.auto_apply)
+
+        def auto_apply_toggled(self):
+            if self.auto_apply_var.get():
+                self.schedule_autosave()
+            else:
+                self.cancel_autosave()
+                self.say(bi("auto-apply paused|หยุดใช้ค่าอัตโนมัติแล้ว"))
+
+        def auto_apply(self):
+            self._autosave_after = None
+            if not self.auto_apply_var.get():
+                return
+            cfg, errs = self.collect()
+            if not errs:
+                errs, _warns = ConfigModel.check(cfg)
+            if errs:
+                self.say(bi("auto-apply waiting for valid config|รอคอนฟิกที่ถูกต้อง") + ": " + errs[0], True)
+                return
+            running = bool(running_pid(self.model.cfg))
+            if autosave_needs_confirmation(cfg, running):
+                self.say(bi("LIVE bot running: press Save to confirm changes|บอทโหมดจริงกำลังทำงาน: กด Save เพื่อยืนยัน"), True)
+                return
+            if cfg == self.model.cfg:
+                return
+            try:
+                errs, warns = self.model.save(cfg)
+            except OSError as e:
+                self.say(bi("auto-apply failed|ใช้ค่าอัตโนมัติไม่สำเร็จ") + f": {e}", True)
+                return
+            if errs:
+                self.say(bi("auto-apply waiting for valid config|รอคอนฟิกที่ถูกต้อง") + ": " + errs[0], True)
+                return
+            self.draft = copy.deepcopy(cfg)
+            self.say(bi("auto-applied|ใช้ค่าและบันทึกแล้ว") + (f"  ({len(warns)} warning)" if warns else ""))
+            self.refresh_state()
+
+        def save(self):
+            self.cancel_autosave()
+            cfg, errs = self.collect()
+            if not errs:
+                running = bool(running_pid(self.model.cfg))
+                if autosave_needs_confirmation(cfg, running) and cfg != self.model.cfg:
+                    ok = messagebox.askyesno(
+                        bi("Apply LIVE changes?|ใช้การเปลี่ยนแปลงในโหมดจริง?"),
+                        bi("The running bot may hot-reload these settings and send real messages. Apply them now?|"
+                           "บอทที่กำลังทำงานอาจโหลดค่านี้แล้วส่งข้อความจริง ต้องการใช้ค่าตอนนี้หรือไม่?"))
+                    if not ok:
+                        self.say(bi("not saved|ไม่ได้บันทึก"), True)
+                        return False
+                errs, warns = self.model.save(cfg)
+            if errs:
+                messagebox.showerror(bi("Not saved|ไม่ได้บันทึก"), "\n".join(errs))
+                self.say(bi("not saved|ไม่ได้บันทึก"), True)
+                return False
+            self.draft = copy.deepcopy(cfg)
+            self.say(bi("saved|บันทึกแล้ว") + (f"  ({len(warns)} warning)" if warns else ""))
+            self.refresh_state()
+            return True
+
+        def reload(self):
+            self.cancel_autosave()
+            try:
+                self.draft = copy.deepcopy(self.model.load())
+            except Exception as e:
+                messagebox.showerror(APP_NAME, t("cannot_load", e=e))
+                return
+            set_lang(resolve_lang(self.draft["language"]))
+            self.build()
+
+        def check_cfg(self):
+            cfg, errs = self.collect()
+            e2, warns = ConfigModel.check(cfg) if not errs else ([], [])
+            lines = errs + e2 + [t("warn", m=w) for w in warns]
+            messagebox.showinfo("check", "\n".join(lines) if lines else t("cfg_ok"))
+
+        def switch_lang(self):
+            cfg, errs = self.collect()
+            if not errs:
+                self.draft = cfg
+            self.draft["language"] = "en" if LANG == "th" else "th"
+            set_lang(self.draft["language"])
+            self.build()
+
+        def live_toggled(self):
+            if not self.live_var.get():
+                return
+            ok = messagebox.askyesno(bi("Go LIVE?|เปลี่ยนเป็นโหมดจริง?"), bi(
+                "Messages WILL be sent to Camfrog. Check your room rules and Camfrog terms first.\nContinue?|"
+                "จะส่งข้อความไปยัง Camfrog จริง ตรวจกฎห้องและเงื่อนไข Camfrog ก่อน\nดำเนินการต่อ?"))
+            if not ok:
+                self.live_var.set(False)
+            self.refresh_state()
+
+        def start(self, close=False):
+            self._close_after = close
+            if not self.save():
+                return
+            cfg = self.model.cfg
+            if not cfg["dry_run"] and not messagebox.askyesno(
+                    bi("LIVE|โหมดจริง"), bi("Start in LIVE mode (real messages)?|เริ่มโหมดจริง (ส่งข้อความจริง)?")):
+                return
+            args = SimpleNamespace(config=str(self.model.path), lang=None)
+            self.run_bg(lambda: cmd_start(cfg, args), "start")
+
+        def stop(self):
+            self.run_bg(lambda: cmd_stop(self.model.cfg), "stop")
+
+        def emergency(self):
+            try:
+                (BASE / self.model.cfg["safety"]["stop_file"]).write_text("stop")
+                self.say(bi("STOP file written|เขียนไฟล์ STOP แล้ว"))
+            except OSError as e:
+                messagebox.showerror("STOP", str(e))
+
+        def helper(self, cmd):
+            cfg, errs = self.collect()
+            if errs or ConfigModel.check(cfg)[0]:
+                messagebox.showerror(APP_NAME, "\n".join(errs or ConfigModel.check(cfg)[0]))
+                return
+            setup_logging(cfg)
+            fn = {"windows": lambda: cmd_windows(cfg), "discover": lambda: cmd_discover(cfg),
+                  "autostart-on": lambda: cmd_autostart(SimpleNamespace(config=str(self.model.path), lang=None), True),
+                  "autostart-off": lambda: cmd_autostart(SimpleNamespace(config=None, lang=None), False)}[cmd]
+            self.run_bg(fn, "helper")
+
+        def detect(self):
+            """Run detection and fill selectors; auto-apply saves valid proposals."""
+            cfg, errs = self.collect()
+            if errs or ConfigModel.check(cfg)[0]:
+                messagebox.showerror(APP_NAME, "\n".join(errs or ConfigModel.check(cfg)[0]))
+                return
+            setup_logging(cfg)
+            self.run_bg(lambda: cmd_detect(cfg, self.model.path, False, True), "detect")
+
+        def apply_proposal(self, out):
+            skipped = []
+            for proposal in iter_proposals(out):
+                _applied, missed = apply_proposal_to_vars(self.sel_vars, proposal)
+                for key in missed:
+                    try:
+                        self._set(self.draft, tuple(key.split(".")), proposal[key])
+                    except (KeyError, TypeError, AttributeError):
+                        pass
+                skipped += missed
+            return skipped
+
+        def run_bg(self, fn, kind):
+            if self.busy:
+                return
+            self.busy = True
+
+            def work():
+                buf = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(buf):
+                        rc = fn()
+                except ImportError:
+                    rc, _ = 2, buf.write(t("win_only"))
+                except Exception as e:  # shown in the GUI, never a traceback window
+                    rc, _ = 1, buf.write(f"{type(e).__name__}: {e}")
+                self.q.put((kind, rc, buf.getvalue().strip()))
+            self.say("...")
+            threading.Thread(target=work, daemon=True).start()
+
+        def pump(self):
+            if self._closing:
+                return
+            try:
+                while True:
+                    kind, rc, out = self.q.get_nowait()
+                    self.busy = False
+                    self.say(out.splitlines()[-1] if out else t("ok"), rc not in (0, None))
+                    if kind == "start" and rc == 0 and getattr(self, "_close_after", False):
+                        self.close_app()  # bot keeps running hidden; reopen the GUI any time
+                        return
+                    if kind == "checked" and rc == 0:
+                        self.say(out.splitlines()[-1] if out else "no update.")
+                        if "restart the app" in out:
+                            self.root.after(1200, self.close_app)
+                    if kind == "auto-update" and rc == 0:
+                        text = (out.splitlines()[-1] if out else "").strip()
+                        if text == "update":
+                            self.check_update()
+                    if kind in ("helper", "detect") and out:
+                        extra = ""
+                        if kind == "detect" and rc == 0:
+                            skipped = self.apply_proposal(out)
+                            if skipped:
+                                extra = "\n" + "\n".join(
+                                    bi("kept in config (no box in this app): {0}|"
+                                       "อยู่ใน config แล้ว (ไม่มีช่องในแอปนี้): {0}").format(k)
+                                    for k in skipped)
+                        self.set_text(self.helper_out, "\n".join(
+                            ln for ln in out.splitlines() if not ln.startswith("PROPOSAL ")) + extra)
+                    self.refresh_state()
+            except queue.Empty:
+                pass
+            if not self._closing:
+                self.root.after(150, self.pump)
+
+        @staticmethod
+        def set_text(widget, text):
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            widget.insert("1.0", text)
+            widget.configure(state="disabled")
+
+        # ---- live state
+        def tick(self):
+            if self._closing:
+                return
+            self.refresh_state()
+            cfg = self.model.cfg
+            txt = tail_text(BASE / cfg["log"]["file"]) if cfg["log"]["file"] else ""
+            if txt != self.last_log:
+                self.last_log = txt
+                self.set_text(self.log, txt)
+                self.log.see("end")
+            if not self._closing:
+                self.root.after(1500, self.tick)
 
         def refresh_state(self):
-            if not self.root.winfo_exists():
+            cfg = self.model.cfg
+            pid = running_pid(cfg)
+            self.state_lbl.configure(text=(t("state_running", pid=pid) if pid else t("state_stopped")),
+                                     foreground="#28744c" if pid else "#a3303a")
+            live = (not cfg["dry_run"]) if not hasattr(self, "live_var") else self.live_var.get()
+            self.mode_lbl.configure(text=bi("LIVE|โหมดจริง") if live else bi("DRY-RUN|โหมดทดลอง"),
+                                    foreground="#9f3740" if live else "#8b672b")
+            self.btn_start.state(["disabled"] if pid else ["!disabled"])
+            self.btn_stop.state(["!disabled"] if pid else ["disabled"])
+            s = read_stats(cfg)
+            self.stats_lbl.configure(text=t("stats_line", started=s.get("started", "?"), st=s.get("statuses", 0),
+                                               rp=s.get("replies", 0), fl=s.get("failures", 0)) if s else "")
+
+        # ---- rules
+        def _rule_parts(self, scope):
+            return self.tree, self.rules
+
+        def rules_refresh(self, select=None, scope="room"):
+            tree, rules = self._rule_parts(scope)
+            tree.delete(*tree.get_children())
+            for i, r in enumerate(rules):
+                th, en, anyl = reply_to_fields(r.get("reply"))
+                prev = (th or en or anyl).replace("\n", " / ")
+                tree.insert("", "end", iid=str(i), values=(
+                    i + 1, "" if r.get("enabled", True) else "off", r.get("lang", ""),
+                    "yes" if r.get("mention") else "", r.get("pattern", ""), prev))
+            if select is not None and rules:
+                tree.selection_set(str(min(select, len(rules) - 1)))
+
+        def sel_rule(self, scope="room"):
+            tree, _rules = self._rule_parts(scope)
+            selected = tree.selection()
+            return int(selected[0]) if selected else None
+
+        def rule_add(self, scope="room"):
+            rule = RuleDialog(self).result
+            if rule:
+                _tree, rules = self._rule_parts(scope)
+                rules.append(rule)
+                self.rules_refresh(len(rules) - 1, scope)
+                self.schedule_autosave()
+
+        def rule_edit(self, scope="room"):
+            i = self.sel_rule(scope)
+            if i is None:
+                return
+            _tree, rules = self._rule_parts(scope)
+            rule = RuleDialog(self, rules[i]).result
+            if rule:
+                rules[i] = rule
+                self.rules_refresh(i, scope)
+                self.schedule_autosave()
+
+        def rule_del(self, scope="room"):
+            i = self.sel_rule(scope)
+            if i is not None and messagebox.askyesno(bi("Delete|ลบ"), f"#{i + 1}?"):
+                _tree, rules = self._rule_parts(scope)
+                del rules[i]
+                self.rules_refresh(i, scope)
+                self.schedule_autosave()
+
+        def rule_move(self, d, scope="room"):
+            i = self.sel_rule(scope)
+            _tree, rules = self._rule_parts(scope)
+            if i is None or not 0 <= i + d < len(rules):
+                return
+            rules[i], rules[i + d] = rules[i + d], rules[i]
+            self.rules_refresh(i + d, scope)
+            self.schedule_autosave()
+
+        def test_rule(self):
+            cfg, errs = self.collect()
+            if errs:
+                self.tout.configure(text=errs[0], foreground="#a3303a")
                 return
             try:
-                config = load_cfg(self.config_path)
-                pid = running_pid(runtime_config(config, self.mode))
-                running = bool(pid)
-                active = active_worker_mode() if running else None
-                label = (self._tr("RUNNING", "ทำงาน") +
-                         (f" · {active.title()}" if active else "")) if running else \
-                    self._tr("STOPPED", "หยุด")
-                self.state_label.configure(
-                    text=label,
-                    style=("State.OK.TLabel" if running else "State.STOP.TLabel"),
-                )
-            except Exception:
-                pass
-            self.state_job = self.root.after(1200, self.refresh_state)
+                self.tout.configure(text=explain(cfg, self.tn.get().strip(), self.tm.get()).replace("\n", "  |  "), foreground="#28744c")
+            except re.error as e:
+                self.tout.configure(text=str(e), foreground="#a3303a")
 
         def mainloop(self):
             self.root.mainloop()
 
-    return StatusChanger
+    return App
 
 
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
-
-    if "--worker" in argv:
-        argv.remove("--worker")
+    if has_cli_command(argv):  # CLI passthrough (also how `start` relaunches this exe)
         return cli_main(argv)
-
-    # Handle --cleanup-mutex before single-instance guard
-    if "--cleanup-mutex" in argv:
-        if argv != ["--cleanup-mutex"]:
-            print("--cleanup-mutex cannot be combined with other arguments")
-            return 2
-        return 0 if SingleInstanceGuard.force_cleanup() else 1
-
-    parser = argparse.ArgumentParser(description="Camfrog Status Changer")
-    parser.add_argument("--config", help="use an alternate app-local config")
-    parser.add_argument("--allow-multiple", action="store_true",
-                        help="allow a second GUI instance")
     try:
-        args = parser.parse_args(argv)
-        if args.config is not None and not args.config.strip():
-            parser.error("argument --config: expected a path")
+        args = parse_gui_args(argv)
     except SystemExit as exc:
         return exc.code
-
-    config_path = DATA_DIR / "camfrog-status-config.json"
-    if args.config:
-        candidate = Path(args.config)
-        if not candidate.is_absolute():
-            candidate = DATA_DIR / candidate
-        candidate = candidate.resolve()
+    if os.name == "nt":  # crisp text on Windows 11 high-DPI displays
         try:
-            candidate.relative_to(DATA_DIR.resolve())
-        except ValueError:
-            print("Status Changer config must stay inside this executable's private data folder.")
-            return 2
-        config_path = candidate
-
-    if os.name == "nt":
-        try:
-            import ctypes
             ctypes.windll.shcore.SetProcessDpiAwareness(1)
         except Exception:
             pass
-
-    # Single-instance guard: a second launch restores the existing window
-    # (posted as WM_SHOWME in acquire()) and exits silently.
-    # Use --allow-multiple to bypass this check.
-    instance = SingleInstanceGuard(allow_multiple=args.allow_multiple)
-    if not instance.acquire():
-        return 0
-
-    try:
+    cfg_path = Path(args.config) if args.config else BASE / "config.json"
+    if not cfg_path.is_absolute():
+        cfg_path = BASE / cfg_path
+    cfg_path = cfg_path.resolve()
+    if APP_PROFILE == "room":
         try:
-            app = build_app()(config_path)
-        except SystemExit as exc:
-            return exc.code
-        except Exception as exc:
-            print(f"Status Changer failed: {exc}")
-            return 1
-        app.mainloop()
-        return 0
-    finally:
-        instance.release()
+            cfg_path.relative_to(BASE.resolve())
+        except ValueError:
+            print("This app's config must stay inside its own folder.")
+            return 2
+    try:
+        app = build_app()(cfg_path)
+    except SystemExit as e:
+        return e.code
+    except Exception as e:  # e.g. no display
+        print(f"GUI failed: {e}")
+        return 1
+    app.mainloop()
+    return 0
 
 
 # ---------- self-update from the GitHub release ----------
@@ -5522,18 +4442,11 @@ def github_latest_release(timeout=15.0):
                  "User-Agent": "camfrog-auto/{0}".format(APP_VERSION)})
     with urllib.request.urlopen(request, timeout=timeout) as response:
         data = json.loads(response.read().decode("utf-8", "replace"))
-    if not isinstance(data, dict):
-        raise ValueError("unexpected GitHub release response shape")
     tag = str(data.get("tag_name") or "").lstrip("v")
     if not tag:
         return None
     assets = {}
-    entries = data.get("assets", [])
-    if not isinstance(entries, list):
-        raise ValueError("invalid GitHub release assets")
-    for asset in entries:
-        if not isinstance(asset, dict):
-            raise ValueError("invalid GitHub release asset entry")
+    for asset in data.get("assets") or []:
         name = str(asset.get("name") or "")
         url = str(asset.get("browser_download_url") or "")
         if name and url:
@@ -5678,3 +4591,5 @@ def stage_and_swap_update(url, asset_name, sums_url=None):
         spawn["creationflags"] = 0x08000000
     subprocess.Popen(command, close_fds=True, **spawn)
     return True, "update is staged; it will replace {0} after the app exits.".format(asset_name)
+
+

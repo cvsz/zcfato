@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_combined_status_save_data_button_does_not_send_a_status():
-    source = (ROOT / "status_changer_gui.py").read_text(encoding="utf-8")
+    source = (ROOT / "src" / "features" / "status_changer_gui.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
     methods = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
     actions = next(node for node in methods if node.name == "_build_actions")
@@ -28,7 +28,7 @@ def test_combined_status_save_data_button_does_not_send_a_status():
 
 @pytest.mark.parametrize("name", ["status_random_gui.py", "status_marquee_gui.py"])
 def test_four_button_handlers_are_present_and_ordered(name):
-    source = (ROOT / name).read_text(encoding="utf-8")
+    source = (ROOT / "src" / "features" / name).read_text(encoding="utf-8")
     tree = ast.parse(source)
     buttons = next(node for node in ast.walk(tree)
                    if isinstance(node, ast.FunctionDef) and node.name == "_build_actions")
@@ -42,7 +42,7 @@ def test_four_button_handlers_are_present_and_ordered(name):
 
 @pytest.mark.parametrize("name", ["status_random_gui.py", "status_marquee_gui.py"])
 def test_stop_is_not_blocked_by_unsaved_invalid_form_data(name):
-    source = (ROOT / name).read_text(encoding="utf-8")
+    source = (ROOT / "src" / "features" / name).read_text(encoding="utf-8")
     tree = ast.parse(source)
     function = next(node for node in ast.walk(tree)
                     if isinstance(node, ast.FunctionDef) and node.name == "set_enabled")
@@ -63,7 +63,7 @@ def test_stop_is_not_blocked_by_unsaved_invalid_form_data(name):
 
 @pytest.mark.parametrize("name", ["status_random_gui.py", "status_marquee_gui.py"])
 def test_action_handlers_guard_busy_state(name):
-    source = (ROOT / name).read_text(encoding="utf-8")
+    source = (ROOT / "src" / "features" / name).read_text(encoding="utf-8")
     tree = ast.parse(source)
     for handler in ("apply_now", "discover"):
         f = next(node for node in ast.walk(tree)
@@ -94,7 +94,7 @@ def test_action_handlers_guard_busy_state(name):
 
 @pytest.mark.parametrize("name", ["status_random_gui.py", "status_marquee_gui.py"])
 def test_action_grid_has_one_row_and_distinct_button_colours(name):
-    source = (ROOT / name).read_text(encoding="utf-8")
+    source = (ROOT / "src" / "features" / name).read_text(encoding="utf-8")
     tree = ast.parse(source)
     method = next(node for node in ast.walk(tree)
                   if isinstance(node, ast.FunctionDef) and node.name == "_build_actions")

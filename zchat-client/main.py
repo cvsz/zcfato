@@ -11,9 +11,9 @@ def _configure_source_paths() -> None:
     candidates = (
         root / "src",
         root.parent / "control-server" / "src",
-        # Repo root for shared modules (camfrog_windows_runtime, ...).
+        # Shared runtime modules (camfrog_windows_runtime, ...).
         # Standalone and unified builds package the same 1:1 sources.
-        root.parent,
+        root.parent / "src" / "camfrog",
     )
     for candidate in reversed(candidates):
         if candidate.is_dir():

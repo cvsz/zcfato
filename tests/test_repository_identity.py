@@ -23,15 +23,15 @@ def test_local_updater_accepts_the_current_https_and_ssh_remote() -> None:
 
 def test_application_update_defaults_use_the_current_repository() -> None:
     source_files = (
-        "camfrog_auto.py",
-        "camfrog_music_gui.py",
-        "chat_im_private_gui.py",
-        "im_autoreply_gui.py",
-        "room_control_gui.py",
-        "status_changer_gui.py",
-        "status_marquee_gui.py",
-        "status_random_gui.py",
-        "web_status_gui.py",
+        "src/camfrog/camfrog_auto.py",
+        "src/features/camfrog_music_gui.py",
+        "src/features/chat_im_private_gui.py",
+        "src/features/im_autoreply_gui.py",
+        "src/features/room_control_gui.py",
+        "src/features/status_changer_gui.py",
+        "src/features/status_marquee_gui.py",
+        "src/features/status_random_gui.py",
+        "src/features/web_status_gui.py",
     )
     for source_file in source_files:
         text = (ROOT / source_file).read_text(encoding="utf-8")

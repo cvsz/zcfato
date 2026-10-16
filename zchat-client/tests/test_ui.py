@@ -204,7 +204,7 @@ def test_assignment_changes_clear_previous_account_chat_and_membership() -> None
 
 def test_client_palette_stays_identical_to_web_status_theme() -> None:
     repo_root = Path(__file__).resolve().parents[2]
-    module = ast.parse((repo_root / "web_status_gui.py").read_text(encoding="utf-8"))
+    module = ast.parse((repo_root / "src" / "features" / "web_status_gui.py").read_text(encoding="utf-8"))
     assignments = [
         node.value
         for node in module.body
