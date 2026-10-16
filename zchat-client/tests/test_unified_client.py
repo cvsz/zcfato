@@ -8,6 +8,7 @@ client and without another ZChat executable.
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.ttk as ttk
 
 import pytest
 from zchat_client.process_monitor import PM_TEXT, ProcessMonitorPage
@@ -70,3 +71,20 @@ def test_agent_window_still_works_standalone(root) -> None:
     window = AgentChatWindow(root)
     assert window.server_url.get() == ""
     assert window.language.get() == "en"
+
+
+def test_agent_page_icon_is_skipped_on_embedded_frame(root) -> None:
+    """iconbitmap() is toplevel-only; an embedded ttk.Frame must not raise.
+
+    Regression for AttributeError: 'Frame' object has no attribute 'iconbitmap'
+    when AgentChatWindow is hosted inside UnifiedClientWindow.
+    """
+    shell = UnifiedClientWindow(root)
+    page = shell.agent_page
+    assert isinstance(page.root, (tk.Frame, ttk.Frame))
+    # Calling the icon helper directly on the embedded frame must be a no-op,
+    # not an AttributeError.
+    from zchat_client.ui import _apply_application_icon
+
+    _apply_application_icon(page.root)  # must not raise
+    _apply_application_icon(shell.container)  # must not raise

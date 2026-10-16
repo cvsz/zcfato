@@ -202,8 +202,12 @@ def _application_icon_path() -> Path:
     return bundle_root / "app.ico"
 
 
-def _apply_application_icon(root: tk.Tk) -> None:
+def _apply_application_icon(root: tk.Widget) -> None:
     if sys.platform != "win32":
+        return
+    # iconbitmap() is a toplevel-only call; embedding frames (e.g. inside
+    # UnifiedClientWindow) have no such attribute and must not raise.
+    if not isinstance(root, tk.Tk):
         return
 
     icon_path = _application_icon_path()
