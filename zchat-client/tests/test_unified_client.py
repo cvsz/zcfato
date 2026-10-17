@@ -25,9 +25,7 @@ def root():
         widget.destroy()
 
 
-def test_process_monitor_refresh_without_camfrog_never_raises(
-    root, monkeypatch
-) -> None:
+def test_process_monitor_refresh_without_camfrog_never_raises(root, monkeypatch) -> None:
     from camfrog_windows_runtime import WindowsCamfrogProcessDiscovery
 
     monkeypatch.setattr(
