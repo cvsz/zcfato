@@ -112,7 +112,6 @@ def test_unified_shell_applies_icon_to_real_toplevel(root, monkeypatch) -> None:
     from zchat_client import ui
 
     calls = []
-    original = ui._apply_application_icon
     with monkeypatch.context() as m:
         m.setattr(ui, "_apply_application_icon", lambda widget: calls.append(widget))
         shell = UnifiedClientWindow(root)
