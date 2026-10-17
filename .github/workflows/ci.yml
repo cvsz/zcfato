@@ -18,10 +18,10 @@ jobs:
       - run: pip install -r requirements-dev.txt
       - run: pip install -r zchat-client/requirements.txt
       - run: python -m pip_audit -r requirements-dev.txt
-      - run: python -m py_compile camfrog_auto.py camfrog_gui.py camfrog_status_gui.py camfrog_windows_runtime.py camfrog_status_engine.py camfrog_private_chat_gui.py camfrog_music_gui.py camfrog_presence.py status_changer_gui.py room_control_gui.py im_autoreply_gui.py status_random_gui.py status_marquee_gui.py chat_im_private_gui.py camfrog_tray.py clipboard_support.py room_control_entry.py chat_im_private_entry.py status_random_entry.py status_marquee_entry.py status_changer_entry.py im_autoreply_entry.py music_dj_entry.py web_status_entry.py tools/web_status.py line/*.py
-      - run: python camfrog_auto.py check --config config.example.json
-      - run: python camfrog_auto.py --lang th check --config config.example.json
-      - run: xvfb-run -a pytest -q tests
+      - run: python -m py_compile src/camfrog/camfrog_auto.py src/camfrog/camfrog_gui.py src/features/camfrog_status_gui.py src/camfrog/camfrog_windows_runtime.py src/camfrog/camfrog_status_engine.py src/features/camfrog_private_chat_gui.py src/features/camfrog_music_gui.py src/camfrog/camfrog_presence.py src/features/status_changer_gui.py src/features/room_control_gui.py src/features/im_autoreply_gui.py src/features/status_random_gui.py src/features/status_marquee_gui.py src/features/chat_im_private_gui.py src/camfrog/camfrog_tray.py src/camfrog/clipboard_support.py src/features/room_control_entry.py src/features/chat_im_private_entry.py src/features/status_random_entry.py src/features/status_marquee_entry.py src/features/status_changer_entry.py src/features/im_autoreply_entry.py src/features/music_dj_entry.py src/features/web_status_entry.py tools/web_status.py line/*.py
+      - run: PYTHONPATH=src/camfrog:src/features python src/camfrog/camfrog_auto.py check --config config.example.json
+      - run: PYTHONPATH=src/camfrog:src/features python src/camfrog/camfrog_auto.py --lang th check --config config.example.json
+      - run: PYTHONPATH=src/camfrog:src/features xvfb-run -a pytest -q tests
       - run: python -m unittest discover -s line/tests -v
       - run: PYTHONPATH=zchat-client/src:control-server/src xvfb-run -a pytest -q zchat-client/tests
   control-server:

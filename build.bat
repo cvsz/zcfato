@@ -80,29 +80,30 @@ echo.
 echo === PYTHON COMPILE CHECK ===
 
 "%VENV_PY%" -m py_compile ^
-    camfrog_auto.py ^
-    camfrog_gui.py ^
-    camfrog_status_gui.py ^
-    camfrog_windows_runtime.py ^
-    camfrog_status_engine.py ^
-    camfrog_private_chat_gui.py ^
-    camfrog_music_gui.py ^
-    room_control_gui.py ^
-    im_autoreply_gui.py ^
-    status_random_gui.py ^
-    status_marquee_gui.py ^
-    status_changer_gui.py ^
-    chat_im_private_gui.py ^
-    room_control_entry.py ^
-    chat_im_private_entry.py ^
-    status_random_entry.py ^
-    status_marquee_entry.py ^
-    status_changer_entry.py ^
-    im_autoreply_entry.py ^
-    music_dj_entry.py ^
-    camfrog_tray.py ^
-    clipboard_support.py ^
-    web_status_entry.py ^
+    src\camfrog\camfrog_auto.py ^
+    src\camfrog\camfrog_gui.py ^
+    src\features\camfrog_status_gui.py ^
+    src\camfrog\camfrog_windows_runtime.py ^
+    src\camfrog\camfrog_status_engine.py ^
+    src\camfrog\camfrog_emergency_stop.py ^
+    src\features\camfrog_private_chat_gui.py ^
+    src\features\camfrog_music_gui.py ^
+    src\features\room_control_gui.py ^
+    src\features\im_autoreply_gui.py ^
+    src\features\status_random_gui.py ^
+    src\features\status_marquee_gui.py ^
+    src\features\status_changer_gui.py ^
+    src\features\chat_im_private_gui.py ^
+    src\features\room_control_entry.py ^
+    src\features\chat_im_private_entry.py ^
+    src\features\status_random_entry.py ^
+    src\features\status_marquee_entry.py ^
+    src\features\status_changer_entry.py ^
+    src\features\im_autoreply_entry.py ^
+    src\features\music_dj_entry.py ^
+    src\camfrog\camfrog_tray.py ^
+    src\camfrog\clipboard_support.py ^
+    src\features\web_status_entry.py ^
     tools\web_status.py
 
 if errorlevel 1 goto :fail
@@ -138,14 +139,14 @@ if errorlevel 1 goto :fail
 echo.
 echo === CONFIG VALIDATION EN ===
 
-"%VENV_PY%" camfrog_auto.py check --config config.example.json
+"%VENV_PY%" -m src.camfrog.camfrog_auto check --config config.example.json
 if errorlevel 1 goto :fail
 
 
 echo.
 echo === CONFIG VALIDATION TH ===
 
-"%VENV_PY%" camfrog_auto.py --lang th check --config config.example.json
+"%VENV_PY%" -m src.camfrog.camfrog_auto --lang th check --config config.example.json
 if errorlevel 1 goto :fail
 
 
@@ -221,7 +222,8 @@ echo === BUILD ROOM CONTROL ===
     --distpath dist\room-control --workpath build\room-control ^
     --name room-control %ICONARG% ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
-    room_control_entry.py
+    --paths src\camfrog --paths src\features ^
+    src\features\room_control_entry.py
 if errorlevel 1 goto :fail
 
 
@@ -233,7 +235,8 @@ echo === BUILD PRIVATE CHAT WINDOW MANAGER ===
     --distpath dist\chat-im-private --workpath build\chat-im-private ^
     --name chat-im-private %ICONARG% ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
-    chat_im_private_entry.py
+    --paths src\camfrog --paths src\features ^
+    src\features\chat_im_private_entry.py
 if errorlevel 1 goto :fail
 
 
@@ -246,7 +249,8 @@ echo === BUILD RANDOM STATUS ===
     --name status-random %ICONARG% ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
     --hidden-import camfrog_status_engine --hidden-import camfrog_windows_runtime ^
-    status_random_entry.py
+    --paths src\camfrog --paths src\features ^
+    src\features\status_random_entry.py
 if errorlevel 1 goto :fail
 
 
@@ -259,7 +263,8 @@ echo === BUILD MARQUEE STATUS ===
     --name status-marquee %ICONARG% ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
     --hidden-import camfrog_status_engine --hidden-import camfrog_windows_runtime ^
-    status_marquee_entry.py
+    --paths src\camfrog --paths src\features ^
+    src\features\status_marquee_entry.py
 if errorlevel 1 goto :fail
 
 
@@ -272,7 +277,8 @@ echo === BUILD COMBINED STATUS CHANGER ===
     --name status-changer %ICONARG% ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
     --hidden-import camfrog_status_engine --hidden-import camfrog_windows_runtime ^
-    status_changer_entry.py
+    --paths src\camfrog --paths src\features ^
+    src\features\status_changer_entry.py
 if errorlevel 1 goto :fail
 
 
@@ -284,7 +290,8 @@ echo === BUILD PRIVATE IM AUTO-REPLY ===
     --distpath dist\im-autoreply --workpath build\im-autoreply ^
     --name im-autoreply %ICONARG% ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
-    im_autoreply_entry.py
+    --paths src\camfrog --paths src\features ^
+    src\features\im_autoreply_entry.py
 if errorlevel 1 goto :fail
 
 
@@ -297,7 +304,8 @@ echo === BUILD WEB STATUS UPDATER (GUI + CONSOLE PROTOTYPE) ===
     --name web-status %ICONARG% ^
     --collect-all psutil ^
     --add-data "assets\zttato.png;assets" ^
-    web_status_entry.py
+    --paths src\camfrog --paths src\features ^
+    src\features\web_status_entry.py
 if errorlevel 1 goto :fail
 
 
@@ -309,7 +317,8 @@ echo === BUILD MUSIC DJ ===
     --name music-dj %ICONARG% ^
     --add-data "assets\zeazdev-room.png;assets" ^
     --collect-all pywinauto --collect-all psutil --collect-submodules comtypes ^
-    music_dj_entry.py
+    --paths src\camfrog --paths src\features ^
+    src\features\music_dj_entry.py
 if errorlevel 1 goto :fail
 
 

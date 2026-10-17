@@ -1,26 +1,4 @@
-"""Camfrog auto status + auto reply  |  ตั้ง status + ตอบแชทอัตโนมัติ (Windows, UIA)
-
-Commands / คำสั่ง:
-  check            validate config / ตรวจ config (ไม่ต้องเปิด Camfrog)
-  windows          list visible windows (find your window_title_regex) / แสดงรายการหน้าต่างที่เห็น
-  discover         dump control tree -> controls.txt / ดึงรายการ control
-  status "text"    set status once / ตั้ง status ครั้งเดียว
-  marquee "text"   preview scrolling-status frames offline / ดูตัวอย่างเฟรมสถานะเลื่อน
-  history          list status history / ดูประวัติ status
-  history-add "t"  add a status to history / เพิ่ม status เข้าประวัติ
-  history-import F import statuses (one per line) / นำเข้า status จากไฟล์
-  init             write a starter config.json / สร้าง config.json เริ่มต้น
-  test-rules       test replies offline (no Camfrog) / ทดสอบกฎตอบแชทแบบออฟไลน์
-  run              run in this window / รันในหน้าต่างนี้
-  start            run in BACKGROUND (hidden) / รันเบื้องหลัง
-  stop             stop background instance / หยุดเบื้องหลัง
-  state            show running state / ดูสถานะ
-  autostart-on     start background at Windows login / เปิดอัตโนมัติตอนเข้า Windows
-  autostart-off    remove autostart / ยกเลิก
-Options (before or after the command): --config PATH  --lang auto|th|en
-
-NOTE: untested against a live Camfrog build. Set selectors in config.json via `discover`.
-"""
+"""Camfrog IM Auto-reply - self-contained (engine + clipboard + GUI inlined, profile: im_reply)."""
 import argparse
 import copy
 import ctypes
@@ -41,6 +19,11 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional, Union
+import contextlib
+import io
+import queue
+import threading
+from types import SimpleNamespace
 
 
 def system_taskkill_path():
@@ -59,6 +42,11 @@ def system_taskkill_path():
         raise ctypes.WinError(ctypes.get_last_error())
     return os.path.join(buffer.value, "taskkill.exe")
 
+# ============================================================
+# Inlined engine (camfrog_auto.py) - no shared imports.
+# ============================================================
+
+
 # Windowed/no-console builds have no stdout/stderr; force UTF-8 so Thai prints safely.
 for _n in ("stdout", "stderr"):
     _s = getattr(sys, _n)
@@ -68,17 +56,28 @@ for _n in ("stdout", "stderr"):
         _s.reconfigure(encoding="utf-8", errors="replace")
 
 # Frozen (PyInstaller) -> files live next to the exe, not the temp unpack dir.
-BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
-    else Path(__file__).resolve().parent
+def _source_base() -> Path:
+    """Repository root when running from a source checkout.
 
-APP_PROFILE = os.environ.get("CAMFROG_APP_PROFILE", "full").lower()
+    Source modules live under src/<area>/ while runtime data and example
+    configs live at the repository root (their pre-reorganization home).
+    Frozen executables and explicit *_DATA_DIR overrides are unaffected.
+    """
+    here = Path(__file__).resolve().parent
+    root = here.parent.parent
+    if here.parent.name == "src" and (root / "config.example.json").is_file():
+        return root
+    return here
+
+
+BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
+    else _source_base()
+
+APP_PROFILE = "im_reply"
 APP_PROFILES = {"full", "room", "im_reply", "status", "music"}
 
-# Standalone executables can pin runtime state to their own directory. Only the
-# status profile may consume ZCFATO_DATA_DIR; it must not redirect other apps.
-if APP_PROFILE == "status" and os.environ.get("ZCFATO_DATA_DIR"):
-    BASE = Path(os.environ["ZCFATO_DATA_DIR"])
-elif os.environ.get("CAMFROG_APP_DATA_DIR"):
+# This profile is private to IM Auto-reply. Ignore the status app's data override.
+if os.environ.get("CAMFROG_APP_DATA_DIR"):
     BASE = Path(os.environ["CAMFROG_APP_DATA_DIR"])
 
 # Nickname regex: Unicode word chars + space . - (Camfrog allows Thai in nicknames).
@@ -87,7 +86,7 @@ NICK_RE = re.compile(r"^[\w][\w .\-]{0,31}$", re.UNICODE)
 LINE_RE = re.compile(r"^(?P<nick>[^:\r\n]{1,32}):\s(?P<msg>.+)$")
 CTRL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 THAI_RE = re.compile(r"[\u0e00-\u0e7f]")
-log = logging.getLogger("camfrog_auto")
+log = logging.getLogger("camfrog_im_reply")
 LOG_TEXT = True
 LANG = "en"
 
@@ -125,6 +124,8 @@ S = {
     "not_fg": ("Camfrog not foreground; not sending", "Camfrog ไม่ได้อยู่หน้าสุด จึงไม่ส่ง"),
     "no_window": ("Camfrog window not found (check window_title_regex)",
                   "ไม่พบหน้าต่าง Camfrog (ตรวจ window_title_regex)"),
+    "verified_ambiguous": ("verified Camfrog discovery is ambiguous: {detail}",
+                           "การค้นหา Camfrog แบบยืนยันตัวตนกำกวม: {detail}"),
     "no_ctrl": ("control not found: {spec} (matches={n})", "ไม่พบ control: {spec} (พบ {n} รายการ)"),
     "status_set": ("status set: {text}", "ตั้ง status แล้ว: {text}"),
     "status_fail": ("status commit failed", "ตั้ง status ไม่สำเร็จ"),
@@ -332,6 +333,7 @@ DEFAULTS = {
     "active_hours": {"enabled": False, "start": "09:00", "end": "23:30"},
     "safety": {"stop_file": "STOP", "pid_file": "camfrog_auto.pid",
                "require_foreground": True, "restore_previous_window": True,
+               "discovery_mode": "legacy",  # or "verified" (executable identity + signature + role)
                "max_consecutive_failures": 5},
     "status": {
         "enabled": True,
@@ -500,6 +502,8 @@ def _validate(cfg, errs, warns):
         re.compile(cfg["window_title_regex"])
     except re.error as e:
         errs.append(t("e_regex", e=e))
+    if cfg.get("safety", {}).get("discovery_mode", "legacy") not in ("legacy", "verified"):
+        errs.append("safety.discovery_mode must be legacy or verified")
     if cfg["active_hours"]["enabled"]:
         try:
             parse_hm(cfg["active_hours"]["start"]); parse_hm(cfg["active_hours"]["end"])
@@ -683,28 +687,6 @@ def shown(text: str) -> str:
 
 
 # ---------- UI helpers ----------
-try:
-    from camfrog_windows_runtime import (
-        WindowsCamfrogProcessDiscovery,
-        WindowsCamfrogWindowClassifier,
-        attach_to_camfrog_client,
-        evaluate_client_runtime_state,
-        ProcessIdentity,
-        ClassifiedWindow,
-        ClientRuntimeState,
-        WindowRole,
-    )
-except ImportError:
-    WindowsCamfrogProcessDiscovery = None  # type: ignore
-    WindowsCamfrogWindowClassifier = None  # type: ignore
-    attach_to_camfrog_client = None  # type: ignore
-    evaluate_client_runtime_state = None  # type: ignore
-    ProcessIdentity = None  # type: ignore
-    ClassifiedWindow = None  # type: ignore
-    ClientRuntimeState = None  # type: ignore
-    WindowRole = None  # type: ignore
-
-
 def is_own_gui_window(win) -> bool:
     """True for our own Tk GUI windows (they contain 'Camfrog' in the title
     and would otherwise match window_title_regex). Camfrog itself never
@@ -717,8 +699,7 @@ def is_own_gui_window(win) -> bool:
     try:
         title = win.window_text()
         if title and title.startswith((
-                "Camfrog Status Changer", "Camfrog Random Status", "Camfrog Marquee Status",
-                "Camfrog Music DJ", "Camfrog Auto Reply", "Camfrog Presence", "Room Control", "ZChat")):
+                "Camfrog Status Changer", "Camfrog Random Status", "Camfrog Marquee Status")):
             return True
     except Exception:
         pass
@@ -735,12 +716,9 @@ def _window_process_id(window):
 
 
 def _require_single_window_process(windows):
-    """Fail closed when a title filter spans more than one/unverifiable process.
-
-    Every candidate must resolve to a positive, identical process ID. A single
-    window with an unverifiable (missing or invalid) PID is rejected rather than
-    accepted silently, so automation never targets an arbitrary Camfrog account.
-    """
+    """Fail closed when a title filter spans more than one/unverifiable process."""
+    if len(windows) <= 1:
+        return
     pids = [_window_process_id(window) for window in windows]
     if any(pid is None for pid in pids) or len(set(pids)) != 1:
         raise RuntimeError(
@@ -749,12 +727,44 @@ def _require_single_window_process(windows):
         )
 
 
+def get_verified_main_window():
+    """Resolve the Camfrog main window via verified process identity.
+
+    Uses WindowsCamfrogProcessDiscovery (executable identity, Authenticode
+    signature, PID + creation time; CEF and ZChat own-process exclusion) and
+    WindowsCamfrogWindowClassifier (structural MAIN_DIRECTORY role). Fails
+    closed on ambiguous process or window identity instead of guessing.
+    """
+    from camfrog_windows_runtime import (
+        WindowRole,
+        WindowsCamfrogProcessDiscovery,
+        WindowsCamfrogWindowClassifier,
+    )
+    discovery = WindowsCamfrogProcessDiscovery()
+    try:
+        identity = discovery.get_verified_process()
+    except ProcessLookupError as exc:
+        raise RuntimeError(t("verified_ambiguous", detail=str(exc)))
+    except RuntimeError as exc:
+        raise RuntimeError(t("verified_ambiguous", detail=str(exc)))
+    classifier = WindowsCamfrogWindowClassifier()
+    windows = classifier.classify_process_windows(identity, visible_only=True)
+    mains = [w for w in windows
+             if w.role == WindowRole.MAIN_DIRECTORY and w.element is not None]
+    if len(mains) != 1:
+        raise RuntimeError(t("verified_ambiguous", detail=(
+            f"expected exactly one visible MAIN_DIRECTORY window for PID {identity.pid}, "
+            f"found {len(mains)}")))
+    return mains[0].element
+
+
 def get_window(cfg: dict):
+    if cfg.get("safety", {}).get("discovery_mode", "legacy") == "verified":
+        return get_verified_main_window()
     from pywinauto import Desktop  # lazy: `check` works without pywinauto
     wins = Desktop(backend="uia").windows(
         title_re=cfg["window_title_regex"], visible_only=True)
     wins = [w for w in wins if not is_own_gui_window(w)]
-    wins = [w for w in wins if _window_process_id(w) != os.getpid()]
     if not wins:
         raise RuntimeError(t("no_window"))
     _require_single_window_process(wins)
@@ -781,27 +791,6 @@ def process_windows(main) -> list:
     IM and the buddy list as separate windows)."""
     from pywinauto import Desktop
     return Desktop(backend="uia").windows(process=main.process_id(), visible_only=True)
-
-
-def get_verified_camfrog_process(pid: Optional[int] = None):
-    """Return a verified Camfrog client ProcessIdentity or None."""
-    if WindowsCamfrogProcessDiscovery is None:
-        return None
-    try:
-        return WindowsCamfrogProcessDiscovery().get_verified_process(pid=pid)
-    except Exception:
-        return None
-
-
-def get_client_runtime_state(pid: Optional[int] = None):
-    """Evaluate evidence-separated runtime states for verified Camfrog client."""
-    if attach_to_camfrog_client is None:
-        return None
-    try:
-        att = attach_to_camfrog_client(pid=pid)
-        return att.get_runtime_state()
-    except Exception:
-        return None
 
 
 def get_chat_window(cfg: dict, main) -> Optional[Any]:
@@ -1249,21 +1238,11 @@ def _background_enter(ctrl, target="edit"):
             return
     if not handle:
         raise LookupError("Status combo has no HWND; cannot try combo Enter")
-
     u = ctypes.windll.user32
-    try:
-        u.PostMessageW.argtypes = (ctypes.c_void_p, ctypes.c_uint,
-                                   ctypes.c_size_t, ctypes.c_ssize_t)
-        u.PostMessageW.restype = ctypes.c_int
-    except (AttributeError, TypeError):
-        pass
-
     if not u.PostMessageW(handle, 0x0100, 0x0D, 0):
         raise RuntimeError("Could not post Enter key-down to status control")
     if not u.PostMessageW(handle, 0x0101, 0x0D, 0):
         raise RuntimeError("Could not post Enter key-up to status control")
-    if os.name == "nt":
-        time.sleep(0.02)
 
 
 def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=None,
@@ -1295,11 +1274,7 @@ def commit(win, ctrl, text: str, dry: bool, require_fg: bool = True, apply_btn=N
                 return False
             ctrl.type_keys("{ENTER}")
         else:
-            # Always use "combo" target for background submit: posting Enter
-            # directly to the child Edit control triggers a Windows ding on
-            # Camfrog builds that don't handle Enter in the Edit — use the
-            # verified CComboBoxTS parent instead.
-            _background_enter(ctrl, "combo" if background_enter_target == "edit" else background_enter_target)
+            _background_enter(ctrl, background_enter_target)
     if prev and prev != win.handle and user32.IsWindow(prev):
         time.sleep(0.15)
         user32.SetForegroundWindow(prev)  # best effort: give focus back to what you were doing
@@ -1716,7 +1691,11 @@ def child_cmd(args):
     else:
         py = Path(sys.executable)
         pyw = py.with_name("pythonw.exe")
-        cmd = [str(pyw if pyw.exists() else py), str(Path(__file__).resolve())]
+        # This file is an imported GUI module and deliberately has no
+        # __main__ entry point. Relaunch the supported entry script so the
+        # hidden source worker actually dispatches its CLI command.
+        entry = Path(__file__).resolve().with_name("im_autoreply_entry.py")
+        cmd = [str(pyw if pyw.exists() else py), str(entry)]
     if getattr(args, "config", None):
         cmd += ["--config", str(Path(args.config).resolve())]
     if getattr(args, "lang", None):
@@ -2395,13 +2374,6 @@ class Runner:
                 log.warning(t("no_ctrl", spec={"section": "status.edit"}, n=0))
                 self._next_status_warn = now + 60
             return
-        active = self.marq
-        if active is not None and active.get("loop") and now >= active["deadline"]:
-            self.marq = None
-            self.status_i += 1
-            self.stats["statuses"] += 1
-            self.current_text = active["raw"]
-            log.info(t("status_set", text=shown(active["frames"][-1])))
         if self.marq is None:
             if now - self.last_status < st["interval_seconds"]:
                 return
@@ -2411,15 +2383,7 @@ class Runner:
                 log.warning(t("status_blank"))
                 self.last_status = now
                 return
-            frames = self.build_frames(text)
-            mq = st["marquee"]
-            loop = bool(mq.get("infinite_loop") and mq.get("scroll")
-                        and len(frames) > 1)
-            self.marq = {"raw": raw, "frames": frames, "i": 0, "next": now,
-                         "loop": loop, "deadline": now + st["interval_seconds"],
-                         "history_recorded": False}
-            if loop:
-                self.last_status = now
+            self.marq = {"raw": raw, "frames": self.build_frames(text), "i": 0, "next": now}
         m = self.marq
         if now < m["next"]:
             return
@@ -2428,20 +2392,11 @@ class Runner:
             self.marq = None
             self.last_status = now - st["interval_seconds"] + st["retry_seconds"]
             raise RuntimeError(t("status_fail"))
-        if (m["i"] == 0 and not m["history_recorded"]
-                and st["history"]["enabled"] and st["history"]["record"]):
+        if m["i"] == 0 and st["history"]["enabled"] and st["history"]["record"]:
             self.hist.record(m["raw"])
-            m["history_recorded"] = True
         if len(m["frames"]) > 1:
             self.stats["marquee_frames"] += 1
         m["i"] += 1
-        if m["loop"]:
-            if m["i"] >= len(m["frames"]):
-                m["i"] = 0
-            m["next"] = time.monotonic() + max(
-                0.3, float(st["marquee"]["step_seconds"]))
-            log.debug(t("status_set", text=shown(frame)))
-            return
         if m["i"] >= len(m["frames"]):
             self.marq = None
             self.status_i += 1
@@ -3356,7 +3311,7 @@ def build_parser():
     return p
 
 
-def main(argv=None):
+def cli_main(argv=None):
     global LANG, LANG_LOCKED
     a = build_parser().parse_args(argv)
     LANG = resolve_lang(a.lang)
@@ -3435,6 +3390,1471 @@ def main(argv=None):
     except Exception:
         log.exception(t("fatal"))
         return 1
+
+
+
+
+def set_lang(value):
+    """Set the module-global language used by t()/bi()."""
+    global LANG
+    LANG = value
+
+
+
+# ============================================================
+# Inlined clipboard support (clipboard_support.py).
+# ============================================================
+
+_WIDGET_CLASSES = {
+    "Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox", "Text", "Listbox",
+}
+_EDITABLE_CLASSES = {"Entry", "TEntry", "TCombobox", "Spinbox", "TSpinbox", "Text"}
+
+
+def _windows_open_clipboard(clipboard, attempts=20, interval=0.025):
+    """Windows clipboard is often briefly busy; retry opening it for 0.5 seconds."""
+    last_error = None
+    for attempt in range(attempts):
+        try:
+            clipboard.OpenClipboard(None)
+            return
+        except Exception as exc:
+            last_error = exc
+            if attempt + 1 < attempts:
+                time.sleep(interval)
+    raise OSError(f"Could not open the Windows clipboard: {last_error}") from last_error
+
+
+def set_clipboard_text(root, text):
+    text = str(text)
+    if os.name == "nt":
+        import win32clipboard
+        import win32con
+
+        _windows_open_clipboard(win32clipboard)
+        try:
+            win32clipboard.EmptyClipboard()
+            win32clipboard.SetClipboardText(text, win32con.CF_UNICODETEXT)
+        finally:
+            win32clipboard.CloseClipboard()
+        return
+    root.clipboard_clear()
+    root.clipboard_append(text)
+    root.update_idletasks()
+
+
+def get_clipboard_text(root):
+    if os.name == "nt":
+        import win32clipboard
+        import win32con
+
+        _windows_open_clipboard(win32clipboard)
+        try:
+            if win32clipboard.IsClipboardFormatAvailable(win32con.CF_UNICODETEXT):
+                value = win32clipboard.GetClipboardData(win32con.CF_UNICODETEXT)
+            elif win32clipboard.IsClipboardFormatAvailable(win32con.CF_TEXT):
+                value = win32clipboard.GetClipboardData(win32con.CF_TEXT)
+                if isinstance(value, bytes):
+                    value = value.decode("mbcs", errors="replace")
+            else:
+                return ""
+            return value if isinstance(value, str) else str(value)
+        finally:
+            win32clipboard.CloseClipboard()
+    try:
+        return root.clipboard_get()
+    except Exception:
+        return ""
+
+
+def _widget_class(widget):
+    try:
+        return widget.winfo_class()
+    except Exception:
+        return ""
+
+
+def _has_selection(widget, widget_class):
+    try:
+        if widget_class == "Text":
+            return bool(widget.tag_ranges("sel"))
+        if widget_class == "Listbox":
+            return bool(widget.curselection())
+        return bool(widget.selection_present())
+    except Exception:
+        return False
+
+
+def _selected_text(widget, widget_class):
+    if widget_class == "Text":
+        return widget.get("sel.first", "sel.last")
+    if widget_class == "Listbox":
+        selected = widget.curselection()
+        return "\n".join(widget.get(index) for index in selected)
+    value = widget.get()
+    start, end = int(widget.index("sel.first")), int(widget.index("sel.last"))
+    return value[start:end]
+
+
+def _editable(widget, widget_class):
+    if widget_class not in _EDITABLE_CLASSES:
+        return False
+    try:
+        return str(widget.cget("state")) not in {"disabled", "readonly"}
+    except Exception:
+        return True
+
+
+def _delete_selection(widget, widget_class):
+    if widget_class == "Text":
+        widget.delete("sel.first", "sel.last")
+    else:
+        widget.delete("sel.first", "sel.last")
+
+
+def _operate(root, widget, action):
+    widget_class = _widget_class(widget)
+    if widget_class not in _WIDGET_CLASSES:
+        return False
+
+    if action in {"copy", "cut"}:
+        if not _has_selection(widget, widget_class):
+            return False
+        if action == "cut" and not _editable(widget, widget_class):
+            return False
+        selected = _selected_text(widget, widget_class)
+        set_clipboard_text(root, selected)
+        if action == "cut":
+            _delete_selection(widget, widget_class)
+        return True
+
+    if action == "paste":
+        if not _editable(widget, widget_class):
+            return False
+        value = get_clipboard_text(root)
+        if not value:
+            return False
+        if widget_class == "Text":
+            if _has_selection(widget, widget_class):
+                widget.delete("sel.first", "sel.last")
+            widget.insert("insert", value)
+        else:
+            if _has_selection(widget, widget_class):
+                _delete_selection(widget, widget_class)
+            widget.insert("insert", value)
+        return True
+    return False
+
+
+class ClipboardController:
+    """Attach reliable Ctrl+C/X/V/A, Insert shortcuts, and a right-click menu."""
+
+    def __init__(self, root, translate=None, on_error=None):
+        import tkinter as tk
+
+        self.root = root
+        self.translate = translate or (lambda text: str(text).partition("|")[0])
+        self.on_error = on_error
+        self.target = None
+        self.widgets = []
+        import weakref
+        self._installed_widgets = weakref.WeakSet()
+        self.menu = tk.Menu(root, tearoff=False)
+        for label, action in (("Cut|ตัด", "cut"), ("Copy|คัดลอก", "copy"),
+                              ("Paste|วาง", "paste")):
+            self.menu.add_command(label=self.translate(label),
+                                  command=lambda op=action: self.perform(self.target, op))
+        self.menu.add_separator()
+        self.menu.add_command(label=self.translate("Select all|เลือกทั้งหมด"),
+                              command=lambda: self.select_all(self.target))
+
+    def refresh_menu(self):
+        """Refresh localized labels after the GUI language changes."""
+        labels = ("Cut|ตัด", "Copy|คัดลอก", "Paste|วาง",
+                  "Select all|เลือกทั้งหมด")
+        for index, label in enumerate(labels):
+            self.menu.entryconfigure(index if index < 3 else 4,
+                                     label=self.translate(label))
+
+    def install(self, parent):
+        """Bind editors recursively, including controls added after the first build."""
+        for widget in parent.winfo_children():
+            widget_class = _widget_class(widget)
+            if widget_class in _WIDGET_CLASSES and widget not in self._installed_widgets:
+                self._installed_widgets.add(widget)
+                self.widgets.append(widget)
+                if widget_class in {"Text", "Listbox"}:
+                    try:
+                        widget.configure(
+                            background="#ffffff" if widget_class == "Text" else "#fffdfa",
+                            foreground="#283648", selectbackground="#8b672b",
+                            selectforeground="#fffdfa", insertbackground="#283648",
+                            highlightbackground="#d5c8ac", highlightcolor="#8b672b")
+                    except Exception:
+                        pass
+                for sequence, action in (
+                    ("<Control-c>", "copy"), ("<Control-x>", "cut"),
+                    ("<Control-v>", "paste"), ("<Control-Insert>", "copy"),
+                    ("<Shift-Delete>", "cut"), ("<Shift-Insert>", "paste"),
+                ):
+                    widget.bind(sequence, lambda event, op=action: self.handle(event, op), add="+")
+                # The generic key binding also recognizes Windows virtual-key
+                # codes and control characters when a Thai/non-Latin layout
+                # reports an unknown keysym for Ctrl+A/C/V/X.
+                widget.bind("<Control-KeyPress>", self.handle_control_key, add="+")
+                widget.bind("<Control-a>", self._select_all_event, add="+")
+                widget.bind("<Button-3>", self.show_menu, add="+")
+                widget.bind("<Shift-F10>", self.show_menu, add="+")
+            self.install(widget)
+
+    def handle_control_key(self, event):
+        """Dispatch Ctrl+A/C/V/X consistently across keyboard layouts."""
+        keysym = str(getattr(event, "keysym", "")).lower()
+        char = str(getattr(event, "char", "") or "")
+        try:
+            keycode = int(getattr(event, "keycode", -1))
+        except (TypeError, ValueError):
+            keycode = -1
+        shortcuts = {
+            "a": ({"a", "\x01"}, 65, None),
+            "c": ({"c", "\x03"}, 67, "copy"),
+            "v": ({"v", "\x16"}, 86, "paste"),
+            "x": ({"x", "\x18"}, 88, "cut"),
+        }
+        key = next((name for name, (chars, code, _action) in shortcuts.items()
+                    if keysym == name or char in chars or keycode == code), None)
+        if key is None:
+            return None
+        self.target = event.widget
+        _chars, _code, action = shortcuts[key]
+        if action is None:
+            return self._select_all_event(event)
+        return self.handle(event, action)
+
+    def perform(self, widget, action):
+        if widget is None:
+            return False
+        try:
+            return _operate(self.root, widget, action)
+        except Exception as exc:
+            if self.on_error:
+                self.on_error(exc)
+            return False
+
+    def handle(self, event, action):
+        self.target = event.widget
+        self.perform(self.target, action)
+        return "break"
+
+    def select_all(self, widget):
+        if widget is None:
+            return "break"
+        widget_class = _widget_class(widget)
+        try:
+            if widget_class == "Text":
+                widget.tag_add("sel", "1.0", "end-1c")
+                widget.mark_set("insert", "end-1c")
+            elif widget_class == "Listbox":
+                widget.selection_set(0, "end")
+            else:
+                widget.selection_range(0, "end")
+                widget.icursor("end")
+            widget.focus_set()
+        except Exception:
+            pass
+        return "break"
+
+    def _select_all_event(self, event):
+        self.target = event.widget
+        return self.select_all(event.widget)
+
+    def show_menu(self, event):
+        self.target = event.widget
+        try:
+            event.widget.focus_set()
+            self.menu.tk_popup(event.x_root, event.y_root)
+        except Exception as exc:
+            if self.on_error:
+                self.on_error(exc)
+        finally:
+            try:
+                self.menu.grab_release()
+            except Exception:
+                pass
+        return "break"
+
+
+# ============================================================
+# GUI (from camfrog_gui.py.py), profile: im_reply.
+# ============================================================
+
+
+
+APP_NAME = "IM Auto-reply"
+
+
+
+
+CLI_COMMANDS = {"check", "discover", "detect", "chat-probe", "im-probe", "windows", "run", "start", "stop", "state", "update", "status",
+                "autostart-on", "autostart-off", "init", "marquee", "history", "history-add",
+                "history-import", "test-rules"}
+
+
+def has_cli_command(argv):
+    """Detect CLI passthrough without mistaking an option value for a command."""
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token in ("--config", "--lang"):
+            index += 2
+            continue
+        if token in CLI_COMMANDS:
+            return True
+        index += 1
+    return False
+
+
+def parse_gui_args(argv):
+    parser = argparse.ArgumentParser(description="Camfrog feature app")
+    parser.add_argument("--config", default=None, help="use an alternate app-local config")
+    args = parser.parse_args(argv)
+    if args.config is not None and not args.config.strip():
+        parser.error("argument --config: expected a path")
+    return args
+SEL_FIELDS = ("control_type", "auto_id", "class_name", "title", "title_re", "index")
+
+
+def bi(s):
+    """'English|ไทย' -> text for the current language."""
+    en, _, th = s.partition("|")
+    return (th if (LANG == "th" and th) else en).replace("{pipe}", "||")  # {pipe}: literal ||
+
+
+# ---------------------------------------------------------------- Tk-free logic
+def sel_to_strs(sel):
+    sel = sel or {}
+    return {k: ("" if sel.get(k) in (None, "") else str(sel[k])) for k in SEL_FIELDS}
+
+
+def strs_to_sel(d, allow_empty=False):
+    """Selector fields -> dict. Blank everywhere -> None (only valid for apply_button)."""
+    out = {}
+    for k in SEL_FIELDS:
+        v = str(d.get(k, "")).strip()
+        if v:
+            out[k] = int(v) if k == "index" else v
+    if not out:
+        return None if allow_empty else {}
+    out.setdefault("index", 0)
+    return out
+
+
+def iter_proposals(out):
+    """Yield PROPOSAL dicts from detect output, skipping malformed lines.
+
+    A corrupt PROPOSAL line must never kill the Tk pump loop.
+    """
+    for line in str(out).splitlines():
+        if not line.startswith("PROPOSAL "):
+            continue
+        try:
+            proposal = json.loads(line[9:])
+        except ValueError:
+            continue
+        if isinstance(proposal, dict):
+            yield proposal
+
+
+def apply_proposal_to_vars(sel_vars, proposal):
+    """Fill selector StringVars from a detect PROPOSAL dict.
+
+    sel_vars maps key tuples to (vars_dict, optional) as built by
+    selector_group. Keys with no visible box (e.g. status.edit in the
+    room/im_reply profiles) are skipped, never KeyError.
+    Returns (applied_keys, skipped_keys)."""
+    applied, skipped = [], []
+    for key, sel in proposal.items():
+        pair = sel_vars.get(tuple(key.split(".")))
+        if pair is None:
+            skipped.append(key)
+            continue
+        vars_ = pair[0]
+        for k in SEL_FIELDS:
+            vars_[k].set(sel.get(k, "") if k != "index" else str(sel.get("index", 0)))
+        applied.append(key)
+    return applied, skipped
+
+
+def reply_to_fields(spec):
+    """rule reply (str | list | {th,en}) -> (th_text, en_text, any_text), one variant per line."""
+    def lines(x):
+        return "\n".join([x] if isinstance(x, str) else (x or []))
+    if isinstance(spec, dict):
+        return lines(spec.get("th")), lines(spec.get("en")), ""
+    return "", "", lines(spec)
+
+
+def fields_to_reply(th, en, anyl):
+    def pool(x):
+        v = [ln.strip() for ln in x.splitlines() if ln.strip()]
+        return v[0] if len(v) == 1 else v
+    th_p, en_p, any_p = pool(th), pool(en), pool(anyl)
+    if not (th_p or en_p or any_p):
+        return None
+    if th_p or en_p:
+        return {"th": th_p or any_p or en_p, "en": en_p or any_p or th_p}
+    return any_p
+
+
+class ConfigModel:
+    """Load / validate / atomically save config.json. Never writes an invalid config."""
+
+    def __init__(self, path):
+        self.path = Path(path).resolve()
+        if APP_PROFILE == "im_reply":
+            try:
+                self.path.relative_to(BASE.resolve())
+            except ValueError as exc:
+                raise ValueError("This app's config must stay inside its own folder.") from exc
+        self.cfg = None
+
+    def load(self):
+        if not self.path.exists():
+            with contextlib.redirect_stdout(io.StringIO()):
+                cmd_init(self.path, False)
+        self.cfg = apply_app_profile(load_cfg(self.path))
+        return self.cfg
+
+    @staticmethod
+    def check(cfg):
+        errs, warns = validate(cfg)
+        ar = cfg["autoreply"]
+        if (not cfg["dry_run"] and ar["enabled"] and not ar["own_nickname"].strip()
+                and t("refuse_live") not in errs):
+            errs.append(t("refuse_live"))
+        return errs, warns
+
+    def save(self, cfg):
+        cfg = apply_app_profile(cfg)
+        errs, warns = self.check(cfg)
+        if errs:
+            return errs, warns
+        atomic_write(self.path, json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+        self.cfg = copy.deepcopy(cfg)
+        return [], warns
+
+
+def tail_text(path, nbytes=40000, lines=400):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - nbytes))
+            data = f.read()
+    except OSError:
+        return ""
+    return "\n".join(data.decode("utf-8", "replace").splitlines()[-lines:])
+
+
+_ACTIVITY_SECRET_RE = re.compile(
+    r"(?i)\b(password|passwd|authorization|cookie|token|secret|phpsessid)"
+    r"\b([\"']?\s*[:=]\s*[\"']?)(?:(?:bearer|basic)\s+)?"
+    r"(?:\"[^\"]*\"|'[^']*'|[^\s,;}'\"]+)"
+)
+
+
+def activity_log_path(cfg):
+    """Return the configured app-local log path, or None when file logging is off."""
+    name = cfg.get("log", {}).get("file")
+    if not isinstance(name, str) or not name.strip():
+        return None
+    return BASE / name
+
+
+def activity_detail(value, limit=800):
+    """Keep useful command output in the activity log without credential values."""
+    detail = " ".join(str(value or "").split())
+    detail = _ACTIVITY_SECRET_RE.sub(r"\1\2[REDACTED]", detail)
+    return detail[:limit]
+
+
+def read_stats(cfg):
+    try:
+        return json.loads(stats_path(cfg).read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def explain(cfg, nick, msg, im=False):
+    """Human text for the offline room or private-message rule tester."""
+    r = (evaluate_im if im else evaluate_message)(cfg, nick, msg)
+    head = t("tr_lang", l=r["lang"])
+    if r["skip"]:
+        return head + "\n" + t("tr_skip", why=t("why_" + r["skip"]))
+    if r["rule"] is None:
+        return head + "\n" + t("tr_none")
+    return head + "\n" + t("tr_match", i=r["rule"]["idx"],
+                              reply=r["reply"] or t("tr_blocked"))
+
+
+def autosave_needs_confirmation(cfg, bot_running):
+    """Live config changes need an explicit Save confirmation while the bot runs."""
+    return bool(bot_running and not cfg.get("dry_run", True))
+
+
+# ---------------------------------------------------------------- GUI
+def build_app():
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+
+    class RuleDialog(tk.Toplevel):
+        def __init__(self, app, rule=None):
+            super().__init__(app.root)
+            self.result = None
+            self.title(bi("Rule|กฎ"))
+            self.transient(app.root)
+            rule = rule or {"pattern": "", "reply": {"th": [], "en": []}}
+            self.pat = tk.StringVar(value=rule.get("pattern", ""))
+            self.lang = tk.StringVar(value=rule.get("lang", ""))
+            self.cool = tk.StringVar(value=str(rule.get("cooldown_seconds", 0)))
+            self.mention = tk.BooleanVar(value=bool(rule.get("mention")))
+            self.enabled = tk.BooleanVar(value=rule.get("enabled", True))
+            f = ttk.Frame(self, padding=10)
+            f.pack(fill="both", expand=True)
+            ttk.Label(f, text=bi("Pattern (regex)|รูปแบบ (regex)")).grid(row=0, column=0, sticky="w")
+            ttk.Entry(f, textvariable=self.pat, width=60).grid(row=0, column=1, columnspan=3, sticky="we")
+            th, en, anyl = reply_to_fields(rule.get("reply"))
+            self.boxes = []
+            for r, (lab, val) in enumerate(((bi("Reply TH (one per line = random)|ตอบไทย (บรรทัดละแบบ สุ่ม)"), th),
+                                            (bi("Reply EN|ตอบอังกฤษ"), en),
+                                            (bi("Reply any language|ตอบทุกภาษา"), anyl)), 1):
+                ttk.Label(f, text=lab).grid(row=r, column=0, sticky="nw", pady=2)
+                box = tk.Text(f, width=60, height=3)
+                box.insert("1.0", val)
+                box.grid(row=r, column=1, columnspan=3, sticky="we", pady=2)
+                self.boxes.append(box)
+            ttk.Label(f, text=bi("Only language|เฉพาะภาษา")).grid(row=4, column=0, sticky="w")
+            ttk.Combobox(f, textvariable=self.lang, values=("", "th", "en"), width=6,
+                         state="readonly").grid(row=4, column=1, sticky="w")
+            ttk.Label(f, text=bi("Cooldown (s)|คูลดาวน์ (วินาที)")).grid(row=4, column=2, sticky="e")
+            ttk.Entry(f, textvariable=self.cool, width=8).grid(row=4, column=3, sticky="w")
+            ttk.Checkbutton(f, text=bi("Only when my nick is mentioned|ตอบเมื่อมีคนพิมพ์นิคเรา"),
+                            variable=self.mention).grid(row=5, column=0, columnspan=2, sticky="w")
+            ttk.Checkbutton(f, text=bi("Enabled|เปิดใช้"), variable=self.enabled).grid(
+                row=5, column=2, columnspan=2, sticky="w")
+            ttk.Label(f, text=bi("Variables: {sender} {me} {time} {date}. Replies starting with / are blocked.|"
+                                 "ตัวแปร: {sender} {me} {time} {date} คำตอบที่ขึ้นต้นด้วย / จะถูกบล็อก"),
+                      foreground="#626d7a").grid(row=6, column=0, columnspan=4, sticky="w", pady=4)
+            bar = ttk.Frame(f)
+            bar.grid(row=7, column=0, columnspan=4, sticky="e")
+            ttk.Button(bar, text="OK", command=self.ok).pack(side="left", padx=4)
+            ttk.Button(bar, text=bi("Cancel|ยกเลิก"), command=self.destroy).pack(side="left")
+            app.install_clipboard_support(self, remember=False)
+            self.grab_set()
+            self.wait_window()
+
+        def ok(self):
+            try:
+                pat = self.pat.get()
+                re.compile(pat, re.I)
+                reply = fields_to_reply(*(b.get("1.0", "end") for b in self.boxes))
+                cool = float(self.cool.get() or 0)
+                if not pat or reply is None or cool < 0:
+                    raise ValueError(bi("pattern and reply are required|ต้องมี pattern และ reply"))
+            except (re.error, ValueError) as e:
+                messagebox.showerror(bi("Rule|กฎ"), str(e), parent=self)
+                return
+            rule = {"pattern": pat, "reply": reply}
+            if self.mention.get():
+                rule["mention"] = True
+            if self.lang.get():
+                rule["lang"] = self.lang.get()
+            if cool:
+                rule["cooldown_seconds"] = int(cool) if cool == int(cool) else cool
+            if not self.enabled.get():
+                rule["enabled"] = False
+            self.result = rule
+            self.destroy()
+
+    class App:
+        def __init__(self, cfg_path):
+            self.root = tk.Tk()
+            self.root.configure(background="#f4f1e8")
+            style = ttk.Style(self.root)
+            try:
+                style.theme_use("clam")
+            except tk.TclError:
+                pass
+            style.configure("TFrame", background="#f4f1e8")
+            style.configure("TLabel", background="#f4f1e8", foreground="#283648", font=("Segoe UI", 9))
+            style.configure("TCheckbutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TRadiobutton", background="#f4f1e8", foreground="#283648")
+            style.configure("TLabelframe", background="#f4f1e8", bordercolor="#d5c8ac")
+            style.configure("TLabelframe.Label", background="#f4f1e8", foreground="#8b672b",
+                            font=("Segoe UI", 9, "bold"))
+            style.configure("TButton", padding=(7, 4), font=("Segoe UI", 9),
+                            background="#ebe5d9", foreground="#283648")
+            style.map("TButton", background=[("active", "#d6e9e8"), ("pressed", "#d5c8ac")])
+            style.configure("TEntry", padding=(4, 4), fieldbackground="#ffffff",
+                            foreground="#283648")
+            style.configure("TNotebook", background="#f4f1e8")
+            style.configure("TNotebook.Tab", padding=(11, 6), font=("Segoe UI", 9))
+            style.map("TNotebook.Tab", background=[("selected", "#fffdfa")],
+                      foreground=[("selected", "#8b672b")])
+            self.root.geometry("800x560")
+            self.root.minsize(660, 460)
+            self.model = ConfigModel(cfg_path)
+            self.q = queue.Queue()
+            self.busy = False
+            self.last_log = None
+            self.binds = []
+            self._autosave_after = None
+            self._autosave_traces = []
+            self.clipboard_widgets = []
+            try:
+                self.draft = copy.deepcopy(self.model.load())
+            except Exception as e:
+                messagebox.showerror(APP_NAME, t("cannot_load", e=e))
+                self.root.destroy()
+                raise SystemExit(2)
+            set_lang(resolve_lang(self.draft["language"]))
+            setup_logging(self.draft)
+            log.info(bi("Application opened|เปิดแอปพลิเคชันแล้ว"))
+            self.build()
+            self._closing = False
+            self.root.protocol("WM_DELETE_WINDOW", self.close_app)
+            self.root.bind("<Control-s>", lambda _e: self.save())
+            self.root.after(150, self.pump)
+            self.root.after(500, self.tick)
+            self.root.after(2500, self.auto_update_check)
+
+        # ---- close
+        def close_app(self):
+            """Cleanly tear down all scheduled callbacks so the process exits."""
+            if self._closing:
+                return
+            log.info(bi("Application closing|กำลังปิดแอปพลิเคชัน"))
+            self._closing = True
+            self.cancel_autosave()
+            try:
+                self.root.quit()
+            except Exception:
+                pass
+            try:
+                self.root.destroy()
+            except Exception:
+                pass
+
+        # ---- layout
+        def build(self):
+            self.cancel_autosave()
+            for var, trace_id in self._autosave_traces:
+                try:
+                    var.trace_remove("write", trace_id)
+                except (tk.TclError, AttributeError):
+                    pass
+            self._autosave_traces = []
+            self.clipboard_widgets = []
+            for w in self.root.winfo_children():
+                w.destroy()
+            self.binds = []
+            self.root.title(f"{APP_NAME}  -  {self.model.path}")
+            self.setup_clipboard_menu()
+            top = ttk.Frame(self.root, padding=(8, 6))
+            top.pack(fill="x")
+            self.state_lbl = ttk.Label(top, text="...", font=("Segoe UI", 14, "bold"))
+            self.state_lbl.pack(side="left")
+            self.mode_lbl = ttk.Label(top, text="", font=("Segoe UI", 11, "bold"))
+            self.mode_lbl.pack(side="left", padx=14)
+            ttk.Button(top, text="TH / EN", width=8, command=self.switch_lang).pack(side="right")
+            bar = ttk.Frame(self.root, padding=(8, 6))
+            bar.pack(side="bottom", fill="x")
+            ttk.Button(bar, text=bi("Save (Ctrl+S)|บันทึก (Ctrl+S)"), command=self.save).pack(side="left")
+            ttk.Button(bar, text=bi("Reload from disk|โหลดจากไฟล์ใหม่"), command=self.reload).pack(side="left", padx=6)
+            ttk.Button(bar, text=bi("Check config|ตรวจคอนฟิก"), command=self.check_cfg).pack(side="left")
+            ttk.Button(bar, text=bi("Update|อัปเดต"), command=self.check_update).pack(side="left", padx=6)
+            if not hasattr(self, "auto_apply_var"):
+                self.auto_apply_var = tk.BooleanVar(master=self.root, value=True)
+            ttk.Checkbutton(bar, text=bi("Auto-apply valid changes|ใช้ค่าที่ถูกต้องอัตโนมัติ"),
+                            variable=self.auto_apply_var, command=self.auto_apply_toggled).pack(side="right")
+            self.msg = ttk.Label(bar, text="", foreground="#626d7a")
+            self.msg.pack(side="left", padx=12)
+            self.nb = ttk.Notebook(self.root)
+            self.nb.pack(fill="both", expand=True, padx=8)
+            tab_specs = (("Dashboard|แดชบอร์ด", "Dashboard", self.tab_dashboard),
+                         ("Setup|ตั้งค่าเริ่มต้น", "Setup", self.tab_setup),
+                         ("Auto-reply|ตอบอัตโนมัติ", "Auto-reply", self.tab_reply),
+                         ("Advanced|ขั้นสูง", "Advanced", self.tab_advanced),
+                         ("Activity Log|บันทึกกิจกรรม", "Activity Log", self.tab_activity_log))
+            for name, key, fn in tab_specs:
+                f = ttk.Frame(self.nb, padding=8)
+                fn(f)
+                self.nb.add(f, text=bi(name))
+            self.load_ui()
+            self.install_clipboard_support(self.root)
+            self.attach_autosave_hooks()
+            self.refresh_state()
+            self.refresh_activity_log()
+
+        def setup_clipboard_menu(self):
+            old = getattr(self, "clipboard_controller", None)
+            if old is not None:
+                try:
+                    old.menu.destroy()
+                except tk.TclError:
+                    pass
+            self.clipboard_controller = ClipboardController(
+                self.root, translate=bi, on_error=self.clipboard_error)
+            self.clipboard_menu = self.clipboard_controller.menu
+            self.clipboard_target = None
+
+        def install_clipboard_support(self, parent, remember=True):
+            """Install reliable clipboard shortcuts and context menus on editors."""
+            self.clipboard_controller.install(parent)
+            if remember:
+                self.clipboard_widgets = list(self.clipboard_controller.widgets)
+
+        def clipboard_error(self, exc):
+            if hasattr(self, "msg"):
+                try:
+                    self.msg.configure(text=bi("Clipboard error: {error}|คลิปบอร์ดผิดพลาด: {error}").format(
+                        error=exc))
+                except tk.TclError:
+                    pass
+
+        def clipboard_virtual(self, event, virtual):
+            self.clipboard_target = event.widget
+            action = {"<<Copy>>": "copy", "<<Cut>>": "cut", "<<Paste>>": "paste"}.get(virtual)
+            if action:
+                self.clipboard_controller.perform(event.widget, action)
+            return "break"
+
+        def clipboard_action(self, virtual):
+            widget = self.clipboard_target
+            action = {"<<Copy>>": "copy", "<<Cut>>": "cut", "<<Paste>>": "paste"}.get(virtual)
+            if action:
+                self.clipboard_controller.perform(widget, action)
+
+        def select_all(self, widget_or_event):
+            widget = getattr(widget_or_event, "widget", widget_or_event)
+            return self.clipboard_controller.select_all(widget)
+
+        def show_clipboard_menu(self, event):
+            self.clipboard_target = event.widget
+            return self.clipboard_controller.show_menu(event)
+
+        def field(self, parent, label, path, kind="str", choices=(), width=26, hint=""):
+            row = parent.grid_size()[1]
+            ttk.Label(parent, text=bi(label)).grid(row=row, column=0, sticky="w", padx=4, pady=2)
+            if kind == "bool":
+                var = tk.BooleanVar()
+                w = ttk.Checkbutton(parent, variable=var)
+            elif kind == "choice":
+                var = tk.StringVar()
+                w = ttk.Combobox(parent, textvariable=var, values=choices, state="readonly", width=width - 3)
+            else:
+                var = tk.StringVar()
+                w = ttk.Entry(parent, textvariable=var, width=width)
+            w.grid(row=row, column=1, sticky="w", padx=4, pady=2)
+            if hint:
+                ttk.Label(parent, text=bi(hint), foreground="#626d7a").grid(row=row, column=2, sticky="w")
+            self.binds.append((path, kind, var, label))
+            return var
+
+        def textbox(self, parent, height, key):
+            box = tk.Text(parent, height=height, width=70, undo=True)
+            setattr(self, key, box)
+            return box
+
+        # ---- tabs
+        def tab_dashboard(self, f):
+            row = ttk.Frame(f)
+            row.pack(fill="x")
+            self.btn_start = ttk.Button(row, text=bi("Save & Start (background)|บันทึกและเริ่ม (เบื้องหลัง)"), command=self.start)
+            self.btn_start.pack(side="left")
+            self.btn_bg = ttk.Button(row, text=bi("Start & close window|เริ่มเบื้องหลังแล้วปิดหน้าต่าง"),
+                                     command=lambda: self.start(close=True))
+            self.btn_bg.pack(side="left", padx=6)
+            self.btn_stop = ttk.Button(row, text=bi("Stop|หยุด"), command=self.stop)
+            self.btn_stop.pack(side="left", padx=6)
+            ttk.Button(row, text=bi("EMERGENCY STOP|หยุดฉุกเฉิน"), command=self.emergency).pack(side="left", padx=6)
+            self.live_var = tk.BooleanVar()
+            self.binds.append((("dry_run",), "live", self.live_var, "dry_run"))
+            ttk.Checkbutton(row, text=bi("LIVE: really send messages|โหมดจริง: ส่งข้อความจริง"), variable=self.live_var,
+                            command=self.live_toggled).pack(side="right")
+            self.stats_lbl = ttk.Label(f, text="")
+            self.stats_lbl.pack(anchor="w", pady=6)
+            ttk.Label(f, text=bi("Closing this window does not stop the bot. Dry-run only logs what it would send.|"
+                                 "ปิดหน้าต่างนี้ไม่หยุดบอท โหมดทดลองแค่บันทึกว่าจะส่งอะไร"), foreground="#626d7a").pack(anchor="w")
+
+        def tab_activity_log(self, f):
+            heading = ttk.Frame(f)
+            heading.pack(fill="x", pady=(0, 6))
+            ttk.Label(heading, text=bi(
+                "Application and worker events|เหตุการณ์ของแอปและ worker"),
+                font=("Segoe UI", 10, "bold")).pack(side="left")
+            ttk.Button(heading, text=bi("Refresh|รีเฟรช"),
+                       command=self.refresh_activity_log).pack(side="right")
+            self.log_info = ttk.Label(
+                f, text="", foreground="#626d7a", wraplength=900, justify="left")
+            self.log_info.pack(anchor="w", pady=(0, 6))
+            lf = ttk.Frame(f)
+            lf.pack(fill="both", expand=True, pady=6)
+            self.log = tk.Text(lf, state="disabled", wrap="none", height=18, font=("Consolas", 9))
+            sb = ttk.Scrollbar(lf, command=self.log.yview)
+            self.log.configure(yscrollcommand=sb.set)
+            sb.pack(side="right", fill="y")
+            self.log.pack(fill="both", expand=True)
+
+        def selector_group(self, parent, title, key, optional=False):
+            lf = ttk.LabelFrame(parent, text=bi(title), padding=6)
+            lf.pack(fill="x", pady=4)
+            vars_ = {}
+            for i, k in enumerate(SEL_FIELDS):
+                ttk.Label(lf, text=k).grid(row=0, column=i, sticky="w", padx=3)
+                v = tk.StringVar()
+                ttk.Entry(lf, textvariable=v, width=14).grid(row=1, column=i, padx=3)
+                vars_[k] = v
+            self.sel_vars[key] = (vars_, optional)
+
+        def tab_setup(self, f):
+            self.sel_vars = {}
+            g = ttk.Frame(f)
+            g.pack(fill="x")
+            self.field(g, "Window title regex|regex ชื่อหน้าต่าง", ("window_title_regex",), width=40)
+            self.field(g, "My nickname|นิคของฉัน", ("autoreply", "own_nickname"), width=40,
+                       hint="required for live mode|จำเป็นเมื่อรันจริง")
+            row = ttk.Frame(f)
+            row.pack(fill="x", pady=4)
+            ttk.Button(row, text=bi("List windows|แสดงหน้าต่าง"), command=lambda: self.helper("windows")).pack(side="left")
+            ttk.Button(row, text=bi("Auto-detect (Camfrog 8.x)|ตรวจหา control อัตโนมัติ"),
+                       command=self.detect).pack(side="left", padx=6)
+            ttk.Button(row, text=bi("Discover controls -> controls.txt|ดึง control -> controls.txt"),
+                       command=lambda: self.helper("discover")).pack(side="left", padx=6)
+            ttk.Label(row, text=bi("Windows only. Copy values from controls.txt into the boxes below.|"
+                                   "เฉพาะ Windows คัดลอกค่าจาก controls.txt มาใส่ช่องด้านล่าง"), foreground="#626d7a").pack(side="left")
+            self.selector_group(f, "Chat history selector|selector ประวัติแชท", ("autoreply", "history"))
+            self.selector_group(f, "Chat input selector|selector ช่องพิมพ์แชท", ("autoreply", "input"))
+            self.helper_out = tk.Text(f, height=8, state="disabled")
+            self.helper_out.pack(fill="both", expand=True, pady=4)
+
+        def tab_reply(self, f):
+            ttk.Label(f, text=bi(
+                "IM shares your own nickname and chat selectors from Setup; only listed nicks can be answered.|"
+                "IM ใช้นิคของคุณและ selector จากหน้า Setup ร่วมกัน และตอบได้เฉพาะนิคในรายการ"),
+                foreground="#626d7a", wraplength=900).pack(anchor="w", pady=(0, 4))
+            columns = ttk.Frame(f)
+            columns.pack(fill="x")
+            left = ttk.LabelFrame(columns, text=bi("Private IM|แชทส่วนตัว"), padding=4)
+            left.pack(side="left", fill="x", expand=True, padx=(0, 6))
+            right = ttk.LabelFrame(columns, text=bi("Limits and safety|เพดานและความปลอดภัย"), padding=4)
+            right.pack(side="left", fill="x", expand=True)
+            self.field(left, "Enabled|เปิดใช้", ("autoreply_im", "enabled"), "bool")
+            self.field(left, "IM dry-run|ทดลองส่ง IM", ("autoreply_im", "dry_run"), "bool")
+            self.field(left, "Window title regex|regex ชื่อหน้าต่าง", ("autoreply_im", "window_title_regex"), width=30)
+            self.field(left, "Window kinds|ชนิดหน้าต่าง", ("autoreply_im", "log_kinds"), "list", width=20)
+            self.field(left, "Allowed nicknames|นิคที่อนุญาต", ("autoreply_im", "only_nicknames"), "list", width=30)
+            self.field(left, "Reply prefix|ข้อความนำหน้าคำตอบ", ("autoreply_im", "prefix"), width=24)
+            self.field(left, "Answer first new message|ตอบข้อความแรกของหน้าต่างใหม่", ("autoreply_im", "answer_first_message"), "bool")
+            self.field(left, "Ignore links|ข้ามข้อความที่มีลิงก์", ("autoreply_im", "ignore_links"), "bool")
+            self.field(right, "Max tracked windows (1-20)|จำนวนหน้าต่างสูงสุด", ("autoreply_im", "max_windows"), "int", width=7)
+            self.field(right, "Per-sender cooldown (s)|คูลดาวน์ต่อคน (วินาที)", ("autoreply_im", "per_sender_cooldown_seconds"), "int", width=8)
+            self.field(right, "Per-sender daily cap|เพดานต่อคนต่อวัน", ("autoreply_im", "max_per_sender_per_day"), "int", width=7)
+            self.field(right, "Global gap (s)|ระยะห่างทุกคำตอบ (วินาที)", ("autoreply_im", "global_min_gap_seconds"), "int", width=7)
+            self.field(right, "Max per hour|สูงสุดต่อชั่วโมง", ("autoreply_im", "max_per_hour"), "int", width=7)
+            self.field(right, "Delay range s (min, max)|หน่วงสุ่ม (ต่ำสุด, สูงสุด)", ("autoreply_im", "delay_range_seconds"), "pair", width=12)
+            self.field(right, "Max reply length|ความยาวคำตอบสูงสุด", ("autoreply_im", "max_reply_length"), "int", width=7)
+            self.field(right, "Max incoming length|ความยาวข้อความขาเข้าสูงสุด", ("autoreply_im", "max_incoming_length"), "int", width=7)
+            ttk.Label(f, text=bi(
+                "When IM is enabled, allow at least one nickname. Keep window kinds at im unless im-probe confirms mtim.|"
+                "เมื่อเปิด IM ต้องใส่นิคอย่างน้อยหนึ่งชื่อ ใช้ชนิดหน้าต่าง im จนกว่า im-probe จะยืนยัน mtim"),
+                foreground="#626d7a", wraplength=900).pack(anchor="w", pady=(2, 0))
+            rule_box = ttk.LabelFrame(f, text=bi("IM rules (first match wins)|กฎ IM (กฎแรกที่ตรงจะทำงาน)"), padding=4)
+            rule_box.pack(fill="both", expand=True, pady=(6, 2))
+            tf = ttk.Frame(rule_box)
+            tf.pack(fill="both", expand=True)
+            cols = ("n", "on", "lang", "men", "pat", "rep")
+            self.im_tree = ttk.Treeview(tf, columns=cols, show="headings", height=5, selectmode="browse")
+            for c, w, h in (("n", 30, "#"), ("on", 40, "on"), ("lang", 45, "lang"), ("men", 50, "@me"),
+                            ("pat", 300, "pattern"), ("rep", 380, "reply")):
+                self.im_tree.heading(c, text=h)
+                self.im_tree.column(c, width=w, anchor="w")
+            self.im_tree.pack(side="left", fill="both", expand=True)
+            self.im_tree.bind("<Double-1>", lambda _e: self.rule_edit())
+            bf = ttk.Frame(tf)
+            bf.pack(side="left", padx=6, anchor="n")
+            for txt, fn in (("Add|เพิ่ม", self.rule_add), ("Edit|แก้", self.rule_edit),
+                            ("Delete|ลบ", self.rule_del), ("Up|ขึ้น", lambda: self.rule_move(-1)),
+                            ("Down|ลง", lambda: self.rule_move(1))):
+                ttk.Button(bf, text=bi(txt), command=fn, width=8).pack(pady=1)
+            ttk.Label(f, text=bi("IM skip patterns (regex, one per line)|รูปแบบที่ข้ามใน IM (regex บรรทัดละอัน)")).pack(anchor="w")
+            self.textbox(f, 2, "t_im_skips").pack(fill="x")
+            tester = ttk.LabelFrame(f, text=bi("Private IM rule tester (offline)|ทดสอบกฎ IM (ออฟไลน์)"), padding=4)
+            tester.pack(fill="x", pady=(4, 0))
+            self.tin = tk.StringVar(value="zdevz")
+            self.tim = tk.StringVar(value="สวัสดีครับ")
+            self.im_tester_sender_entry = ttk.Entry(tester, textvariable=self.tin, width=14)
+            self.im_tester_sender_entry.pack(side="left")
+            entry = ttk.Entry(tester, textvariable=self.tim, width=42)
+            entry.pack(side="left", padx=4)
+            entry.bind("<Return>", lambda _e: self.test_im_rule())
+            ttk.Button(tester, text=bi("Test IM|ทดสอบ IM"), command=self.test_im_rule).pack(side="left")
+            self.tiout = ttk.Label(tester, text="", foreground="#28744c")
+            self.tiout.pack(side="left", padx=8)
+
+        def tab_advanced(self, f):
+            g = ttk.Frame(f)
+            g.pack(fill="x")
+            self.field(g, "Language|ภาษา", ("language",), "choice", ("auto", "th", "en"), 8)
+            self.field(g, "Poll seconds (0.2-60)|ความถี่ลูป", ("poll_seconds",), "float", width=8)
+            self.field(g, "Hot reload config|โหลดคอนฟิกใหม่เอง", ("reload_config",), "bool")
+            self.field(g, "Active hours only|ทำงานเฉพาะช่วงเวลา", ("active_hours", "enabled"), "bool")
+            self.field(g, "  start (HH:MM)|  เริ่ม", ("active_hours", "start"), width=8)
+            self.field(g, "  end (HH:MM)|  สิ้นสุด", ("active_hours", "end"), width=8)
+            self.field(g, "Require Camfrog foreground|ต้องอยู่หน้าสุดก่อนส่ง", ("safety", "require_foreground"), "bool")
+            self.field(g, "Restore previous window|คืนโฟกัสหลังส่ง", ("safety", "restore_previous_window"), "bool")
+            self.field(g, "Max consecutive failures|ล้มเหลวติดกันสูงสุด", ("safety", "max_consecutive_failures"), "int", width=6)
+            self.field(g, "Log level|ระดับล็อก", ("log", "level"), "choice", ("DEBUG", "INFO", "WARNING", "ERROR"), 10)
+            self.field(g, "Log chat text|เก็บเนื้อข้อความใน log", ("log", "log_message_text"), "bool",
+                       hint="off = privacy|ปิด = ความเป็นส่วนตัว")
+            self.field(g, "Stats enabled|เก็บสถิติ", ("stats", "enabled"), "bool")
+            row = ttk.Frame(f)
+            row.pack(fill="x", pady=10)
+            ttk.Button(row, text=bi("Start at Windows login|เริ่มเมื่อเข้า Windows"), command=lambda: self.helper("autostart-on")).pack(side="left")
+            ttk.Button(row, text=bi("Remove autostart|ยกเลิก autostart"), command=lambda: self.helper("autostart-off")).pack(side="left", padx=6)
+
+        # ---- config <-> widgets
+        @staticmethod
+        def _get(d, path):
+            for k in path:
+                d = d[k]
+            return d
+
+        @staticmethod
+        def _set(d, path, v):
+            for k in path[:-1]:
+                d = d[k]
+            d[path[-1]] = v
+
+        def load_ui(self):
+            d = self.draft
+            for path, kind, var, _lab in self.binds:
+                v = self._get(d, path)
+                if kind == "bool":
+                    var.set(bool(v))
+                elif kind == "live":
+                    var.set(not v)
+                elif kind in ("list", "pair"):
+                    var.set(", ".join(str(x) for x in v))
+                else:
+                    var.set(str(v))
+            for key, (vars_, _opt) in self.sel_vars.items():
+                for k, s in sel_to_strs(self._get(d, key)).items():
+                    vars_[k].set(s)
+            self.t_im_skips.insert("1.0", "\n".join(d["autoreply_im"]["skip_patterns"]))
+            self.im_rules = copy.deepcopy(d["autoreply_im"]["rules"])
+            self.rules_refresh()
+            for box in (self.t_im_skips,):
+                box.edit_modified(False)
+
+        def collect(self):
+            """Widgets -> new cfg dict. Returns (cfg, errors)."""
+            d, errs = copy.deepcopy(self.draft), []
+            for path, kind, var, lab in self.binds:
+                try:
+                    raw = var.get()
+                    if kind == "bool":
+                        v = bool(raw)
+                    elif kind == "live":
+                        v = not raw
+                    elif kind == "int":
+                        v = int(str(raw).strip())
+                    elif kind == "float":
+                        v = float(str(raw).strip())
+                    elif kind == "list":
+                        v = [x.strip() for x in str(raw).split(",") if x.strip()]
+                    elif kind == "pair":
+                        v = [float(x) for x in str(raw).split(",")]
+                        if len(v) != 2:
+                            raise ValueError("need 2 numbers")
+                    else:
+                        v = str(raw)
+                    self._set(d, path, v)
+                except ValueError:
+                    errs.append(f"{bi(lab)}: {bi('invalid value|ค่าไม่ถูกต้อง')}")
+            for key, (vars_, optional) in self.sel_vars.items():
+                try:
+                    self._set(d, key, strs_to_sel({k: v.get() for k, v in vars_.items()}, optional))
+                except ValueError:
+                    errs.append(f"{'.'.join(key)}: index")
+            d["autoreply_im"]["skip_patterns"] = [
+                x.strip() for x in self.t_im_skips.get("1.0", "end").splitlines() if x.strip()]
+            d["autoreply_im"]["rules"] = copy.deepcopy(self.im_rules)
+            return d, errs
+
+        # ---- actions
+        # ---- self-update from the GitHub release
+        def _confirm_update(self, tag):
+            from tkinter import messagebox
+            return messagebox.askyesno(
+                "Update available",
+                "Version " + tag + " is available (running " + APP_VERSION + ").\n"
+                "Download and install it now?", parent=self.root)
+
+        def check_update(self):
+            def do():
+                state, message = self_update("im-autoreply.exe", confirm=self._confirm_update)
+                print(message)
+                if state == "ready":
+                    print("restart the app to run the new version.")
+                return 0 if state in ("ready", "no-update") else 2
+            self.run_bg(do, "checked")
+
+        def auto_update_check(self):
+            """Silent banner at startup: only speak up when something is newer."""
+            def probe():
+                found = check_for_update("im-autoreply.exe")
+                print("update" if found else "none")
+                return 0
+            self.run_bg(probe, "auto-update")
+
+        def say(self, text, bad=False):
+            self.msg.configure(text=text, foreground="#a3303a" if bad else "#28744c")
+
+        def attach_autosave_hooks(self):
+            vars_ = [var for _path, _kind, var, _label in self.binds]
+            vars_.extend(v for group, _optional in self.sel_vars.values() for v in group.values())
+            for var in vars_:
+                trace_id = var.trace_add("write", self.schedule_autosave)
+                self._autosave_traces.append((var, trace_id))
+            for box in (self.t_im_skips,):
+                box.bind("<<Modified>>", self.text_changed)
+
+        def text_changed(self, event):
+            box = event.widget
+            if box.edit_modified():
+                box.edit_modified(False)
+                self.schedule_autosave()
+
+        def cancel_autosave(self):
+            if self._autosave_after is not None:
+                try:
+                    self.root.after_cancel(self._autosave_after)
+                except tk.TclError:
+                    pass
+                self._autosave_after = None
+
+        def schedule_autosave(self, *_args):
+            if not getattr(self, "auto_apply_var", None) or not self.auto_apply_var.get():
+                return
+            self.cancel_autosave()
+            self._autosave_after = self.root.after(700, self.auto_apply)
+
+        def auto_apply_toggled(self):
+            if self.auto_apply_var.get():
+                self.schedule_autosave()
+            else:
+                self.cancel_autosave()
+                self.say(bi("auto-apply paused|หยุดใช้ค่าอัตโนมัติแล้ว"))
+
+        def auto_apply(self):
+            self._autosave_after = None
+            if not self.auto_apply_var.get():
+                return
+            cfg, errs = self.collect()
+            if not errs:
+                errs, _warns = ConfigModel.check(cfg)
+            if errs:
+                self.say(bi("auto-apply waiting for valid config|รอคอนฟิกที่ถูกต้อง") + ": " + errs[0], True)
+                return
+            running = worker_is_running(self.model.cfg)
+            if autosave_needs_confirmation(cfg, running):
+                self.say(bi("LIVE bot running: press Save to confirm changes|บอทโหมดจริงกำลังทำงาน: กด Save เพื่อยืนยัน"), True)
+                return
+            if cfg == self.model.cfg:
+                return
+            try:
+                errs, warns = self.model.save(cfg)
+            except OSError as e:
+                log.error("Auto-apply failed while saving config: %s", activity_detail(e))
+                self.say(bi("auto-apply failed|ใช้ค่าอัตโนมัติไม่สำเร็จ") + f": {e}", True)
+                return
+            if errs:
+                self.say(bi("auto-apply waiting for valid config|รอคอนฟิกที่ถูกต้อง") + ": " + errs[0], True)
+                return
+            self.draft = copy.deepcopy(cfg)
+            setup_logging(cfg)
+            log.info(bi("Configuration auto-applied|ใช้ค่าและบันทึกคอนฟิกอัตโนมัติแล้ว"))
+            self.say(bi("auto-applied|ใช้ค่าและบันทึกแล้ว") + (f"  ({len(warns)} warning)" if warns else ""))
+            self.refresh_state()
+
+        def save(self):
+            self.cancel_autosave()
+            cfg, errs = self.collect()
+            if not errs:
+                running = worker_is_running(self.model.cfg)
+                if autosave_needs_confirmation(cfg, running) and cfg != self.model.cfg:
+                    ok = messagebox.askyesno(
+                        bi("Apply LIVE changes?|ใช้การเปลี่ยนแปลงในโหมดจริง?"),
+                        bi("The running bot may hot-reload these settings and send real messages. Apply them now?|"
+                           "บอทที่กำลังทำงานอาจโหลดค่านี้แล้วส่งข้อความจริง ต้องการใช้ค่าตอนนี้หรือไม่?"))
+                    if not ok:
+                        self.say(bi("not saved|ไม่ได้บันทึก"), True)
+                        return False
+                try:
+                    errs, warns = self.model.save(cfg)
+                except OSError as e:
+                    log.error("Configuration save failed: %s", activity_detail(e))
+                    messagebox.showerror(
+                        bi("Not saved|ไม่ได้บันทึก"),
+                        bi("Could not save the configuration: {error}|บันทึกคอนฟิกไม่ได้: {error}")
+                        .format(error=e))
+                    self.say(bi("not saved|ไม่ได้บันทึก"), True)
+                    return False
+            if errs:
+                messagebox.showerror(bi("Not saved|ไม่ได้บันทึก"), "\n".join(errs))
+                self.say(bi("not saved|ไม่ได้บันทึก"), True)
+                return False
+            self.draft = copy.deepcopy(cfg)
+            setup_logging(cfg)
+            log.info(bi("Configuration saved|บันทึกการตั้งค่าแล้ว"))
+            self.say(bi("saved|บันทึกแล้ว") + (f"  ({len(warns)} warning)" if warns else ""))
+            self.refresh_state()
+            return True
+
+        def reload(self):
+            self.cancel_autosave()
+            try:
+                self.draft = copy.deepcopy(self.model.load())
+                set_lang(resolve_lang(self.draft["language"]))
+                setup_logging(self.draft)
+            except Exception as e:
+                log.error("Configuration reload failed: %s", activity_detail(e))
+                messagebox.showerror(APP_NAME, t("cannot_load", e=e))
+                return
+            log.info(bi("Configuration reloaded from disk|โหลดคอนฟิกจากไฟล์แล้ว"))
+            self.build()
+
+        def check_cfg(self):
+            cfg, errs = self.collect()
+            e2, warns = ConfigModel.check(cfg) if not errs else ([], [])
+            lines = errs + e2 + [t("warn", m=w) for w in warns]
+            if lines:
+                log.warning("Configuration check: %s", activity_detail("; ".join(lines)))
+            else:
+                log.info(bi("Configuration check passed|ตรวจคอนฟิกผ่าน"))
+            messagebox.showinfo("check", "\n".join(lines) if lines else t("cfg_ok"))
+
+        def switch_lang(self):
+            cfg, errs = self.collect()
+            if not errs:
+                self.draft = cfg
+            self.draft["language"] = "en" if LANG == "th" else "th"
+            set_lang(self.draft["language"])
+            log_cfg = copy.deepcopy(self.model.cfg)
+            log_cfg["language"] = self.draft["language"]
+            setup_logging(log_cfg)
+            log.info(bi("GUI language changed to {language}|เปลี่ยนภาษา GUI เป็น {language}")
+                     .format(language=LANG))
+            self.build()
+
+        def live_toggled(self):
+            if not self.live_var.get():
+                return
+            ok = messagebox.askyesno(bi("Go LIVE?|เปลี่ยนเป็นโหมดจริง?"), bi(
+                "Messages WILL be sent to Camfrog. Check your room rules and Camfrog terms first.\nContinue?|"
+                "จะส่งข้อความไปยัง Camfrog จริง ตรวจกฎห้องและเงื่อนไข Camfrog ก่อน\nดำเนินการต่อ?"))
+            if not ok:
+                self.live_var.set(False)
+            log.info(bi("Live mode is {mode}|โหมดส่งจริง {mode}")
+                     .format(mode="enabled" if self.live_var.get() else "disabled"))
+            self.refresh_state()
+
+        def start(self, close=False):
+            self._close_after = close
+            if not self.save():
+                return
+            cfg = self.model.cfg
+            if not cfg["dry_run"] and not messagebox.askyesno(
+                    bi("LIVE|โหมดจริง"), bi("Start in LIVE mode (real messages)?|เริ่มโหมดจริง (ส่งข้อความจริง)?")):
+                return
+            args = SimpleNamespace(config=str(self.model.path), lang=None)
+            log.info(bi("Start requested (dry_run={mode})|ร้องขอเริ่ม worker (dry_run={mode})")
+                     .format(mode=cfg["dry_run"]))
+            self.run_bg(lambda: cmd_start(cfg, args), "start")
+
+        def stop(self):
+            log.info(bi("Stop requested|ร้องขอหยุด worker"))
+            self.run_bg(lambda: cmd_stop(self.model.cfg), "stop")
+
+        def emergency(self):
+            try:
+                (BASE / self.model.cfg["safety"]["stop_file"]).write_text("stop")
+                log.warning(bi("Emergency stop requested|ร้องขอหยุดฉุกเฉิน"))
+                self.say(bi("STOP file written|เขียนไฟล์ STOP แล้ว"))
+            except OSError as e:
+                log.error("Emergency stop request failed: %s", activity_detail(e))
+                messagebox.showerror("STOP", str(e))
+
+        def helper(self, cmd):
+            cfg, errs = self.collect()
+            if errs or ConfigModel.check(cfg)[0]:
+                messagebox.showerror(APP_NAME, "\n".join(errs or ConfigModel.check(cfg)[0]))
+                return
+            setup_logging(self.model.cfg)
+            fn = {"windows": lambda: cmd_windows(cfg), "discover": lambda: cmd_discover(cfg),
+                  "autostart-on": lambda: cmd_autostart(SimpleNamespace(config=str(self.model.path), lang=None), True),
+                  "autostart-off": lambda: cmd_autostart(SimpleNamespace(config=None, lang=None), False)}[cmd]
+            self.run_bg(fn, "helper")
+
+        def detect(self):
+            """Run detection and fill selectors; auto-apply saves valid proposals."""
+            cfg, errs = self.collect()
+            if errs or ConfigModel.check(cfg)[0]:
+                messagebox.showerror(APP_NAME, "\n".join(errs or ConfigModel.check(cfg)[0]))
+                return
+            setup_logging(self.model.cfg)
+            self.run_bg(lambda: cmd_detect(cfg, self.model.path, False, True), "detect")
+
+        def apply_proposal(self, out):
+            skipped = []
+            for proposal in iter_proposals(out):
+                _applied, missed = apply_proposal_to_vars(self.sel_vars, proposal)
+                for key in missed:
+                    try:
+                        self._set(self.draft, tuple(key.split(".")), proposal[key])
+                    except (KeyError, TypeError, AttributeError):
+                        pass
+                skipped += missed
+            return skipped
+
+        def run_bg(self, fn, kind):
+            if self.busy:
+                return
+            self.busy = True
+            log.info(bi("GUI action started: {kind}|เริ่มคำสั่ง GUI: {kind}").format(kind=kind))
+
+            def work():
+                buf = io.StringIO()
+                try:
+                    with contextlib.redirect_stdout(buf):
+                        rc = fn()
+                except ImportError:
+                    rc = 2
+                    buf.write(t("win_only"))
+                except Exception as e:  # shown in the GUI, never a traceback window
+                    rc = 1
+                    buf.write(f"{type(e).__name__}: {e}")
+                self.q.put((kind, rc, buf.getvalue().strip()))
+            self.say("...")
+            threading.Thread(target=work, daemon=True).start()
+
+        def pump(self):
+            if self._closing:
+                return
+            try:
+                while True:
+                    kind, rc, out = self.q.get_nowait()
+                    self.busy = False
+                    self.say(out.splitlines()[-1] if out else t("ok"), rc not in (0, None))
+                    detail = activity_detail(out)
+                    event = bi(
+                        "GUI action {kind} {result} (exit={code})|"
+                        "คำสั่ง GUI {kind} {result} (exit={code})")
+                    if detail:
+                        event += " | " + bi("detail={detail}|รายละเอียด={detail}")
+                    event = event.format(
+                        kind=kind,
+                        result="succeeded" if rc in (0, None) else "failed",
+                        code=rc, detail=detail)
+                    (log.info if rc in (0, None) else log.error)(event)
+                    if kind == "start" and rc == 0 and getattr(self, "_close_after", False):
+                        self.close_app()  # bot keeps running hidden; reopen the GUI any time
+                        return
+                    if kind == "checked" and rc == 0:
+                        self.say(out.splitlines()[-1] if out else "no update.")
+                        if "restart the app" in out:
+                            self.root.after(1200, self.close_app)
+                    if kind == "auto-update" and rc == 0:
+                        text = (out.splitlines()[-1] if out else "").strip()
+                        if text == "update":
+                            self.check_update()
+                    if kind in ("helper", "detect") and out:
+                        extra = ""
+                        if kind == "detect" and rc == 0:
+                            skipped = self.apply_proposal(out)
+                            if skipped:
+                                extra = "\n" + "\n".join(
+                                    bi("kept in config (no box in this app): {0}|"
+                                       "อยู่ใน config แล้ว (ไม่มีช่องในแอปนี้): {0}").format(k)
+                                    for k in skipped)
+                        self.set_text(self.helper_out, "\n".join(
+                            ln for ln in out.splitlines() if not ln.startswith("PROPOSAL ")) + extra)
+                    self.refresh_state()
+            except queue.Empty:
+                pass
+            if not self._closing:
+                self.root.after(150, self.pump)
+
+        @staticmethod
+        def set_text(widget, text):
+            widget.configure(state="normal")
+            widget.delete("1.0", "end")
+            widget.insert("1.0", text)
+            widget.configure(state="disabled")
+
+        def refresh_activity_log(self):
+            cfg = self.model.cfg
+            path = activity_log_path(cfg)
+            txt = tail_text(path) if path else ""
+            self.last_log = txt
+            if hasattr(self, "log_info"):
+                source = str(path) if path else bi(
+                    "file logging is disabled|ปิดการบันทึกลงไฟล์")
+                note = bi(
+                    "Log file: {path}. Message content follows Advanced → Log chat text.|"
+                    "ไฟล์ log: {path} เนื้อหาข้อความขึ้นอยู่กับ Advanced → Log chat text")
+                self.log_info.configure(text=note.format(path=source))
+            display = txt or bi(
+                "No activity entries yet, or file logging is disabled.|"
+                "ยังไม่มีรายการกิจกรรม หรือปิดการบันทึกลงไฟล์")
+            self.set_text(self.log, display)
+            self.log.see("end")
+
+        # ---- live state
+        def tick(self):
+            if self._closing:
+                return
+            self.refresh_state()
+            path = activity_log_path(self.model.cfg)
+            txt = tail_text(path) if path else ""
+            if txt != self.last_log:
+                self.refresh_activity_log()
+            if not self._closing:
+                self.root.after(1500, self.tick)
+
+        def refresh_state(self):
+            cfg = self.model.cfg
+            pid = running_pid(cfg)
+            running = bool(pid) or worker_mutex_active()
+            state = (t("state_running", pid=pid) if pid else
+                     t("state_running_unknown") if running else t("state_stopped"))
+            self.state_lbl.configure(text=state,
+                                     foreground="#28744c" if running else "#a3303a")
+            live = (not cfg["dry_run"]) if not hasattr(self, "live_var") else self.live_var.get()
+            self.mode_lbl.configure(text=bi("LIVE|โหมดจริง") if live else bi("DRY-RUN|โหมดทดลอง"),
+                                    foreground="#9f3740" if live else "#8b672b")
+            self.btn_start.state(["disabled"] if running else ["!disabled"])
+            self.btn_stop.state(["!disabled"] if running else ["disabled"])
+            s = read_stats(cfg)
+            self.stats_lbl.configure(text=t("stats_line", started=s.get("started", "?"), st=s.get("statuses", 0),
+                                               rp=s.get("replies", 0), fl=s.get("failures", 0)) if s else "")
+
+        # ---- rules
+        def _rule_parts(self, scope):
+            return self.im_tree, self.im_rules
+
+        def rules_refresh(self, select=None, scope="room"):
+            tree, rules = self._rule_parts(scope)
+            tree.delete(*tree.get_children())
+            for i, r in enumerate(rules):
+                th, en, anyl = reply_to_fields(r.get("reply"))
+                prev = (th or en or anyl).replace("\n", " / ")
+                tree.insert("", "end", iid=str(i), values=(
+                    i + 1, "" if r.get("enabled", True) else "off", r.get("lang", ""),
+                    "yes" if r.get("mention") else "", r.get("pattern", ""), prev))
+            if select is not None and rules:
+                tree.selection_set(str(min(select, len(rules) - 1)))
+
+        def sel_rule(self, scope="room"):
+            tree, _rules = self._rule_parts(scope)
+            selected = tree.selection()
+            return int(selected[0]) if selected else None
+
+        def rule_add(self, scope="room"):
+            rule = RuleDialog(self).result
+            if rule:
+                _tree, rules = self._rule_parts(scope)
+                rules.append(rule)
+                self.rules_refresh(len(rules) - 1, scope)
+                self.schedule_autosave()
+
+        def rule_edit(self, scope="room"):
+            i = self.sel_rule(scope)
+            if i is None:
+                return
+            _tree, rules = self._rule_parts(scope)
+            rule = RuleDialog(self, rules[i]).result
+            if rule:
+                rules[i] = rule
+                self.rules_refresh(i, scope)
+                self.schedule_autosave()
+
+        def rule_del(self, scope="room"):
+            i = self.sel_rule(scope)
+            if i is not None and messagebox.askyesno(bi("Delete|ลบ"), f"#{i + 1}?"):
+                _tree, rules = self._rule_parts(scope)
+                del rules[i]
+                self.rules_refresh(i, scope)
+                self.schedule_autosave()
+
+        def rule_move(self, d, scope="room"):
+            i = self.sel_rule(scope)
+            _tree, rules = self._rule_parts(scope)
+            if i is None or not 0 <= i + d < len(rules):
+                return
+            rules[i], rules[i + d] = rules[i + d], rules[i]
+            self.rules_refresh(i + d, scope)
+            self.schedule_autosave()
+
+        def test_im_rule(self):
+            cfg, errs = self.collect()
+            if errs:
+                self.tiout.configure(text=errs[0], foreground="#a3303a")
+                return
+            try:
+                result = explain(cfg, self.tin.get().strip(), self.tim.get(), im=True)
+                self.tiout.configure(text=result.replace("\n", "  |  "), foreground="#28744c")
+            except re.error as e:
+                self.tiout.configure(text=str(e), foreground="#a3303a")
+
+        def mainloop(self):
+            self.root.mainloop()
+
+    return App
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if has_cli_command(argv):  # CLI passthrough (also how `start` relaunches this exe)
+        return cli_main(argv)
+    try:
+        args = parse_gui_args(argv)
+    except SystemExit as exc:
+        return exc.code
+    if os.name == "nt":  # crisp text on Windows 11 high-DPI displays
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        except Exception:
+            pass
+    cfg_path = Path(args.config) if args.config else BASE / "config.json"
+    if not cfg_path.is_absolute():
+        cfg_path = BASE / cfg_path
+    cfg_path = cfg_path.resolve()
+    if APP_PROFILE == "im_reply":
+        try:
+            cfg_path.relative_to(BASE.resolve())
+        except ValueError:
+            print("This app's config must stay inside its own folder.")
+            return 2
+    try:
+        app = build_app()(cfg_path)
+    except SystemExit as e:
+        return e.code
+    except Exception as e:  # e.g. no display
+        print(f"GUI failed: {e}")
+        return 1
+    app.mainloop()
+    return 0
 
 
 # ---------- self-update from the GitHub release ----------
@@ -3642,5 +5062,3 @@ def stage_and_swap_update(url, asset_name, sums_url=None):
     return True, "update is staged; it will replace {0} after the app exits.".format(asset_name)
 
 
-if __name__ == "__main__":
-    sys.exit(main())

@@ -8,6 +8,7 @@ client and without another ZChat executable.
 from __future__ import annotations
 
 import tkinter as tk
+import tkinter.ttk as ttk
 
 import pytest
 from zchat_client.process_monitor import PM_TEXT, ProcessMonitorPage
@@ -24,11 +25,20 @@ def root():
         widget.destroy()
 
 
-def test_process_monitor_refresh_without_camfrog_never_raises(root) -> None:
+def test_process_monitor_refresh_without_camfrog_never_raises(root, monkeypatch) -> None:
+    from camfrog_windows_runtime import WindowsCamfrogProcessDiscovery
+
+    monkeypatch.setattr(
+        WindowsCamfrogProcessDiscovery,
+        "discover_processes",
+        lambda self: [],
+    )
+
     page = ProcessMonitorPage(root)
-    page.refresh()  # no Camfrog on CI: must fail closed, not raise
+    page.refresh()
+
     assert page.tree.get_children() == ()
-    assert page.status_text.get() != PM_TEXT["en"]["status_ready"]
+    assert page.status_text.get() == PM_TEXT["en"]["status_unavailable"]
 
 
 def test_process_monitor_language_toggle(root) -> None:
@@ -70,3 +80,53 @@ def test_agent_window_still_works_standalone(root) -> None:
     window = AgentChatWindow(root)
     assert window.server_url.get() == ""
     assert window.language.get() == "en"
+
+
+def test_icon_helper_windows_hosts_and_embedded_frames(root, monkeypatch, tmp_path) -> None:
+    """Exercise the Windows branch, including real Tk/Toplevel host types."""
+    from zchat_client import ui
+
+    icon = tmp_path / "app.ico"
+    icon.write_bytes(b"test-icon")
+    top = tk.Toplevel(root)
+    calls = []
+    try:
+        with monkeypatch.context() as m:
+            m.setattr(ui.sys, "platform", "win32")
+            m.setattr(ui, "_application_icon_path", lambda: icon)
+            m.setattr(root, "iconbitmap", lambda path: calls.append(("root", path)))
+            m.setattr(top, "iconbitmap", lambda path: calls.append(("top", path)))
+            ui._apply_application_icon(root)
+            ui._apply_application_icon(top)
+            ui._apply_application_icon(ttk.Frame(root))
+        assert calls == [("root", str(icon)), ("top", str(icon))]
+    finally:
+        top.destroy()
+
+
+def test_unified_shell_applies_icon_to_real_toplevel(root, monkeypatch) -> None:
+    from zchat_client import ui
+
+    calls = []
+    with monkeypatch.context() as m:
+        m.setattr(ui, "_apply_application_icon", lambda widget: calls.append(widget))
+        shell = UnifiedClientWindow(root)
+    assert root in calls
+    assert shell.agent_page.root in calls
+
+
+def test_agent_page_icon_is_skipped_on_embedded_frame(root) -> None:
+    """iconbitmap() is toplevel-only; an embedded ttk.Frame must not raise.
+
+    Regression for AttributeError: 'Frame' object has no attribute 'iconbitmap'
+    when AgentChatWindow is hosted inside UnifiedClientWindow.
+    """
+    shell = UnifiedClientWindow(root)
+    page = shell.agent_page
+    assert isinstance(page.root, (tk.Frame, ttk.Frame))
+    # Calling the icon helper directly on the embedded frame must be a no-op,
+    # not an AttributeError.
+    from zchat_client.ui import _apply_application_icon
+
+    _apply_application_icon(page.root)  # must not raise
+    _apply_application_icon(shell.container)  # must not raise

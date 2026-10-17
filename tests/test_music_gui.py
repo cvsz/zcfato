@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_module_has_no_project_imports():
     """The DJ exe is built from this single file: no sibling modules allowed."""
-    src = (ROOT / "camfrog_music_gui.py").read_text(encoding="utf-8")
+    src = (ROOT / "src" / "features" / "camfrog_music_gui.py").read_text(encoding="utf-8")
     for banned in ("import camfrog_auto", "import camfrog_gui", "import camfrog_status_gui",
                    "import camfrog_private_chat_gui", "import web_status_gui",
                    "from tools", "import tools", "import clipboard_support",

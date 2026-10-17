@@ -159,8 +159,22 @@ class SingleInstanceGuard:
         self.handle = None
 
 # ---------- Inlined Constants and Functions ----------
+def _source_base() -> Path:
+    """Repository root when running from a source checkout.
+
+    Source modules live under src/<area>/ while runtime data and example
+    configs live at the repository root (their pre-reorganization home).
+    Frozen executables and explicit *_DATA_DIR overrides are unaffected.
+    """
+    here = Path(__file__).resolve().parent
+    root = here.parent.parent
+    if here.parent.name == "src" and (root / "config.example.json").is_file():
+        return root
+    return here
+
+
 BASE = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) \
-    else Path(__file__).resolve().parent
+    else _source_base()
 
 STATUS_MODE = os.environ.get("ZCFATO_STATUS_MODE", "both").lower()
 if STATUS_MODE not in ("both", "random", "marquee"):
