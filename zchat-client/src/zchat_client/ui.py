@@ -207,7 +207,7 @@ def _apply_application_icon(root: tk.Widget) -> None:
         return
     # iconbitmap() is a toplevel-only call; embedding frames (e.g. inside
     # UnifiedClientWindow) have no such attribute and must not raise.
-    if not isinstance(root, tk.Tk):
+    if not isinstance(root, (tk.Tk, tk.Toplevel)):
         return
 
     icon_path = _application_icon_path()
@@ -1105,6 +1105,7 @@ class UnifiedClientWindow:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
+        _apply_application_icon(self.root)
         self.language = tk.StringVar(value="en")
         self._set_window_title(SHELL_TEXT["en"]["title"])
         try:
