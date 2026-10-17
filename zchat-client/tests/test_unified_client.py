@@ -25,9 +25,7 @@ def root():
         widget.destroy()
 
 
-def test_process_monitor_refresh_without_camfrog_never_raises(
-    root, monkeypatch
-) -> None:
+def test_process_monitor_refresh_without_camfrog_never_raises(root, monkeypatch) -> None:
     from camfrog_windows_runtime import WindowsCamfrogProcessDiscovery
 
     monkeypatch.setattr(
@@ -84,9 +82,7 @@ def test_agent_window_still_works_standalone(root) -> None:
     assert window.language.get() == "en"
 
 
-def test_icon_helper_windows_hosts_and_embedded_frames(
-    root, monkeypatch, tmp_path
-) -> None:
+def test_icon_helper_windows_hosts_and_embedded_frames(root, monkeypatch, tmp_path) -> None:
     """Exercise the Windows branch, including real Tk/Toplevel host types."""
     from zchat_client import ui
 
